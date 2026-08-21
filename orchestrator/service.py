@@ -16,8 +16,14 @@ from orchestrator.agents.registry import build_agent
 from orchestrator.autonomous import (
     AutonomousResult,
     DEFAULT_MAX_ITERATIONS,
+    DOD_BATCH_SIZE,
     parse_definition_of_done,
     run_autonomous_loop,
+)
+from orchestrator.autonomous_checkpoint import (
+    apply_checkpoint,
+    load_checkpoint,
+    save_checkpoint,
 )
 from orchestrator.claude_settings import ensure_project_claude_settings
 from orchestrator.config import Config, load_config
@@ -148,8 +154,38 @@ class OrchestratorService:
         agent = build_agent(agent_name or self.config.default_agent, self.config)
         run_id = new_task_id()
 
+        # Restore already-verified DoD progress from a previous, separate
+        # run of this exact project+spec (see autonomous_checkpoint.py) -
+        # never trusts an agent claim, only what an earlier run's own
+        # orchestrator-verified merge already persisted.
+        checkpoint = load_checkpoint(self.config.data_dir, project_dir, dod_source)
+        restored = apply_checkpoint(dod_items, checkpoint) if checkpoint else 0
+        if restored:
+            resume_batch = [idx for idx, item in enumerate(dod_items) if not item.done][:DOD_BATCH_SIZE]
+            self.logger.info(
+                "Autonomní běh %s: obnoveno %s/%s bodů Definition of Done z checkpointu projektu "
+                "'%s' (z běhu %s) - pokračuji dávkou bodů %s, ne od bodu 0",
+                run_id, restored, len(dod_items), entry.name, checkpoint.run_id, resume_batch,
+            )
+        elif checkpoint is not None:
+            # A checkpoint file exists but apply_checkpoint() refused it
+            # (item count/text mismatch despite a matching spec hash) -
+            # extremely unlikely, but must never silently misapply state.
+            self.logger.warning(
+                "Autonomní běh %s: checkpoint pro projekt '%s' nalezen, ale neodpovídá aktuálně "
+                "naparsované Definition of Done - ignoruji ho a začínám od bodu 0",
+                run_id, entry.name,
+            )
+
         def on_iteration(partial_result: AutonomousResult) -> None:
             write_autonomous_log(self.config.logs_dir, run_id, entry.name, goal_text, partial_result)
+            # Persisted after every iteration (not just at the end of the
+            # run) so this progress survives Ctrl+C, a session limit, or a
+            # crash - see autonomous_checkpoint.py module docstring.
+            save_checkpoint(
+                self.config.data_dir, project_dir, dod_source, goal_text,
+                partial_result.dod_items, run_id,
+            )
 
         result = run_autonomous_loop(
             run_id=run_id,
@@ -164,8 +200,10 @@ class OrchestratorService:
             auto_commit_requested=(self.config.git.auto_commit if auto_commit is None else auto_commit),
             on_iteration=on_iteration,
         )
+        result.restored_from_checkpoint = restored
 
         write_autonomous_log(self.config.logs_dir, run_id, entry.name, goal_text, result)
+        save_checkpoint(self.config.data_dir, project_dir, dod_source, goal_text, result.dod_items, run_id)
         self._write_autonomous_outbox(run_id, entry.name, goal_text, result)
         return run_id, result
 
@@ -182,6 +220,7 @@ class OrchestratorService:
             "committed": result.committed,
             "commit_hash": result.commit_hash,
             "error": result.error,
+            "restored_from_checkpoint": result.restored_from_checkpoint,
         }
         out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 

@@ -124,6 +124,11 @@ def cmd_autonomous(args: argparse.Namespace) -> int:
 def _print_autonomous_result(run_id: str, result) -> int:
     print(f"\n== Autonomní běh {run_id} - {result.status.value} ==")
     print(f"Iterací provedeno: {len(result.iterations)}")
+    if result.restored_from_checkpoint:
+        print(
+            f"Obnoveno z checkpointu předchozího běhu: {result.restored_from_checkpoint} bod(ů) "
+            "Definition of Done (běh nezačínal od bodu 0)."
+        )
     print("\n--- Definition of Done ---")
     for i, item in enumerate(result.dod_items):
         mark = "[x]" if item.done else "[ ]"

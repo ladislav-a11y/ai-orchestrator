@@ -150,6 +150,12 @@ class AutonomousResult:
     committed: bool = False
     commit_hash: Optional[str] = None
     error: Optional[str] = None
+    # How many DoD items were already done() at the very start of this run
+    # because a checkpoint from an earlier, separate run was restored (see
+    # autonomous_checkpoint.py / OrchestratorService.run_autonomous) - 0 for
+    # a run that started clean. Set by the caller after the loop returns;
+    # run_autonomous_loop itself has no knowledge of checkpoints.
+    restored_from_checkpoint: int = 0
 
 
 # -- Definition of Done parsing ---------------------------------------------
