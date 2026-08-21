@@ -1,0 +1,584 @@
+Autonomní běh 9cd54b5bf219
+projekt: station-agent
+cíl: Dotáhni Station Agent do první plně funkční verze v1 podle dod-station-agent-v1.md. Pracuj samostatně, implementuj chybějící části, spouštěj testy, opravuj chyby a pokračuj, dokud nebude checklist splněný nebo nebudeš skutečně zablokovaný externí závislostí či potřebou zásahu uživatele. Zachovej všechna bezpečnostní pravidla: nikdy PTT/TX, nikdy ovládání rotoru, IC-7300 pouze přes Hamlib/rigctld klienta, Log4OM2 pouze předvyplnit a nikdy automaticky neuložit QSO.
+stav: blocked
+
+--- Definition of Done ---
+[ ] 0. # Definition of Done — Station Agent v1 (první plně funkční verze)
+[ ] 1. ## GUI
+[ ] 2. Lokální webové GUI dostupné na `http://127.0.0.1:<port>` (výchozí `8765`)
+[ ] 3. Server se váže výhradně na `127.0.0.1`/loopback — nelze nakonfigurovat na `0.0.0.0` ani jinou externí adresu
+[ ] 4. ## Filtry módů
+[ ] 5. Filtr módu SSB
+[ ] 6. Filtr módu FT8
+[ ] 7. Filtr módu FT4
+[ ] 8. Filtr módu CW
+[ ] 9. Filtr módu RTTY
+[ ] 10. Filtr módu PSK31
+[ ] 11. Filtr módu PSK63
+[ ] 12. Filtr módu Other Digital
+[ ] 13. ## Filtry pásem
+[ ] 14. Filtr pásma 80 m
+[ ] 15. Filtr pásma 40 m
+[ ] 16. Filtr pásma 30 m
+[ ] 17. Filtr pásma 20 m
+[ ] 18. Filtr pásma 17 m
+[ ] 19. Filtr pásma 15 m
+[ ] 20. Filtr pásma 12 m
+[ ] 21. Filtr pásma 10 m
+[ ] 22. ## Zdroje spotů
+[ ] 23. Alespoň jeden DX zdroj má skutečně funkční živé připojení (ne jen mock/fixture parser) — `fetch()` reálně stahuje a parsuje živá data
+[ ] 24. Adaptér RBN je připravený (parser otestovaný na fixture datech) a explicitně označený jako pending, pokud živé připojení není ověřené
+[ ] 25. Adaptér PSKReporter je připravený (parser otestovaný na fixture datech) a explicitně označený jako pending, pokud živé připojení není ověřené
+[ ] 26. Agregace spotů z více zdrojů funguje (deduplikace/sloučení stejné stanice napříč zdroji)
+[ ] 27. Žádný adaptér nevrací vymyšlená/nafingovaná data tvářící se jako reálná odpověď — pending zdroje vyhazují jasnou chybu (např. `NotImplementedError`), nikoli tichý mock výstup
+[ ] 28. ## Skóre a zobrazované údaje
+[ ] 29. Transparentní skóre 0–100 pro každého kandidáta
+[ ] 30. Rozpis důvodů skóre (jednotlivé váhy/faktory viditelné v GUI, ne jen výsledné číslo)
+[ ] 31. Zobrazen callsign
+[ ] 32. Zobrazen DXCC / země
+[ ] 33. Zobrazena frekvence
+[ ] 34. Zobrazen mód
+[ ] 35. Zobrazena čerstvost spotu (stáří/timestamp)
+[ ] 36. Zobrazeny potvrzující zdroje (které adaptéry stanici viděly)
+[ ] 37. Zobrazeno skóre
+[ ] 38. Zobrazen bearing
+[ ] 39. Bearing je počítán z konfigurovaného QTH uživatele (locator nebo lat/lon)
+[ ] 40. ## AUTO TUNE
+[ ] 41. AUTO TUNE respektuje konfigurovatelné minimální skóre (`min_score`)
+[ ] 42. Funkce HOLD — když je aktivní, AUTO TUNE nikdy nepřeladí
+[ ] 43. Minimální doba držení (`min_hold_seconds`) — rig zůstává na stanici alespoň tuto dobu, než se zvažuje přeladění
+[ ] 44. Score delta (`min_score_delta`) — přeladění nastane jen pokud je nový kandidát o nakonfigurovaný rozdíl lepší než aktuální stanice
+[ ] 45. ## Ovládání rigu (IC-7300)
+[ ] 46. Rig je připojen výhradně jako klient k Hamlib/`rigctld` přes `localhost`/loopback a konfigurovatelný port
+[ ] 47. Nikde v kódu není přímé otevírání COM/sériového portu k rádiu
+[ ] 48. Změna frekvence probíhá výhradně přes Hamlib/`rigctld`
+[ ] 49. Změna módu probíhá výhradně přes Hamlib/`rigctld`
+[ ] 50. V celém zdrojovém stromu neexistuje žádná PTT ani TX funkce (ověřeno testem)
+[ ] 51. Rotor není nikde programově ovládán — pouze se počítá a zobrazuje bearing
+[ ] 52. ## Log4OM2
+[ ] 53. Log4OM2 integrace pouze předvyplní záznam QSO (UDP prefill packet)
+[ ] 54. Nikde neexistuje funkce, která by QSO automaticky uložila do deníku
+[ ] 55. ## Provozní režimy
+[ ] 56. Mock režim funguje bez rádia a bez internetu (mock zdroj spotů + mock rig)
+[ ] 57. Live režim (`rig.mode: live`, živé zdroje) je ve výchozí konfiguraci vypnutý a vyžaduje explicitní volbu uživatele
+[ ] 58. ## Perzistence
+[ ] 59. Spoty/stav se ukládají do SQLite
+[ ] 60. ## Konfigurace
+[ ] 61. Konfigurovatelné QTH (locator nebo lat/lon)
+[ ] 62. Konfigurovatelný `rigctld` host a port
+[ ] 63. Konfigurovatelný seznam povolených módů
+[ ] 64. Konfigurovatelný seznam povolených pásem
+[ ] 65. Konfigurovatelné minimální skóre pro AUTO TUNE
+[ ] 66. Konfigurovatelné zapnutí/vypnutí AUTO TUNE
+[ ] 67. Konfigurovatelný HOLD
+[ ] 68. Konfigurovatelná minimální doba držení (hold time)
+[ ] 69. Konfigurovatelná score delta
+[ ] 70. Konfigurovatelný Log4OM endpoint (host/port)
+[ ] 71. ## Testy
+[ ] 72. Existují bezpečnostní testy ověřující absenci PTT/TX funkcí v celém zdrojovém stromu
+[ ] 73. Všechny testy (`pytest` / `python -m unittest discover -s tests`) projdou bez chyby
+[ ] 74. Testy běží bez internetu a bez připojeného rádia (mock adaptéry)
+[ ] 75. ## Spuštění a dokumentace
+[ ] 76. Projekt se dá spustit jedním příkazem (např. `python -m station_agent --config config.yaml`)
+[ ] 77. README obsahuje přesný krok-za-krokem návod pro Windows 11
+[ ] 78. README obsahuje přesný návod na propojení s Log4OM2 (UDP prefill, port)
+[ ] 79. README obsahuje přesný návod na zapojení IC-7300 přes Hamlib/`rigctld` (instalace Hamlib, spuštění `rigctld` pro IC-7300, host/port, ověření spojení)
+
+=== iterace 1 ===
+testy prošly: None
+--- zadání agentovi ---
+Autonomní vývojová iterace 1/10.
+
+Cíl projektu: Dotáhni Station Agent do první plně funkční verze v1 podle dod-station-agent-v1.md. Pracuj samostatně, implementuj chybějící části, spouštěj testy, opravuj chyby a pokračuj, dokud nebude checklist splněný nebo nebudeš skutečně zablokovaný externí závislostí či potřebou zásahu uživatele. Zachovej všechna bezpečnostní pravidla: nikdy PTT/TX, nikdy ovládání rotoru, IC-7300 pouze přes Hamlib/rigctld klienta, Log4OM2 pouze předvyplnit a nikdy automaticky neuložit QSO.
+
+Definition of Done (podle poslední znalosti - over si to sám, agent se může mýlit):
+0. [NESPLNĚNO] # Definition of Done — Station Agent v1 (první plně funkční verze)
+1. [NESPLNĚNO] ## GUI
+2. [NESPLNĚNO] Lokální webové GUI dostupné na `http://127.0.0.1:<port>` (výchozí `8765`)
+3. [NESPLNĚNO] Server se váže výhradně na `127.0.0.1`/loopback — nelze nakonfigurovat na `0.0.0.0` ani jinou externí adresu
+4. [NESPLNĚNO] ## Filtry módů
+5. [NESPLNĚNO] Filtr módu SSB
+6. [NESPLNĚNO] Filtr módu FT8
+7. [NESPLNĚNO] Filtr módu FT4
+8. [NESPLNĚNO] Filtr módu CW
+9. [NESPLNĚNO] Filtr módu RTTY
+10. [NESPLNĚNO] Filtr módu PSK31
+11. [NESPLNĚNO] Filtr módu PSK63
+12. [NESPLNĚNO] Filtr módu Other Digital
+13. [NESPLNĚNO] ## Filtry pásem
+14. [NESPLNĚNO] Filtr pásma 80 m
+15. [NESPLNĚNO] Filtr pásma 40 m
+16. [NESPLNĚNO] Filtr pásma 30 m
+17. [NESPLNĚNO] Filtr pásma 20 m
+18. [NESPLNĚNO] Filtr pásma 17 m
+19. [NESPLNĚNO] Filtr pásma 15 m
+20. [NESPLNĚNO] Filtr pásma 12 m
+21. [NESPLNĚNO] Filtr pásma 10 m
+22. [NESPLNĚNO] ## Zdroje spotů
+23. [NESPLNĚNO] Alespoň jeden DX zdroj má skutečně funkční živé připojení (ne jen mock/fixture parser) — `fetch()` reálně stahuje a parsuje živá data
+24. [NESPLNĚNO] Adaptér RBN je připravený (parser otestovaný na fixture datech) a explicitně označený jako pending, pokud živé připojení není ověřené
+25. [NESPLNĚNO] Adaptér PSKReporter je připravený (parser otestovaný na fixture datech) a explicitně označený jako pending, pokud živé připojení není ověřené
+26. [NESPLNĚNO] Agregace spotů z více zdrojů funguje (deduplikace/sloučení stejné stanice napříč zdroji)
+27. [NESPLNĚNO] Žádný adaptér nevrací vymyšlená/nafingovaná data tvářící se jako reálná odpověď — pending zdroje vyhazují jasnou chybu (např. `NotImplementedError`), nikoli tichý mock výstup
+28. [NESPLNĚNO] ## Skóre a zobrazované údaje
+29. [NESPLNĚNO] Transparentní skóre 0–100 pro každého kandidáta
+30. [NESPLNĚNO] Rozpis důvodů skóre (jednotlivé váhy/faktory viditelné v GUI, ne jen výsledné číslo)
+31. [NESPLNĚNO] Zobrazen callsign
+32. [NESPLNĚNO] Zobrazen DXCC / země
+33. [NESPLNĚNO] Zobrazena frekvence
+34. [NESPLNĚNO] Zobrazen mód
+35. [NESPLNĚNO] Zobrazena čerstvost spotu (stáří/timestamp)
+36. [NESPLNĚNO] Zobrazeny potvrzující zdroje (které adaptéry stanici viděly)
+37. [NESPLNĚNO] Zobrazeno skóre
+38. [NESPLNĚNO] Zobrazen bearing
+39. [NESPLNĚNO] Bearing je počítán z konfigurovaného QTH uživatele (locator nebo lat/lon)
+40. [NESPLNĚNO] ## AUTO TUNE
+41. [NESPLNĚNO] AUTO TUNE respektuje konfigurovatelné minimální skóre (`min_score`)
+42. [NESPLNĚNO] Funkce HOLD — když je aktivní, AUTO TUNE nikdy nepřeladí
+43. [NESPLNĚNO] Minimální doba držení (`min_hold_seconds`) — rig zůstává na stanici alespoň tuto dobu, než se zvažuje přeladění
+44. [NESPLNĚNO] Score delta (`min_score_delta`) — přeladění nastane jen pokud je nový kandidát o nakonfigurovaný rozdíl lepší než aktuální stanice
+45. [NESPLNĚNO] ## Ovládání rigu (IC-7300)
+46. [NESPLNĚNO] Rig je připojen výhradně jako klient k Hamlib/`rigctld` přes `localhost`/loopback a konfigurovatelný port
+47. [NESPLNĚNO] Nikde v kódu není přímé otevírání COM/sériového portu k rádiu
+48. [NESPLNĚNO] Změna frekvence probíhá výhradně přes Hamlib/`rigctld`
+49. [NESPLNĚNO] Změna módu probíhá výhradně přes Hamlib/`rigctld`
+50. [NESPLNĚNO] V celém zdrojovém stromu neexistuje žádná PTT ani TX funkce (ověřeno testem)
+51. [NESPLNĚNO] Rotor není nikde programově ovládán — pouze se počítá a zobrazuje bearing
+52. [NESPLNĚNO] ## Log4OM2
+53. [NESPLNĚNO] Log4OM2 integrace pouze předvyplní záznam QSO (UDP prefill packet)
+54. [NESPLNĚNO] Nikde neexistuje funkce, která by QSO automaticky uložila do deníku
+55. [NESPLNĚNO] ## Provozní režimy
+56. [NESPLNĚNO] Mock režim funguje bez rádia a bez internetu (mock zdroj spotů + mock rig)
+57. [NESPLNĚNO] Live režim (`rig.mode: live`, živé zdroje) je ve výchozí konfiguraci vypnutý a vyžaduje explicitní volbu uživatele
+58. [NESPLNĚNO] ## Perzistence
+59. [NESPLNĚNO] Spoty/stav se ukládají do SQLite
+60. [NESPLNĚNO] ## Konfigurace
+61. [NESPLNĚNO] Konfigurovatelné QTH (locator nebo lat/lon)
+62. [NESPLNĚNO] Konfigurovatelný `rigctld` host a port
+63. [NESPLNĚNO] Konfigurovatelný seznam povolených módů
+64. [NESPLNĚNO] Konfigurovatelný seznam povolených pásem
+65. [NESPLNĚNO] Konfigurovatelné minimální skóre pro AUTO TUNE
+66. [NESPLNĚNO] Konfigurovatelné zapnutí/vypnutí AUTO TUNE
+67. [NESPLNĚNO] Konfigurovatelný HOLD
+68. [NESPLNĚNO] Konfigurovatelná minimální doba držení (hold time)
+69. [NESPLNĚNO] Konfigurovatelná score delta
+70. [NESPLNĚNO] Konfigurovatelný Log4OM endpoint (host/port)
+71. [NESPLNĚNO] ## Testy
+72. [NESPLNĚNO] Existují bezpečnostní testy ověřující absenci PTT/TX funkcí v celém zdrojovém stromu
+73. [NESPLNĚNO] Všechny testy (`pytest` / `python -m unittest discover -s tests`) projdou bez chyby
+74. [NESPLNĚNO] Testy běží bez internetu a bez připojeného rádia (mock adaptéry)
+75. [NESPLNĚNO] ## Spuštění a dokumentace
+76. [NESPLNĚNO] Projekt se dá spustit jedním příkazem (např. `python -m station_agent --config config.yaml`)
+77. [NESPLNĚNO] README obsahuje přesný krok-za-krokem návod pro Windows 11
+78. [NESPLNĚNO] README obsahuje přesný návod na propojení s Log4OM2 (UDP prefill, port)
+79. [NESPLNĚNO] README obsahuje přesný návod na zapojení IC-7300 přes Hamlib/`rigctld` (instalace Hamlib, spuštění `rigctld` pro IC-7300, host/port, ověření spojení)
+
+Aktuální stav projektu (git status --porcelain):
+A  .claude/settings.local.json
+A  .gitignore
+A  AGENTS.md
+A  ARCHITECTURE.md
+A  README.md
+A  config.example.yaml
+A  pyproject.toml
+A  requirements.txt
+A  station_agent/__init__.py
+A  station_agent/__main__.py
+A  station_agent/adapters/__init__.py
+A  station_agent/adapters/_common.py
+A  station_agent/adapters/base.py
+A  station_agent/adapters/dx_cluster.py
+A  station_agent/adapters/mock.py
+A  station_agent/adapters/pskreporter.py
+A  station_agent/adapters/rbn.py
+A  station_agent/aggregator.py
+A  station_agent/app_state.py
+A  station_agent/autotune.py
+A  station_agent/bandplan.py
+A  station_agent/bearing.py
+A  station_agent/cli.py
+A  station_agent/config.py
+A  station_agent/db.py
+A  station_agent/dxcc.py
+A  station_agent/log4om.py
+A  station_agent/models.py
+A  station_agent/modes.py
+A  station_agent/rig/__init__.py
+A  station_agent/rig/base.py
+A  station_agent/rig/mock_rig.py
+A  station_agent/rig/rigctld.py
+A  station_agent/scoring.py
+A  station_agent/web/__init__.py
+A  station_agent/web/serialization.py
+A  station_agent/web/server.py
+A  station_agent/web/static/app.js
+A  station_agent/web/static/index.html
+A  station_agent/web/static/style.css
+A  tests/__init__.py
+A  tests/test_adapters_mock.py
+A  tests/test_adapters_parsing.py
+A  tests/test_aggregator.py
+A  tests/test_autotune.py
+A  tests/test_bandplan.py
+A  tests/test_bearing.py
+A  tests/test_config.py
+A  tests/test_db.py
+A  tests/test_dxcc.py
+A  tests/test_log4om.py
+A  tests/test_models.py
+A  tests/test_modes.py
+A  tests/test_rig_mock.py
+A  tests/test_rig_rigctld.py
+A  tests/test_rig_safety.py
+A  tests/test_scoring.py
+A  tests/test_web_api.py
+?? .lh-harness/
+?? dod-station-agent-v1.md
+
+Uprav projekt tak, aby splnil co nejvíce NESPLNĚNÝCH bodů Definition of Done výše. Pokud testy z minulé iterace selhaly, nejdřív oprav příčinu selhání. Neměň nic, co s cílem a Definition of Done nesouvisí.
+
+Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný markdown blok, žádný text před ani za ním) přesně v tomto tvaru:
+{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], "notes": "strucne shrnuti pro pristi iteraci"}
+Pole items musí mít přesně 80 prvků, jeden pro každý bod výše (indexy 0..79), s upřímným vyhodnocením podle reálného stavu souborů a testů - ne podle úmyslu.
+
+--- výstup agenta ---
+{"items": [{"index": 0, "done": false}, {"index": 1, "done": true}, {"index": 2, "done": true}, {"index": 3, "done": true}, {"index": 4, "done": true}, {"index": 5, "done": true}, {"index": 6, "done": true}, {"index": 7, "done": true}, {"index": 8, "done": true}, {"index": 9, "done": true}, {"index": 10, "done": true}, {"index": 11, "done": true}, {"index": 12, "done": true}, {"index": 13, "done": true}, {"index": 14, "done": true}, {"index": 15, "done": true}, {"index": 16, "done": true}, {"index": 17, "done": true}, {"index": 18, "done": true}, {"index": 19, "done": true}, {"index": 20, "done": true}, {"index": 21, "done": true}, {"index": 22, "done": false}, {"index": 23, "done": false}, {"index": 24, "done": true}, {"index": 25, "done": true}, {"index": 26, "done": true}, {"index": 27, "done": true}, {"index": 28, "done": true}, {"index": 29, "done": true}, {"index": 30, "done": true}, {"index": 31, "done": true}, {"index": 32, "done": true}, {"index": 33, "done": true}, {"index": 34, "done": true}, {"index": 35, "done": true}, {"index": 36, "done": true}, {"index": 37, "done": true}, {"index": 38, "done": true}, {"index": 39, "done": true}, {"index": 40, "done": true}, {"index": 41, "done": true}, {"index": 42, "done": true}, {"index": 43, "done": true}, {"index": 44, "done": true}, {"index": 45, "done": true}, {"index": 46, "done": true}, {"index": 47, "done": true}, {"index": 48, "done": true}, {"index": 49, "done": true}, {"index": 50, "done": true}, {"index": 51, "done": true}, {"index": 52, "done": true}, {"index": 53, "done": true}, {"index": 54, "done": true}, {"index": 55, "done": true}, {"index": 56, "done": true}, {"index": 57, "done": true}, {"index": 58, "done": true}, {"index": 59, "done": true}, {"index": 60, "done": true}, {"index": 61, "done": true}, {"index": 62, "done": true}, {"index": 63, "done": true}, {"index": 64, "done": true}, {"index": 65, "done": true}, {"index": 66, "done": true}, {"index": 67, "done": true}, {"index": 68, "done": true}, {"index": 69, "done": true}, {"index": 70, "done": true}, {"index": 71, "done": false}, {"index": 72, "done": true}, {"index": 73, "done": false}, {"index": 74, "done": true}, {"index": 75, "done": true}, {"index": 76, "done": true}, {"index": 77, "done": true}, {"index": 78, "done": true}, {"index": 79, "done": true}], "notes": "Bash v teto sandbox session odmita spustit JAKYKOLI 'python -m ...'/'python -c ...'/skript ('This command requires approval', i pres allowlist v .claude/settings.local.json a i pres opakovane pokusy vcetne subagenta) -- jen 'python --version' projde. Nemohl jsem tedy spustit pytest ani zadny kod. Misto toho jsem rucne, radek po radku, protrasoval VSECHNY soubory v station_agent/ proti VSEM souborum v tests/ (config, modes, bandplan, models, dxcc, bearing, db, scoring, aggregator, autotune, rig/base+mock_rig+rigctld, log4om, web/server+serialization, adaptery + jejich parsery) -- logika sedi, zadny rozpor nenalezen, ale toto NENI nahrada za skutecne spusteni testu (index 73 proto oznaceno jako nesplnene, byt s vysokou durou konfidencí). Priorita pro pristi iteraci: zkusit znovu spustit `pytest`/`python -m unittest discover -s tests -v`; pokud bash blok pretrva, je treba to eskalovat uzivateli, protoze bez spusteni kodu nelze cely projekt doopravdy dokoncit ci verifikovat. Doplnil jsem do README.md tri chybejici sekce (cca 130 radku): krok-za-krokem instalace na Windows 11, zapojeni IC-7300 pres Hamlib/rigctld (instalace Hamlib, COM port, CI-V nastaveni radia, spusteni rigctld -m 3073, overeni pres rigctl), a propojeni s Log4OM2 (UDP port, config, overeni). DoD bod 23 (aspon jeden zivy DX zdroj se skutecnym fetch()) zustava zamerne PENDING -- AGENTS.md pravidlo 6 zakazuje oznacit adapter za 'live' bez overeni proti realnemu serveru a tato sandbox nema internet, takze to nejde ani implementovat s jistotou ani overit; nejschudnejsi kandidat pro pristi iteraci s internetem je PSKReporter (staci urllib, parser uz existuje a je otestovany na fixture datech v tests/test_adapters_parsing.py)."}
+
+[orchestrator] Claude odmítl 15 akci(í) kvůli oprávněním.
+
+poznámka: Agent nevrátil platný JSON stav Definition of Done, ponechávám předchozí stav.
+
+=== iterace 2 ===
+testy prošly: None
+--- zadání agentovi ---
+Autonomní vývojová iterace 2/10.
+
+Cíl projektu: Dotáhni Station Agent do první plně funkční verze v1 podle dod-station-agent-v1.md. Pracuj samostatně, implementuj chybějící části, spouštěj testy, opravuj chyby a pokračuj, dokud nebude checklist splněný nebo nebudeš skutečně zablokovaný externí závislostí či potřebou zásahu uživatele. Zachovej všechna bezpečnostní pravidla: nikdy PTT/TX, nikdy ovládání rotoru, IC-7300 pouze přes Hamlib/rigctld klienta, Log4OM2 pouze předvyplnit a nikdy automaticky neuložit QSO.
+
+Definition of Done (podle poslední znalosti - over si to sám, agent se může mýlit):
+0. [NESPLNĚNO] # Definition of Done — Station Agent v1 (první plně funkční verze)
+1. [NESPLNĚNO] ## GUI
+2. [NESPLNĚNO] Lokální webové GUI dostupné na `http://127.0.0.1:<port>` (výchozí `8765`)
+3. [NESPLNĚNO] Server se váže výhradně na `127.0.0.1`/loopback — nelze nakonfigurovat na `0.0.0.0` ani jinou externí adresu
+4. [NESPLNĚNO] ## Filtry módů
+5. [NESPLNĚNO] Filtr módu SSB
+6. [NESPLNĚNO] Filtr módu FT8
+7. [NESPLNĚNO] Filtr módu FT4
+8. [NESPLNĚNO] Filtr módu CW
+9. [NESPLNĚNO] Filtr módu RTTY
+10. [NESPLNĚNO] Filtr módu PSK31
+11. [NESPLNĚNO] Filtr módu PSK63
+12. [NESPLNĚNO] Filtr módu Other Digital
+13. [NESPLNĚNO] ## Filtry pásem
+14. [NESPLNĚNO] Filtr pásma 80 m
+15. [NESPLNĚNO] Filtr pásma 40 m
+16. [NESPLNĚNO] Filtr pásma 30 m
+17. [NESPLNĚNO] Filtr pásma 20 m
+18. [NESPLNĚNO] Filtr pásma 17 m
+19. [NESPLNĚNO] Filtr pásma 15 m
+20. [NESPLNĚNO] Filtr pásma 12 m
+21. [NESPLNĚNO] Filtr pásma 10 m
+22. [NESPLNĚNO] ## Zdroje spotů
+23. [NESPLNĚNO] Alespoň jeden DX zdroj má skutečně funkční živé připojení (ne jen mock/fixture parser) — `fetch()` reálně stahuje a parsuje živá data
+24. [NESPLNĚNO] Adaptér RBN je připravený (parser otestovaný na fixture datech) a explicitně označený jako pending, pokud živé připojení není ověřené
+25. [NESPLNĚNO] Adaptér PSKReporter je připravený (parser otestovaný na fixture datech) a explicitně označený jako pending, pokud živé připojení není ověřené
+26. [NESPLNĚNO] Agregace spotů z více zdrojů funguje (deduplikace/sloučení stejné stanice napříč zdroji)
+27. [NESPLNĚNO] Žádný adaptér nevrací vymyšlená/nafingovaná data tvářící se jako reálná odpověď — pending zdroje vyhazují jasnou chybu (např. `NotImplementedError`), nikoli tichý mock výstup
+28. [NESPLNĚNO] ## Skóre a zobrazované údaje
+29. [NESPLNĚNO] Transparentní skóre 0–100 pro každého kandidáta
+30. [NESPLNĚNO] Rozpis důvodů skóre (jednotlivé váhy/faktory viditelné v GUI, ne jen výsledné číslo)
+31. [NESPLNĚNO] Zobrazen callsign
+32. [NESPLNĚNO] Zobrazen DXCC / země
+33. [NESPLNĚNO] Zobrazena frekvence
+34. [NESPLNĚNO] Zobrazen mód
+35. [NESPLNĚNO] Zobrazena čerstvost spotu (stáří/timestamp)
+36. [NESPLNĚNO] Zobrazeny potvrzující zdroje (které adaptéry stanici viděly)
+37. [NESPLNĚNO] Zobrazeno skóre
+38. [NESPLNĚNO] Zobrazen bearing
+39. [NESPLNĚNO] Bearing je počítán z konfigurovaného QTH uživatele (locator nebo lat/lon)
+40. [NESPLNĚNO] ## AUTO TUNE
+41. [NESPLNĚNO] AUTO TUNE respektuje konfigurovatelné minimální skóre (`min_score`)
+42. [NESPLNĚNO] Funkce HOLD — když je aktivní, AUTO TUNE nikdy nepřeladí
+43. [NESPLNĚNO] Minimální doba držení (`min_hold_seconds`) — rig zůstává na stanici alespoň tuto dobu, než se zvažuje přeladění
+44. [NESPLNĚNO] Score delta (`min_score_delta`) — přeladění nastane jen pokud je nový kandidát o nakonfigurovaný rozdíl lepší než aktuální stanice
+45. [NESPLNĚNO] ## Ovládání rigu (IC-7300)
+46. [NESPLNĚNO] Rig je připojen výhradně jako klient k Hamlib/`rigctld` přes `localhost`/loopback a konfigurovatelný port
+47. [NESPLNĚNO] Nikde v kódu není přímé otevírání COM/sériového portu k rádiu
+48. [NESPLNĚNO] Změna frekvence probíhá výhradně přes Hamlib/`rigctld`
+49. [NESPLNĚNO] Změna módu probíhá výhradně přes Hamlib/`rigctld`
+50. [NESPLNĚNO] V celém zdrojovém stromu neexistuje žádná PTT ani TX funkce (ověřeno testem)
+51. [NESPLNĚNO] Rotor není nikde programově ovládán — pouze se počítá a zobrazuje bearing
+52. [NESPLNĚNO] ## Log4OM2
+53. [NESPLNĚNO] Log4OM2 integrace pouze předvyplní záznam QSO (UDP prefill packet)
+54. [NESPLNĚNO] Nikde neexistuje funkce, která by QSO automaticky uložila do deníku
+55. [NESPLNĚNO] ## Provozní režimy
+56. [NESPLNĚNO] Mock režim funguje bez rádia a bez internetu (mock zdroj spotů + mock rig)
+57. [NESPLNĚNO] Live režim (`rig.mode: live`, živé zdroje) je ve výchozí konfiguraci vypnutý a vyžaduje explicitní volbu uživatele
+58. [NESPLNĚNO] ## Perzistence
+59. [NESPLNĚNO] Spoty/stav se ukládají do SQLite
+60. [NESPLNĚNO] ## Konfigurace
+61. [NESPLNĚNO] Konfigurovatelné QTH (locator nebo lat/lon)
+62. [NESPLNĚNO] Konfigurovatelný `rigctld` host a port
+63. [NESPLNĚNO] Konfigurovatelný seznam povolených módů
+64. [NESPLNĚNO] Konfigurovatelný seznam povolených pásem
+65. [NESPLNĚNO] Konfigurovatelné minimální skóre pro AUTO TUNE
+66. [NESPLNĚNO] Konfigurovatelné zapnutí/vypnutí AUTO TUNE
+67. [NESPLNĚNO] Konfigurovatelný HOLD
+68. [NESPLNĚNO] Konfigurovatelná minimální doba držení (hold time)
+69. [NESPLNĚNO] Konfigurovatelná score delta
+70. [NESPLNĚNO] Konfigurovatelný Log4OM endpoint (host/port)
+71. [NESPLNĚNO] ## Testy
+72. [NESPLNĚNO] Existují bezpečnostní testy ověřující absenci PTT/TX funkcí v celém zdrojovém stromu
+73. [NESPLNĚNO] Všechny testy (`pytest` / `python -m unittest discover -s tests`) projdou bez chyby
+74. [NESPLNĚNO] Testy běží bez internetu a bez připojeného rádia (mock adaptéry)
+75. [NESPLNĚNO] ## Spuštění a dokumentace
+76. [NESPLNĚNO] Projekt se dá spustit jedním příkazem (např. `python -m station_agent --config config.yaml`)
+77. [NESPLNĚNO] README obsahuje přesný krok-za-krokem návod pro Windows 11
+78. [NESPLNĚNO] README obsahuje přesný návod na propojení s Log4OM2 (UDP prefill, port)
+79. [NESPLNĚNO] README obsahuje přesný návod na zapojení IC-7300 přes Hamlib/`rigctld` (instalace Hamlib, spuštění `rigctld` pro IC-7300, host/port, ověření spojení)
+
+Aktuální stav projektu (git status --porcelain):
+A  .claude/settings.local.json
+A  .gitignore
+A  AGENTS.md
+A  ARCHITECTURE.md
+AM README.md
+A  config.example.yaml
+A  pyproject.toml
+A  requirements.txt
+A  station_agent/__init__.py
+A  station_agent/__main__.py
+A  station_agent/adapters/__init__.py
+A  station_agent/adapters/_common.py
+A  station_agent/adapters/base.py
+A  station_agent/adapters/dx_cluster.py
+A  station_agent/adapters/mock.py
+A  station_agent/adapters/pskreporter.py
+A  station_agent/adapters/rbn.py
+A  station_agent/aggregator.py
+A  station_agent/app_state.py
+A  station_agent/autotune.py
+A  station_agent/bandplan.py
+A  station_agent/bearing.py
+A  station_agent/cli.py
+A  station_agent/config.py
+A  station_agent/db.py
+A  station_agent/dxcc.py
+A  station_agent/log4om.py
+A  station_agent/models.py
+A  station_agent/modes.py
+A  station_agent/rig/__init__.py
+A  station_agent/rig/base.py
+A  station_agent/rig/mock_rig.py
+A  station_agent/rig/rigctld.py
+A  station_agent/scoring.py
+A  station_agent/web/__init__.py
+A  station_agent/web/serialization.py
+A  station_agent/web/server.py
+A  station_agent/web/static/app.js
+A  station_agent/web/static/index.html
+A  station_agent/web/static/style.css
+A  tests/__init__.py
+A  tests/test_adapters_mock.py
+A  tests/test_adapters_parsing.py
+A  tests/test_aggregator.py
+A  tests/test_autotune.py
+A  tests/test_bandplan.py
+A  tests/test_bearing.py
+A  tests/test_config.py
+A  tests/test_db.py
+A  tests/test_dxcc.py
+A  tests/test_log4om.py
+A  tests/test_models.py
+A  tests/test_modes.py
+A  tests/test_rig_mock.py
+A  tests/test_rig_rigctld.py
+A  tests/test_rig_safety.py
+A  tests/test_scoring.py
+A  tests/test_web_api.py
+?? .lh-harness/
+?? dod-station-agent-v1.md
+
+Poznámka z předchozí iterace:
+Agent nevrátil platný JSON stav Definition of Done, ponechávám předchozí stav.
+
+Uprav projekt tak, aby splnil co nejvíce NESPLNĚNÝCH bodů Definition of Done výše. Pokud testy z minulé iterace selhaly, nejdřív oprav příčinu selhání. Neměň nic, co s cílem a Definition of Done nesouvisí.
+
+Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný markdown blok, žádný text před ani za ním) přesně v tomto tvaru:
+{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], "notes": "strucne shrnuti pro pristi iteraci"}
+Pole items musí mít přesně 80 prvků, jeden pro každý bod výše (indexy 0..79), s upřímným vyhodnocením podle reálného stavu souborů a testů - ne podle úmyslu.
+
+--- výstup agenta ---
+{"items": [{"index": 0, "done": false}, {"index": 1, "done": true}, {"index": 2, "done": true}, {"index": 3, "done": true}, {"index": 4, "done": true}, {"index": 5, "done": true}, {"index": 6, "done": true}, {"index": 7, "done": true}, {"index": 8, "done": true}, {"index": 9, "done": true}, {"index": 10, "done": true}, {"index": 11, "done": true}, {"index": 12, "done": true}, {"index": 13, "done": true}, {"index": 14, "done": true}, {"index": 15, "done": true}, {"index": 16, "done": true}, {"index": 17, "done": true}, {"index": 18, "done": true}, {"index": 19, "done": true}, {"index": 20, "done": true}, {"index": 21, "done": true}, {"index": 22, "done": false}, {"index": 23, "done": false}, {"index": 24, "done": true}, {"index": 25, "done": true}, {"index": 26, "done": true}, {"index": 27, "done": true}, {"index": 28, "done": true}, {"index": 29, "done": true}, {"index": 30, "done": true}, {"index": 31, "done": true}, {"index": 32, "done": true}, {"index": 33, "done": true}, {"index": 34, "done": true}, {"index": 35, "done": true}, {"index": 36, "done": true}, {"index": 37, "done": true}, {"index": 38, "done": true}, {"index": 39, "done": true}, {"index": 40, "done": true}, {"index": 41, "done": true}, {"index": 42, "done": true}, {"index": 43, "done": true}, {"index": 44, "done": true}, {"index": 45, "done": true}, {"index": 46, "done": true}, {"index": 47, "done": true}, {"index": 48, "done": true}, {"index": 49, "done": true}, {"index": 50, "done": true}, {"index": 51, "done": true}, {"index": 52, "done": true}, {"index": 53, "done": true}, {"index": 54, "done": true}, {"index": 55, "done": true}, {"index": 56, "done": true}, {"index": 57, "done": true}, {"index": 58, "done": true}, {"index": 59, "done": true}, {"index": 60, "done": true}, {"index": 61, "done": true}, {"index": 62, "done": true}, {"index": 63, "done": true}, {"index": 64, "done": true}, {"index": 65, "done": true}, {"index": 66, "done": true}, {"index": 67, "done": true}, {"index": 68, "done": true}, {"index": 69, "done": true}, {"index": 70, "done": true}, {"index": 71, "done": false}, {"index": 72, "done": true}, {"index": 73, "done": false}, {"index": 74, "done": true}, {"index": 75, "done": true}, {"index": 76, "done": true}, {"index": 77, "done": true}, {"index": 78, "done": true}, {"index": 79, "done": true}], "notes": "Stejny stav jako po iteraci 1 - repo je nezmenene (git status: jen README.md upraveny z minula, zadne stray soubory). Predchozi JSON zjevne neprosel parsovanim harnessu; tentokrat vracim odpoved OBSAHUJICI VYHRADNE JSON objekt bez jakehokoli doprovodneho textu. Bash v teto sandbox session STALE odmita spustit cokoli krome 'python --version' - 'python -m pytest', 'pytest --version', i 'where python' vraceji 'This command requires approval' bez ohledu na allowlist v .claude/settings.local.json (Bash(python:*), Bash(pytest:*) tam jsou, presto neprochazeji). Nelze tedy spustit testovaci sadu ani overit beh kodu; hodnoceni je zalozene na dukladne rucni statické kontrole (v iteraci 1 jsem rucne protrasoval vsechny soubory station_agent/ proti vsem testum v tests/, zadny rozpor nenalezen) - proto index 73 (vsechny testy prosly) oznacuji stale jako nesplnene, dokud to nepůjde skutecne spustit. Hlavni zbyvajici mezery: (1) index 23 - zadny DX zdroj nema overene zive pripojeni (vsechny adaptery jsou zamerne PENDING, coz vyzaduje AGENTS.md pravidlo 6 dokud neni overeno proti realnemu serveru; tato sandbox nema internet ani beh kodu, takze implementace+overeni neni mozne tuto ani minulou iteraci - realny externi blok). (2) index 73 - beh testu blokovan sandboxem. Doporuceni pro pristi iteraci: zkusit Bash pytest znovu (mozna se prostredi zmeni); pokud blok pretrva opakovane, doporucuji to explicitne nahlasit uzivateli jako potrebu lidskeho zasahu (schvaleni prikazu nebo zmena permission rezimu), protoze bez spusteni kodu nejde tento DoD bod (73) ani zivy DX zdroj (23) nikdy skutecne dokoncit v teto sandbox."}
+
+[orchestrator] Claude odmítl 3 akci(í) kvůli oprávněním.
+
+poznámka: Agent nevrátil platný JSON stav Definition of Done, ponechávám předchozí stav.
+
+=== iterace 3 ===
+testy prošly: None
+--- zadání agentovi ---
+Autonomní vývojová iterace 3/10.
+
+Cíl projektu: Dotáhni Station Agent do první plně funkční verze v1 podle dod-station-agent-v1.md. Pracuj samostatně, implementuj chybějící části, spouštěj testy, opravuj chyby a pokračuj, dokud nebude checklist splněný nebo nebudeš skutečně zablokovaný externí závislostí či potřebou zásahu uživatele. Zachovej všechna bezpečnostní pravidla: nikdy PTT/TX, nikdy ovládání rotoru, IC-7300 pouze přes Hamlib/rigctld klienta, Log4OM2 pouze předvyplnit a nikdy automaticky neuložit QSO.
+
+Definition of Done (podle poslední znalosti - over si to sám, agent se může mýlit):
+0. [NESPLNĚNO] # Definition of Done — Station Agent v1 (první plně funkční verze)
+1. [NESPLNĚNO] ## GUI
+2. [NESPLNĚNO] Lokální webové GUI dostupné na `http://127.0.0.1:<port>` (výchozí `8765`)
+3. [NESPLNĚNO] Server se váže výhradně na `127.0.0.1`/loopback — nelze nakonfigurovat na `0.0.0.0` ani jinou externí adresu
+4. [NESPLNĚNO] ## Filtry módů
+5. [NESPLNĚNO] Filtr módu SSB
+6. [NESPLNĚNO] Filtr módu FT8
+7. [NESPLNĚNO] Filtr módu FT4
+8. [NESPLNĚNO] Filtr módu CW
+9. [NESPLNĚNO] Filtr módu RTTY
+10. [NESPLNĚNO] Filtr módu PSK31
+11. [NESPLNĚNO] Filtr módu PSK63
+12. [NESPLNĚNO] Filtr módu Other Digital
+13. [NESPLNĚNO] ## Filtry pásem
+14. [NESPLNĚNO] Filtr pásma 80 m
+15. [NESPLNĚNO] Filtr pásma 40 m
+16. [NESPLNĚNO] Filtr pásma 30 m
+17. [NESPLNĚNO] Filtr pásma 20 m
+18. [NESPLNĚNO] Filtr pásma 17 m
+19. [NESPLNĚNO] Filtr pásma 15 m
+20. [NESPLNĚNO] Filtr pásma 12 m
+21. [NESPLNĚNO] Filtr pásma 10 m
+22. [NESPLNĚNO] ## Zdroje spotů
+23. [NESPLNĚNO] Alespoň jeden DX zdroj má skutečně funkční živé připojení (ne jen mock/fixture parser) — `fetch()` reálně stahuje a parsuje živá data
+24. [NESPLNĚNO] Adaptér RBN je připravený (parser otestovaný na fixture datech) a explicitně označený jako pending, pokud živé připojení není ověřené
+25. [NESPLNĚNO] Adaptér PSKReporter je připravený (parser otestovaný na fixture datech) a explicitně označený jako pending, pokud živé připojení není ověřené
+26. [NESPLNĚNO] Agregace spotů z více zdrojů funguje (deduplikace/sloučení stejné stanice napříč zdroji)
+27. [NESPLNĚNO] Žádný adaptér nevrací vymyšlená/nafingovaná data tvářící se jako reálná odpověď — pending zdroje vyhazují jasnou chybu (např. `NotImplementedError`), nikoli tichý mock výstup
+28. [NESPLNĚNO] ## Skóre a zobrazované údaje
+29. [NESPLNĚNO] Transparentní skóre 0–100 pro každého kandidáta
+30. [NESPLNĚNO] Rozpis důvodů skóre (jednotlivé váhy/faktory viditelné v GUI, ne jen výsledné číslo)
+31. [NESPLNĚNO] Zobrazen callsign
+32. [NESPLNĚNO] Zobrazen DXCC / země
+33. [NESPLNĚNO] Zobrazena frekvence
+34. [NESPLNĚNO] Zobrazen mód
+35. [NESPLNĚNO] Zobrazena čerstvost spotu (stáří/timestamp)
+36. [NESPLNĚNO] Zobrazeny potvrzující zdroje (které adaptéry stanici viděly)
+37. [NESPLNĚNO] Zobrazeno skóre
+38. [NESPLNĚNO] Zobrazen bearing
+39. [NESPLNĚNO] Bearing je počítán z konfigurovaného QTH uživatele (locator nebo lat/lon)
+40. [NESPLNĚNO] ## AUTO TUNE
+41. [NESPLNĚNO] AUTO TUNE respektuje konfigurovatelné minimální skóre (`min_score`)
+42. [NESPLNĚNO] Funkce HOLD — když je aktivní, AUTO TUNE nikdy nepřeladí
+43. [NESPLNĚNO] Minimální doba držení (`min_hold_seconds`) — rig zůstává na stanici alespoň tuto dobu, než se zvažuje přeladění
+44. [NESPLNĚNO] Score delta (`min_score_delta`) — přeladění nastane jen pokud je nový kandidát o nakonfigurovaný rozdíl lepší než aktuální stanice
+45. [NESPLNĚNO] ## Ovládání rigu (IC-7300)
+46. [NESPLNĚNO] Rig je připojen výhradně jako klient k Hamlib/`rigctld` přes `localhost`/loopback a konfigurovatelný port
+47. [NESPLNĚNO] Nikde v kódu není přímé otevírání COM/sériového portu k rádiu
+48. [NESPLNĚNO] Změna frekvence probíhá výhradně přes Hamlib/`rigctld`
+49. [NESPLNĚNO] Změna módu probíhá výhradně přes Hamlib/`rigctld`
+50. [NESPLNĚNO] V celém zdrojovém stromu neexistuje žádná PTT ani TX funkce (ověřeno testem)
+51. [NESPLNĚNO] Rotor není nikde programově ovládán — pouze se počítá a zobrazuje bearing
+52. [NESPLNĚNO] ## Log4OM2
+53. [NESPLNĚNO] Log4OM2 integrace pouze předvyplní záznam QSO (UDP prefill packet)
+54. [NESPLNĚNO] Nikde neexistuje funkce, která by QSO automaticky uložila do deníku
+55. [NESPLNĚNO] ## Provozní režimy
+56. [NESPLNĚNO] Mock režim funguje bez rádia a bez internetu (mock zdroj spotů + mock rig)
+57. [NESPLNĚNO] Live režim (`rig.mode: live`, živé zdroje) je ve výchozí konfiguraci vypnutý a vyžaduje explicitní volbu uživatele
+58. [NESPLNĚNO] ## Perzistence
+59. [NESPLNĚNO] Spoty/stav se ukládají do SQLite
+60. [NESPLNĚNO] ## Konfigurace
+61. [NESPLNĚNO] Konfigurovatelné QTH (locator nebo lat/lon)
+62. [NESPLNĚNO] Konfigurovatelný `rigctld` host a port
+63. [NESPLNĚNO] Konfigurovatelný seznam povolených módů
+64. [NESPLNĚNO] Konfigurovatelný seznam povolených pásem
+65. [NESPLNĚNO] Konfigurovatelné minimální skóre pro AUTO TUNE
+66. [NESPLNĚNO] Konfigurovatelné zapnutí/vypnutí AUTO TUNE
+67. [NESPLNĚNO] Konfigurovatelný HOLD
+68. [NESPLNĚNO] Konfigurovatelná minimální doba držení (hold time)
+69. [NESPLNĚNO] Konfigurovatelná score delta
+70. [NESPLNĚNO] Konfigurovatelný Log4OM endpoint (host/port)
+71. [NESPLNĚNO] ## Testy
+72. [NESPLNĚNO] Existují bezpečnostní testy ověřující absenci PTT/TX funkcí v celém zdrojovém stromu
+73. [NESPLNĚNO] Všechny testy (`pytest` / `python -m unittest discover -s tests`) projdou bez chyby
+74. [NESPLNĚNO] Testy běží bez internetu a bez připojeného rádia (mock adaptéry)
+75. [NESPLNĚNO] ## Spuštění a dokumentace
+76. [NESPLNĚNO] Projekt se dá spustit jedním příkazem (např. `python -m station_agent --config config.yaml`)
+77. [NESPLNĚNO] README obsahuje přesný krok-za-krokem návod pro Windows 11
+78. [NESPLNĚNO] README obsahuje přesný návod na propojení s Log4OM2 (UDP prefill, port)
+79. [NESPLNĚNO] README obsahuje přesný návod na zapojení IC-7300 přes Hamlib/`rigctld` (instalace Hamlib, spuštění `rigctld` pro IC-7300, host/port, ověření spojení)
+
+Aktuální stav projektu (git status --porcelain):
+A  .claude/settings.local.json
+A  .gitignore
+A  AGENTS.md
+A  ARCHITECTURE.md
+AM README.md
+A  config.example.yaml
+A  pyproject.toml
+A  requirements.txt
+A  station_agent/__init__.py
+A  station_agent/__main__.py
+A  station_agent/adapters/__init__.py
+A  station_agent/adapters/_common.py
+A  station_agent/adapters/base.py
+A  station_agent/adapters/dx_cluster.py
+A  station_agent/adapters/mock.py
+A  station_agent/adapters/pskreporter.py
+A  station_agent/adapters/rbn.py
+A  station_agent/aggregator.py
+A  station_agent/app_state.py
+A  station_agent/autotune.py
+A  station_agent/bandplan.py
+A  station_agent/bearing.py
+A  station_agent/cli.py
+A  station_agent/config.py
+A  station_agent/db.py
+A  station_agent/dxcc.py
+A  station_agent/log4om.py
+A  station_agent/models.py
+A  station_agent/modes.py
+A  station_agent/rig/__init__.py
+A  station_agent/rig/base.py
+A  station_agent/rig/mock_rig.py
+A  station_agent/rig/rigctld.py
+A  station_agent/scoring.py
+A  station_agent/web/__init__.py
+A  station_agent/web/serialization.py
+A  station_agent/web/server.py
+A  station_agent/web/static/app.js
+A  station_agent/web/static/index.html
+A  station_agent/web/static/style.css
+A  tests/__init__.py
+A  tests/test_adapters_mock.py
+A  tests/test_adapters_parsing.py
+A  tests/test_aggregator.py
+A  tests/test_autotune.py
+A  tests/test_bandplan.py
+A  tests/test_bearing.py
+A  tests/test_config.py
+A  tests/test_db.py
+A  tests/test_dxcc.py
+A  tests/test_log4om.py
+A  tests/test_models.py
+A  tests/test_modes.py
+A  tests/test_rig_mock.py
+A  tests/test_rig_rigctld.py
+A  tests/test_rig_safety.py
+A  tests/test_scoring.py
+A  tests/test_web_api.py
+?? .lh-harness/
+?? dod-station-agent-v1.md
+
+Poznámka z předchozí iterace:
+Agent nevrátil platný JSON stav Definition of Done, ponechávám předchozí stav.
+
+Uprav projekt tak, aby splnil co nejvíce NESPLNĚNÝCH bodů Definition of Done výše. Pokud testy z minulé iterace selhaly, nejdřív oprav příčinu selhání. Neměň nic, co s cílem a Definition of Done nesouvisí.
+
+Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný markdown blok, žádný text před ani za ním) přesně v tomto tvaru:
+{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], "notes": "strucne shrnuti pro pristi iteraci"}
+Pole items musí mít přesně 80 prvků, jeden pro každý bod výše (indexy 0..79), s upřímným vyhodnocením podle reálného stavu souborů a testů - ne podle úmyslu.
+
+--- výstup agenta ---
+{"items": [{"index": 0, "done": false}, {"index": 1, "done": true}, {"index": 2, "done": true}, {"index": 3, "done": true}, {"index": 4, "done": true}, {"index": 5, "done": true}, {"index": 6, "done": true}, {"index": 7, "done": true}, {"index": 8, "done": true}, {"index": 9, "done": true}, {"index": 10, "done": true}, {"index": 11, "done": true}, {"index": 12, "done": true}, {"index": 13, "done": true}, {"index": 14, "done": true}, {"index": 15, "done": true}, {"index": 16, "done": true}, {"index": 17, "done": true}, {"index": 18, "done": true}, {"index": 19, "done": true}, {"index": 20, "done": true}, {"index": 21, "done": true}, {"index": 22, "done": false}, {"index": 23, "done": false}, {"index": 24, "done": true}, {"index": 25, "done": true}, {"index": 26, "done": true}, {"index": 27, "done": true}, {"index": 28, "done": true}, {"index": 29, "done": true}, {"index": 30, "done": true}, {"index": 31, "done": true}, {"index": 32, "done": true}, {"index": 33, "done": true}, {"index": 34, "done": true}, {"index": 35, "done": true}, {"index": 36, "done": true}, {"index": 37, "done": true}, {"index": 38, "done": true}, {"index": 39, "done": true}, {"index": 40, "done": true}, {"index": 41, "done": true}, {"index": 42, "done": true}, {"index": 43, "done": true}, {"index": 44, "done": true}, {"index": 45, "done": true}, {"index": 46, "done": true}, {"index": 47, "done": true}, {"index": 48, "done": true}, {"index": 49, "done": true}, {"index": 50, "done": true}, {"index": 51, "done": true}, {"index": 52, "done": true}, {"index": 53, "done": true}, {"index": 54, "done": true}, {"index": 55, "done": true}, {"index": 56, "done": true}, {"index": 57, "done": true}, {"index": 58, "done": true}, {"index": 59, "done": true}, {"index": 60, "done": true}, {"index": 61, "done": true}, {"index": 62, "done": true}, {"index": 63, "done": true}, {"index": 64, "done": true}, {"index": 65, "done": true}, {"index": 66, "done": true}, {"index": 67, "done": true}, {"index": 68, "done": true}, {"index": 69, "done": true}, {"index": 70, "done": true}, {"index": 71, "done": false}, {"index": 72, "done": true}, {"index": 73, "done": false}, {"index": 74, "done": true}, {"index": 75, "done": true}, {"index": 76, "done": true}, {"index": 77, "done": true}, {"index": 78, "done": true}, {"index": 79, "done": true}], "notes": "Repo nezmeneno od iterace 2 (jen README.md rozsireno). Bash stale blokuje python -m / pytest / where ('requires approval'), nelze spustit testy. Zbyva: 23 (zadny live DX zdroj neni overeny - potreba internet+beh kodu), 73 (testy nelze spustit v teto sandbox). Kod rucne overen ctenim, logika sedi."}
+
+[orchestrator] Claude odmítl 1 akci(í) kvůli oprávněním.
+
+poznámka: Agent nevrátil platný JSON stav Definition of Done, ponechávám předchozí stav.

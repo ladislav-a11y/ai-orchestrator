@@ -55,9 +55,13 @@ this file, stop and ask - do not silently override safety rules.
    forever.** `run_autonomous_loop` hard-clamps `max_iterations` to
    `ABSOLUTE_MAX_ITERATIONS` regardless of what a caller/CLI flag requests,
    and stops (status `blocked`) after `NO_PROGRESS_LIMIT` consecutive
-   iterations with an unchanged (unmet Definition-of-Done items, test
-   result) signature. Do not remove either cap, and do not add a "retry
-   forever" or "ignore the cap" option.
+   *verified* iterations with an unchanged (unmet Definition-of-Done items,
+   test result) signature - an iteration with a protocol error (unparsable/
+   incomplete agent JSON) or a missing test result despite a configured test
+   command does not count towards this (see `_apply_dod_updates` and
+   ARCHITECTURE.md), so a confused agent gets a real chance to recover
+   instead of being falsely declared stuck. Do not remove either cap, and do
+   not add a "retry forever" or "ignore the cap" option.
 
 ## When adding a new agent/provider (e.g. OpenAI Codex)
 

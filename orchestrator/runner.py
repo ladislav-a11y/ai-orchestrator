@@ -25,6 +25,13 @@ def tail_text(text: str, limit: int = MAX_LOG_TAIL_CHARS) -> str:
 
 
 def run_test_command(project_path: Path, test_command: str, logger: logging.Logger) -> tuple[bool, str]:
+    """Run the project's test command and report a definite pass/fail.
+
+    Always returns an actual bool for "passed" - never None - so callers
+    (notably the autonomous loop) can rely on `tests_passed is True/False`
+    being a real, verified result whenever a test command was configured,
+    instead of having to treat "no result" as a silently-skipped state.
+    """
     logger.info("Spouštím testy: %s", test_command)
     try:
         proc = subprocess.run(
@@ -39,6 +46,8 @@ def run_test_command(project_path: Path, test_command: str, logger: logging.Logg
         )
     except subprocess.TimeoutExpired:
         return False, f"Testy nedoběhly do {TEST_TIMEOUT_SECONDS}s (timeout)."
+    except OSError as e:
+        return False, f"Testovací příkaz se nepodařilo spustit: {e}"
     output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
     return proc.returncode == 0, output.strip()
 

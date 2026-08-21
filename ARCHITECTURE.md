@@ -132,22 +132,32 @@ projekt + cíl + Definition of Done
     |          agenta z minulé iterace
     |       2. spusť agenta (stejné `Agent.run()` rozhraní jako `runner.py`,
     |          session se navazuje přes `--resume`)
-    |       3. spusť testy, pokud je nastavený test_command (stejná funkce
-    |          `runner.run_test_command`)
+    |       3. spusť testy - pokud má projekt/config nastavený test_command,
+    |          spustí se vždy (stejná funkce `runner.run_test_command`, která
+    |          vždy vrátí skutečný bool, nikdy None); pokud test_command
+    |          nastavený není, `_detect_test_command()` se pokusí odhadnout
+    |          rozumný výchozí příkaz (`python -m pytest -q`, jen pokud
+    |          projekt vypadá jako Python projekt se skutečnou složkou
+    |          `tests/`) - `tests_passed=None` zůstává jen pro projekty, kde
+    |          žádný testovací příkaz skutečně nedává smysl ani po této
+    |          detekci
     |       4. agent ve své poslední zprávě vrátí JSON s vyhodnocením, které
     |          body DoD jsou už splněné - orchestrátor to napárovuje na
-    |          seznam DoD položek (`_apply_dod_updates`)
+    |          seznam DoD položek (`_apply_dod_updates`), viz "Kontrakt
+    |          agent <-> orchestrátor" níže
     |       5. zaloguj iteraci (logger + průběžný soubor
     |          logs/autonomous/<id>.log)
     |
     +--> completed:  všechny body DoD splněné A testy prošly (nebo žádné
-    |                 testy nejsou nastavené) -> pokus o Git commit za
-    |                 stejných podmínek jako `runner._maybe_commit`
+    |                 testy nejsou nastavené/detekované) -> pokus o Git
+    |                 commit za stejných podmínek jako `runner._maybe_commit`
     |                 (auto_commit zapnutý, testy neselhaly, je co
     |                 commitnout)
-    +--> blocked:     stejný stav (stejné nesplněné body DoD + stejný
-    |                 výsledek testů) se opakuje `NO_PROGRESS_LIMIT`
-    |                 (3) iterací po sobě bez posunu
+    +--> blocked:     stejný OVĚŘENÝ stav (stejné nesplněné body DoD + stejný
+    |                 skutečně naměřený výsledek testů) se opakuje
+    |                 `NO_PROGRESS_LIMIT` (3) iterací po sobě bez posunu -
+    |                 iterace s protokolovou chybou (viz níže) se do této
+    |                 detekce nezapočítávají
     +--> max_iterations: vyčerpán limit iterací, DoD stále nesplněná
     +--> error:       samotné volání agenta selhalo (chyba/timeout) - loop
                       se hned zastaví, nezkouší to slepě znovu
@@ -156,11 +166,17 @@ projekt + cíl + Definition of Done
 ### Definition of Done
 
 Uživatel zadá `--goal` (volný text, kontext cíle) a/nebo `--spec` (cesta k
-souboru s DoD). `parse_definition_of_done()` v `autonomous.py` rozseká text
-na jednotlivé položky: rozpozná checklist (`- [ ] ...` / `- [x] ...` -
-stav zaškrtnutí se stane počátečním stavem položky), odrážky (`- ...`) i
-číslované seznamy; jinak je každý neprázdný řádek jedna položka. Bez `--spec`
-se jako DoD použije samotný `--goal`.
+souboru s DoD). `parse_definition_of_done()` v `autonomous.py` bere jako
+položku DoD VÝHRADNĚ řádky ve tvaru checklistu (`- [ ] ...` / `- [x] ...`,
+i s `*` místo `-` - stav zaškrtnutí se stane počátečním stavem položky).
+Markdown nadpisy (`# ...`, `## ...`), prázdné řádky a jakýkoli jiný text se
+NIKDY nestanou položkou - reálný spec soubor jako `dod-station-agent-v1.md`
+kombinuje nadpisy sekcí s checklistem a nadpis nemůže být nikdy "splněný";
+kdyby se parsoval jako položka, DoD by nikdy nemohla být kompletně splněná
+(přesně tohle způsobilo, že běh `9cd54b5bf219` skončil jako `blocked`, viz
+git historie/commit message opravy). Spec bez jediného checklist řádku
+(typicky samotný `--goal` bez `--spec`) padá zpět na jednu položku, která
+drží celý text, takže i běh jen s `--goal` má vždy >=1 položku.
 
 ### Kontrakt agent <-> orchestrátor (JSON vyhodnocení)
 
@@ -169,19 +185,40 @@ splněné, než se zeptat samotného agenta, každý prompt v `_build_iteration_
 explicitně žádá, aby úplně poslední zpráva agenta byla výhradně jeden JSON
 objekt tvaru `{"items": [{"index": 0, "done": true}, ...], "notes": "..."}`
 - jeden záznam pro každou DoD položku. `_extract_json` to parsuje (i přes
-případný markdown blok), `_apply_dod_updates` promítne výsledek do stavu.
-Pokud agent JSON nevrátí nebo je neplatný, stav DoD se pro tuto iteraci
-nezmění (a poznámka se zaloguje) - to typicky samo vede k detekci "bez
-pokroku" níže, místo tichého selhání.
+případný markdown blok), `_apply_dod_updates` promítne výsledek do stavu -
+ale nikdy mu neslepě nevěří:
+
+- **Merge je monotónní.** Položka jednou ověřená jako splněná (`done=True`)
+  už nemůže být pozdější (méně pečlivou) odpovědí agenta vrácena zpátky na
+  nesplněnou - `done = puvodni_done or tvrzeni_agenta`. Skutečně splněno
+  napříč iteracemi zůstává zachováno.
+- **Neplatný/neúplný JSON je "protocol error", ne "no progress".** Pokud
+  odpověď není JSON, nemá pole `items`, má jiný počet položek než DoD, nebo
+  obsahuje položku se špatným/mimo rozsah indexem, `_apply_dod_updates`
+  vrátí `protocol_error=True` a do poznámky pro příští iteraci přidá
+  konkrétní hint, co bylo špatně - agent dostane šanci to v další iteraci
+  opravit. `IterationLog.protocol_error` to zaznamená i do
+  `outbox/autonomous-<id>.json` pro dohledatelnost.
+- **Finální "completed" stav nezávisí na tvrzení agenta o testech.** I když
+  agent v JSON tvrdí, že testy prošly, `completed` se rozhoduje podle
+  skutečného `tests_passed` z orchestrátorova vlastního spuštění testů
+  (bod 3 výše), ne podle agentova textu.
 
 ### Detekce "bez pokroku" (blocked)
 
 `_iteration_signature()` spočítá otisk z (nesplněné body DoD, výsledek
-testů, konec výstupu testů). Pokud se otisk `NO_PROGRESS_LIMIT` (3) iterací
-po sobě nezmění, běh se ukončí jako `blocked` - to je jediný způsob, jak
-orchestrátor pozná "stejná chyba/stejný stav pořád dokola", protože sám
-neumí posoudit, jestli je oprava kódu skutečně jiná, jen že se vnější stav
-(DoD + testy) neposunul.
+testů, konec výstupu testů) - ale tato detekce se počítá jen pro iterace se
+skutečně ověřitelným stavem. Iterace, kde `_apply_dod_updates` vrátila
+`protocol_error=True`, nebo kde je nastavený test_command a `tests_passed`
+přesto vyšlo `None` (nemělo by nastat po opravě z run 9cd54b5bf219, ale
+kontrola zůstává jako pojistka), se do porovnání vůbec nezapočítá - ani
+jako "stejný stav", ani jako reset čítače. Teprve pokud se otisk
+`NO_PROGRESS_LIMIT` (3) OVĚŘENÝCH iterací po sobě nezmění, běh se ukončí
+jako `blocked`. Bez tohoto rozlišení by tři po sobě jdoucí nezparsovatelné
+odpovědi agenta (nebo tři iterace bez skutečně spuštěných testů) vypadaly
+jako "stejná chyba pořád dokola", i když orchestrátor ve skutečnosti žádný
+srovnatelný signál nezískal - přesně tato záměna byla druhou příčinou toho,
+že běh `9cd54b5bf219` skončil jako `blocked` misto pokračování/max_iterations.
 
 ### Logování
 

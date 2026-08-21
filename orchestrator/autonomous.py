@@ -11,9 +11,19 @@ AGENTS.md):
     can never run "forever" no matter what a caller passes in.
   - if the same (unmet Definition-of-Done items, test result) signature
     repeats `NO_PROGRESS_LIMIT` iterations in a row, the loop stops and is
-    reported as `blocked` instead of silently looping.
+    reported as `blocked` instead of silently looping. Only iterations with
+    a verified, comparable state count towards this - an iteration where the
+    agent's JSON was unparsable/incomplete, or where a configured test
+    command was somehow not actually run, is recorded as a protocol error
+    and excluded from the no-progress comparison instead of being treated as
+    "no progress" (see `_apply_dod_updates` and the `protocol_error`
+    handling in `run_autonomous_loop`).
   - a commit is only ever attempted when every Definition of Done item is
     marked done AND the test command (if any) passed on that same iteration.
+  - Definition-of-Done items are only ever parsed from explicit checklist
+    lines (`- [ ] ...` / `- [x] ...`); once an item is verified done by the
+    orchestrator's own merge, a later agent claim can never un-mark it (see
+    `parse_definition_of_done` and `_apply_dod_updates`).
 """
 
 from __future__ import annotations
@@ -69,6 +79,7 @@ class IterationLog:
     test_output: Optional[str]
     dod_snapshot: list[dict]
     note: str = ""
+    protocol_error: bool = False
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
@@ -86,19 +97,26 @@ class AutonomousResult:
 
 # -- Definition of Done parsing ---------------------------------------------
 
-_CHECKBOX_RE = re.compile(r"^[-*]\s*\[([ xX])\]\s*(.+)$")
-_BULLET_RE = re.compile(r"^[-*]\s+(.+)$")
-_NUMBERED_RE = re.compile(r"^\d+[.)]\s+(.+)$")
+_CHECKBOX_RE = re.compile(r"^[-*]\s*\[([ xX])\]\s+(.+)$")
 
 
 def parse_definition_of_done(spec_text: str) -> list[DoDItem]:
     """Split a free-form spec into individual Definition-of-Done items.
 
-    Recognizes "- [ ] ..." / "- [x] ..." checklists (checkbox state is kept
-    as the starting `done` value), plain "- ..."/"* ..." bullets, and "1. ..."
-    numbered lists - one item per line. Anything else becomes one item per
-    non-empty line. A spec with no recognizable lines becomes a single item
-    holding the whole text, so a one-line --goal always produces >=1 item.
+    Only lines matching a checklist checkbox ("- [ ] ..." / "- [x] ...", or
+    the same with "*") ever become a DoD item - checkbox state is kept as
+    the starting `done` value. Everything else (markdown headings, blank
+    lines, plain prose, plain "- ..." bullets without a checkbox, numbered
+    lists) is deliberately ignored: a real spec file like
+    "dod-station-agent-v1.md" mixes "# Heading" / "## Section" lines with
+    "- [ ] ..." checklist items, and a heading can never be "done" - if it
+    were parsed as an item, the Definition of Done could never be fully
+    satisfied and the run would misreport a real completion as blocked or
+    stuck at max_iterations forever.
+
+    A spec with zero checkbox lines (e.g. a plain one-line --goal with no
+    --spec file at all) falls back to a single item holding the whole text,
+    so a goal-only invocation still always produces >=1 item.
     """
     items: list[DoDItem] = []
     for raw_line in spec_text.splitlines():
@@ -108,16 +126,6 @@ def parse_definition_of_done(spec_text: str) -> list[DoDItem]:
         m = _CHECKBOX_RE.match(line)
         if m:
             items.append(DoDItem(text=m.group(2).strip(), done=m.group(1).lower() == "x"))
-            continue
-        m = _BULLET_RE.match(line)
-        if m:
-            items.append(DoDItem(text=m.group(1).strip()))
-            continue
-        m = _NUMBERED_RE.match(line)
-        if m:
-            items.append(DoDItem(text=m.group(1).strip()))
-            continue
-        items.append(DoDItem(text=line))
     if not items:
         stripped = spec_text.strip()
         if stripped:
@@ -143,18 +151,52 @@ def _extract_json(text: str) -> Optional[dict]:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _apply_dod_updates(dod_items: list[DoDItem], parsed: Optional[dict]) -> str:
-    """Update dod_items in place from the agent's JSON report. Returns notes."""
+def _apply_dod_updates(dod_items: list[DoDItem], parsed: Optional[dict]) -> tuple[str, bool]:
+    """Merge the agent's self-reported JSON into dod_items in place.
+
+    The orchestrator has no independent way to check arbitrary natural-
+    language DoD items itself, so it cannot fully "verify" the agent's
+    claim - but it does not have to trust it blindly either: the merge is
+    monotonic (`done = done or claimed_done`), so a DoD item already
+    verified done in an earlier iteration can never be silently flipped
+    back to not-done by a later, possibly sloppier agent response. Actual
+    completion is still independently gated on the orchestrator's own test
+    run in `run_autonomous_loop`, not on the agent's claim.
+
+    Returns (notes, protocol_error). protocol_error is True whenever the
+    response is missing, not JSON, has no "items" list, has a different
+    number of entries than there are DoD items, or contains any entry with
+    a malformed/out-of-range index - i.e. whenever the contract described in
+    `_build_iteration_prompt` was not honestly followed. Callers must not
+    fold a protocol_error iteration into no-progress tracking (see
+    AGENTS.md rule 9 / ARCHITECTURE.md): an agent that garbles its output
+    format is not the same as an agent that is stuck.
+    """
     if not parsed or not isinstance(parsed.get("items"), list):
-        return "Agent nevrátil platný JSON stav Definition of Done, ponechávám předchozí stav."
-    for entry in parsed["items"]:
+        return "Agent nevrátil platný JSON stav Definition of Done, ponechávám předchozí stav.", True
+
+    entries = parsed["items"]
+    protocol_error = len(entries) != len(dod_items)
+    for entry in entries:
         if not isinstance(entry, dict):
+            protocol_error = True
             continue
         idx = entry.get("index")
-        if isinstance(idx, int) and 0 <= idx < len(dod_items):
-            dod_items[idx].done = bool(entry.get("done"))
+        if not (isinstance(idx, int) and 0 <= idx < len(dod_items)):
+            protocol_error = True
+            continue
+        dod_items[idx].done = dod_items[idx].done or bool(entry.get("done"))
+
     notes = parsed.get("notes")
-    return notes if isinstance(notes, str) else ""
+    notes = notes if isinstance(notes, str) else ""
+    if protocol_error:
+        hint = (
+            f"[protokol] JSON odpověď neodpovídala zadanému formátu (počet položek musí být "
+            f"přesně {len(dod_items)}, každá s platným celočíselným indexem 0..{len(dod_items) - 1}) "
+            "- zkus to příští iteraci přesně podle zadaného tvaru."
+        )
+        notes = f"{notes} {hint}".strip()
+    return notes, protocol_error
 
 
 def _project_status_text(project_path: Path) -> str:
@@ -258,6 +300,30 @@ def _commit_if_ready(
         return False, None, str(e)
 
 
+# -- test command auto-detection ---------------------------------------------
+
+_PYTHON_PROJECT_MARKERS = ("pyproject.toml", "setup.cfg", "setup.py", "pytest.ini", "tox.ini")
+
+
+def _detect_test_command(project_path: Path) -> Optional[str]:
+    """Best-effort fallback test command, used only when autonomous mode was
+    not given one (no --test-command, no project/testing config in
+    config.yaml). Deliberately narrow: only ever suggests
+    "python -m pytest -q", and only when the project looks like an actual
+    Python project with a real test suite (a "tests/" directory alongside a
+    recognizable Python project marker file) - never invented for a project
+    type this cannot recognize. A plain one-off `run` task is unaffected and
+    keeps skipping tests when none is configured; this only applies to the
+    autonomous loop, where silently never running tests would let a DoD item
+    like "all tests pass" go forever unverified (see AGENTS.md rule 9).
+    """
+    if not (project_path / "tests").is_dir():
+        return None
+    if not any((project_path / marker).exists() for marker in _PYTHON_PROJECT_MARKERS):
+        return None
+    return "python -m pytest -q"
+
+
 def run_autonomous_loop(
     run_id: str,
     project_path: Path,
@@ -272,6 +338,14 @@ def run_autonomous_loop(
     on_iteration: Optional[Callable[[AutonomousResult], None]] = None,
 ) -> AutonomousResult:
     max_iterations = max(1, min(max_iterations, ABSOLUTE_MAX_ITERATIONS))
+    if not test_command:
+        detected = _detect_test_command(project_path)
+        if detected:
+            logger.info(
+                "Autonomní běh %s: žádný test_command nenakonfigurován, použiji detekovaný '%s'",
+                run_id, detected,
+            )
+            test_command = detected
     iterations: list[IterationLog] = []
     session_id: Optional[str] = None
     previous_notes = ""
@@ -319,7 +393,7 @@ def run_autonomous_loop(
             tests_passed, test_output = run_test_command(project_path, test_command, logger)
 
         parsed = _extract_json(result.output_text)
-        notes = _apply_dod_updates(dod_items, parsed)
+        notes, protocol_error = _apply_dod_updates(dod_items, parsed)
         previous_notes = notes
 
         iterations.append(
@@ -327,13 +401,14 @@ def run_autonomous_loop(
                 index=i, prompt=prompt, agent_output=result.output_text, agent_error=None,
                 tests_passed=tests_passed, test_output=test_output,
                 dod_snapshot=[{"text": d.text, "done": d.done} for d in dod_items],
-                note=notes,
+                note=notes, protocol_error=protocol_error,
             )
         )
         logger.info(
-            "Autonomní běh %s: iterace %s/%s dokončena (testy prošly=%s, nesplněných bodů=%s)",
+            "Autonomní běh %s: iterace %s/%s dokončena (testy prošly=%s, nesplněných bodů=%s, "
+            "protokolová chyba=%s)",
             run_id, i, max_iterations, tests_passed,
-            sum(1 for d in dod_items if not d.done),
+            sum(1 for d in dod_items if not d.done), protocol_error,
         )
         if on_iteration:
             on_iteration(snapshot(AutonomousStatus.RUNNING))
@@ -352,22 +427,36 @@ def run_autonomous_loop(
                 on_iteration(final)
             return final
 
-        signature = _iteration_signature(dod_items, tests_passed, test_output)
-        if signature == last_signature:
-            same_signature_count += 1
-        else:
-            same_signature_count = 1
-            last_signature = signature
+        # Only a verified, comparable iteration counts towards no-progress:
+        # a protocol error (unparsable/incomplete agent JSON) or a missing
+        # test result despite a configured test command carries no signal
+        # about whether the project itself is stuck, so it must not move
+        # (or reset) the no-progress counter either way - see AGENTS.md
+        # rule 9 and _apply_dod_updates' docstring.
+        test_result_missing = bool(test_command) and tests_passed is None
+        if not protocol_error and not test_result_missing:
+            signature = _iteration_signature(dod_items, tests_passed, test_output)
+            if signature == last_signature:
+                same_signature_count += 1
+            else:
+                same_signature_count = 1
+                last_signature = signature
 
-        if same_signature_count >= NO_PROGRESS_LIMIT:
-            logger.warning(
-                "Autonomní běh %s: stejný stav se opakuje %s iterace za sebou bez pokroku, "
-                "označuji jako blocked", run_id, same_signature_count,
+            if same_signature_count >= NO_PROGRESS_LIMIT:
+                logger.warning(
+                    "Autonomní běh %s: stejný ověřený stav se opakuje %s iterace za sebou bez "
+                    "pokroku, označuji jako blocked", run_id, same_signature_count,
+                )
+                final = snapshot(AutonomousStatus.BLOCKED)
+                if on_iteration:
+                    on_iteration(final)
+                return final
+        else:
+            logger.info(
+                "Autonomní běh %s: iterace %s/%s nemá ověřitelný stav (protokolová chyba=%s, "
+                "chybí výsledek testů=%s) - nepočítá se do detekce bez pokroku",
+                run_id, i, max_iterations, protocol_error, test_result_missing,
             )
-            final = snapshot(AutonomousStatus.BLOCKED)
-            if on_iteration:
-                on_iteration(final)
-            return final
 
     logger.warning("Autonomní běh %s: dosažen limit max_iterations=%s bez splnění DoD", run_id, max_iterations)
     final = snapshot(AutonomousStatus.MAX_ITERATIONS)
