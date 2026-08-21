@@ -31,6 +31,11 @@ class AgentRunResult:
     session_id: Optional[str] = None
     cost_usd: Optional[float] = None
     error: Optional[str] = None
+    # Count of tool calls the agent wanted to make but were denied by the
+    # permission system (e.g. sandboxed Bash). Kept out of `output_text` -
+    # any caller parsing a strict contract out of the agent's own message
+    # (see autonomous.py) must only ever see what the agent itself said.
+    permission_denials: int = 0
 
 
 class Agent(ABC):

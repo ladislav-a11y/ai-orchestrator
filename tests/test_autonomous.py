@@ -4,8 +4,11 @@ import logging
 from orchestrator.agents.base import Agent, AgentRunResult
 from orchestrator.autonomous import (
     ABSOLUTE_MAX_ITERATIONS,
+    AUDIT_MARKER,
     AutonomousStatus,
+    DOD_BATCH_SIZE,
     NO_PROGRESS_LIMIT,
+    _extract_json,
     parse_definition_of_done,
     run_autonomous_loop,
 )
@@ -25,6 +28,22 @@ class FakeAgent(Agent):
 
     def run(self, request):
         return self._run_fn(request)
+
+
+def _confirming_audit_or(executor_run_fn):
+    """Wrap an executor run_fn so any independent-audit prompt (see
+    AUDIT_MARKER) gets a clean "everything confirmed" response, and every
+    other prompt goes to the given executor run_fn. Most tests only care
+    about the executor's behaviour; the audit pass is a separate, real
+    part of the contract (see AGENTS.md rule 8) so it must not be silently
+    skipped by a fake that doesn't know about it."""
+
+    def run_fn(request):
+        if AUDIT_MARKER in request.prompt:
+            return AgentRunResult(success=True, output_text='{"rejected_indices": [], "notes": "audit ok"}')
+        return executor_run_fn(request)
+
+    return run_fn
 
 
 # -- Definition of Done parsing ----------------------------------------------
@@ -80,7 +99,7 @@ def test_run_autonomous_completed_with_commit(git_repo):
     (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
     dod = parse_definition_of_done("- [ ] Priprav feature.txt")
 
-    def run_fn(request):
+    def executor(request):
         return AgentRunResult(
             success=True,
             output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
@@ -95,7 +114,7 @@ def test_run_autonomous_completed_with_commit(git_repo):
         goal="Priprav feature",
         dod_items=dod,
         config=cfg,
-        agent=FakeAgent(run_fn),
+        agent=FakeAgent(_confirming_audit_or(executor)),
         logger=LOGGER,
         test_command=None,
         max_iterations=5,
@@ -106,6 +125,7 @@ def test_run_autonomous_completed_with_commit(git_repo):
     assert result.committed is True
     assert result.commit_hash
     assert len(result.iterations) == 1
+    assert result.iterations[0].audit_performed is True
     assert all(item.done for item in result.dod_items)
 
 
@@ -113,7 +133,7 @@ def test_run_autonomous_completed_without_commit_when_auto_commit_disabled(git_r
     (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
     dod = parse_definition_of_done("- [ ] Priprav feature.txt")
 
-    def run_fn(request):
+    def executor(request):
         return AgentRunResult(
             success=True,
             output_text='{"items": [{"index": 0, "done": true}]}',
@@ -127,7 +147,7 @@ def test_run_autonomous_completed_without_commit_when_auto_commit_disabled(git_r
         goal="Priprav feature",
         dod_items=dod,
         config=cfg,
-        agent=FakeAgent(run_fn),
+        agent=FakeAgent(_confirming_audit_or(executor)),
         logger=LOGGER,
         test_command=None,
         max_iterations=5,
@@ -179,16 +199,17 @@ def test_run_autonomous_never_commits_when_tests_fail(tmp_path):
 
 
 def test_run_autonomous_stops_at_max_iterations(tmp_path):
+    # A well-behaved executor that always covers every index it was ever
+    # asked about (see DOD_BATCH_SIZE contract in _apply_dod_updates) -
+    # marks exactly one additional item done per call, one at a time.
     dod = parse_definition_of_done("\n".join(f"- [ ] bod {i}" for i in range(4)))
     calls = {"n": 0}
 
-    def run_fn(request):
-        idx = calls["n"]
+    def executor(request):
         calls["n"] += 1
-        return AgentRunResult(
-            success=True,
-            output_text=json.dumps({"items": [{"index": idx, "done": True}], "notes": f"iterace {idx}"}),
-        )
+        done_count = calls["n"]
+        items = [{"index": idx, "done": idx < done_count} for idx in range(4)]
+        return AgentRunResult(success=True, output_text=json.dumps({"items": items, "notes": f"iterace {done_count}"}))
 
     cfg = Config()
 
@@ -198,7 +219,7 @@ def test_run_autonomous_stops_at_max_iterations(tmp_path):
         goal="udelej 4 veci",
         dod_items=dod,
         config=cfg,
-        agent=FakeAgent(run_fn),
+        agent=FakeAgent(_confirming_audit_or(executor)),
         logger=LOGGER,
         test_command=None,
         max_iterations=3,
@@ -217,13 +238,11 @@ def test_run_autonomous_hard_cap_on_max_iterations(tmp_path):
     dod = parse_definition_of_done("\n".join(f"- [ ] bod {i}" for i in range(total_items)))
     calls = {"n": 0}
 
-    def run_fn(request):
-        idx = calls["n"]
+    def executor(request):
         calls["n"] += 1
-        return AgentRunResult(
-            success=True,
-            output_text=json.dumps({"items": [{"index": idx, "done": True}]}),
-        )
+        done_count = calls["n"]
+        items = [{"index": idx, "done": idx < done_count} for idx in range(total_items)]
+        return AgentRunResult(success=True, output_text=json.dumps({"items": items}))
 
     cfg = Config()
 
@@ -233,7 +252,7 @@ def test_run_autonomous_hard_cap_on_max_iterations(tmp_path):
         goal="udelej hodne veci",
         dod_items=dod,
         config=cfg,
-        agent=FakeAgent(run_fn),
+        agent=FakeAgent(_confirming_audit_or(executor)),
         logger=LOGGER,
         test_command=None,
         max_iterations=100_000,
@@ -488,3 +507,197 @@ def test_run_autonomous_agent_error_stops_immediately(tmp_path):
     assert result.status == AutonomousStatus.ERROR
     assert result.error == "boom"
     assert len(result.iterations) == 1
+
+
+# -- _extract_json: robust against trailing/leading text and fences ---------
+
+
+def test_extract_json_recovers_from_trailing_permission_denial_note():
+    """Regression for run 11b4aaae08b4: the Claude Code CLI wrapper used to
+    append a plain-text note *after* the agent's own valid JSON payload
+    whenever a tool call was permission-denied, e.g.:
+        '{"items": [...], "notes": "..."}\\n\\n[orchestrator] Claude odmítl 15 akci(í) kvůli oprávněním.'
+    A naive `json.loads` on the whole string fails on the trailing text,
+    which is exactly why 8 iterations in that run were misreported as
+    protocol_error despite tests_passed=True and a perfectly valid agent
+    response. `_extract_json` must recover the JSON object regardless."""
+    text = (
+        '{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], "notes": "hotovo"}'
+        "\n\n[orchestrator] Claude odmítl 15 akci(í) kvůli oprávněním."
+    )
+    parsed = _extract_json(text)
+    assert parsed is not None
+    assert parsed["items"] == [{"index": 0, "done": True}, {"index": 1, "done": False}]
+    assert parsed["notes"] == "hotovo"
+
+
+def test_extract_json_recovers_from_leading_prose_and_fence():
+    text = (
+        "Shrnutí práce: opravil jsem X a Y.\n\n"
+        "```json\n"
+        '{"items": [{"index": 0, "done": true}], "notes": "ok"}\n'
+        "```\n"
+    )
+    parsed = _extract_json(text)
+    assert parsed == {"items": [{"index": 0, "done": True}], "notes": "ok"}
+
+
+def test_extract_json_returns_none_for_genuinely_broken_json():
+    assert _extract_json("tohle vubec neni JSON") is None
+    assert _extract_json('{"items": [{"index": 0, "done": true premature cutoff') is None
+    assert _extract_json("") is None
+
+
+# -- batching: only a small batch of unmet items is requested per iteration -
+
+
+def test_run_autonomous_requests_only_a_small_batch_not_the_whole_dod(tmp_path):
+    """Regression for run 11b4aaae08b4 (66 DoD items): every iteration used
+    to list and require a JSON entry for *all* DoD items, however many there
+    were. That is both expensive (huge prompts every iteration) and fragile
+    (one huge response is much more likely to get truncated/garbled). Each
+    iteration must only ask about a small batch."""
+    total_items = DOD_BATCH_SIZE * 3
+    dod = parse_definition_of_done("\n".join(f"- [ ] bod {i}" for i in range(total_items)))
+
+    def executor(request):
+        return AgentRunResult(success=True, output_text='{"items": [], "notes": "zadny pokrok"}')
+
+    cfg = Config()
+    result = run_autonomous_loop(
+        run_id="test-run",
+        project_path=tmp_path,
+        goal="hodne bodu",
+        dod_items=dod,
+        config=cfg,
+        agent=FakeAgent(_confirming_audit_or(executor)),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=1,
+        auto_commit_requested=False,
+    )
+
+    assert len(result.iterations[0].requested_indices) == DOD_BATCH_SIZE
+    assert result.iterations[0].requested_indices == list(range(DOD_BATCH_SIZE))
+    # the prompt must not mention every single one of the total_items bodies
+    assert result.iterations[0].prompt.count("bod ") <= DOD_BATCH_SIZE + 2
+
+
+# -- cheap repair: malformed response gets one reprompt, not a fresh iteration
+
+
+def test_run_autonomous_recovers_from_malformed_response_via_cheap_repair(tmp_path):
+    """Regression for run 11b4aaae08b4: tests_passed=True on every iteration
+    but the agent's raw response was unparsable, so every iteration was
+    marked protocol_error and none of the already-verified DoD progress
+    could ever lead to completion. The loop must (a) never reset a
+    previously verified DoD item because of a later malformed response, and
+    (b) recover via a single cheap repair reprompt rather than repeating a
+    full, expensive implementation iteration."""
+    dod = parse_definition_of_done("- [ ] bod A\n- [ ] bod B")
+    calls = {"n": 0}
+
+    def executor(request):
+        calls["n"] += 1
+        n = calls["n"]
+        if n == 1:
+            # iteration 1: clean valid response, marks bod A done
+            return AgentRunResult(
+                success=True,
+                output_text=json.dumps(
+                    {"items": [{"index": 0, "done": True}, {"index": 1, "done": False}], "notes": "A hotovo"}
+                ),
+            )
+        if n == 2:
+            # iteration 2, main call: genuinely broken/truncated JSON
+            return AgentRunResult(success=True, output_text='{"items": [{"index": 1, "done": true premat')
+        # iteration 2, cheap repair reprompt: valid JSON this time
+        return AgentRunResult(
+            success=True,
+            output_text=json.dumps({"items": [{"index": 1, "done": True}], "notes": "B hotovo po repair"}),
+        )
+
+    cfg = Config()
+    result = run_autonomous_loop(
+        run_id="test-run",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=dod,
+        config=cfg,
+        agent=FakeAgent(_confirming_audit_or(executor)),
+        logger=LOGGER,
+        test_command='python -c "import sys; sys.exit(0)"',  # always tests_passed True
+        max_iterations=4,
+        auto_commit_requested=False,
+    )
+
+    # bod A (verified in iteration 1) must never be reset, even though
+    # iteration 2 started with a malformed response.
+    assert result.dod_items[0].done is True
+    # bod B was recovered via the cheap repair reprompt in iteration 2.
+    assert result.dod_items[1].done is True
+    # every iteration's tests were independently verified by the orchestrator
+    assert all(it.tests_passed is True for it in result.iterations)
+    # iteration 2's malformed main response triggered exactly one repair
+    # attempt, which succeeded - it must not be reported as a protocol error
+    # (that would have falsely wiped out the no-progress tracking signal).
+    assert len(result.iterations) == 2
+    iter2 = result.iterations[1]
+    assert iter2.repair_attempted is True
+    assert iter2.repair_succeeded is True
+    assert iter2.protocol_error is False
+    # the run completed via the independent audit confirming the claim, not
+    # by trusting the executor's self-report alone
+    assert result.status == AutonomousStatus.COMPLETED
+    assert iter2.audit_performed is True
+    # cheap: only one extra repair call was needed, not a fresh full
+    # implementation iteration (3 executor-side calls total: main x2 + 1 repair)
+    assert calls["n"] == 3
+
+
+# -- independent audit: rejects a false "done" claim before committing ------
+
+
+def test_run_autonomous_audit_reopens_falsely_claimed_done_item(tmp_path):
+    """The executor's self-report is never sufficient on its own (Manager/
+    Executor/Auditor split, see AGENTS.md rule 8): if the independent audit
+    pass finds a claimed-done item is not actually done, that item must be
+    reopened (not committed), and the run must keep going instead of
+    silently trusting the executor."""
+    dod = parse_definition_of_done("- [ ] bod A")
+    audit_calls = {"n": 0}
+
+    def run_fn(request):
+        if AUDIT_MARKER in request.prompt:
+            audit_calls["n"] += 1
+            if audit_calls["n"] == 1:
+                return AgentRunResult(
+                    success=True,
+                    output_text='{"rejected_indices": [0], "notes": "bod A ve skutecnosti chybi"}',
+                )
+            return AgentRunResult(success=True, output_text='{"rejected_indices": [], "notes": "ted uz ok"}')
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+        )
+
+    cfg = Config()
+    result = run_autonomous_loop(
+        run_id="test-run",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=dod,
+        config=cfg,
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=3,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert result.iterations[0].audit_rejected_indices == [0]
+    assert result.iterations[0].audit_performed is True
+    # not completed on the first iteration - the audit reopened it
+    assert len(result.iterations) == 2
+    assert result.dod_items[0].done is True

@@ -57,11 +57,28 @@ this file, stop and ask - do not silently override safety rules.
    and stops (status `blocked`) after `NO_PROGRESS_LIMIT` consecutive
    *verified* iterations with an unchanged (unmet Definition-of-Done items,
    test result) signature - an iteration with a protocol error (unparsable/
-   incomplete agent JSON) or a missing test result despite a configured test
-   command does not count towards this (see `_apply_dod_updates` and
-   ARCHITECTURE.md), so a confused agent gets a real chance to recover
-   instead of being falsely declared stuck. Do not remove either cap, and do
-   not add a "retry forever" or "ignore the cap" option.
+   incomplete agent JSON, even after the one cheap repair reprompt), an
+   unparsable independent-audit response, or a missing test result despite a
+   configured test command does not count towards this (see
+   `_apply_dod_updates` and ARCHITECTURE.md), so a confused agent gets a
+   real chance to recover instead of being falsely declared stuck. Do not
+   remove either cap, and do not add a "retry forever" or "ignore the cap"
+   option.
+10. **The autonomous loop must never let a malformed agent response burn a
+    full extra implementation iteration, and must never trust the executor's
+    own completion claim without independent verification.** A protocol
+    error gets exactly one cheap repair reprompt (`_build_repair_prompt` -
+    "resend just the JSON for these indices", never "try implementing this
+    again") before being recorded as a protocol error. Before a commit is
+    attempted, a separate audit pass (`_run_audit`) - a second prompt against
+    the same `Agent`, explicitly instructed to verify only and never to
+    implement - must confirm every claimed-done item; if it rejects any, they
+    are reopened instead of committed. This is what run `11b4aaae08b4`
+    lacked: 8 iterations with `tests_passed=True` were all misreported as
+    `protocol_error` (see ARCHITECTURE.md for the root cause) with no cheap
+    recovery path, burning a session's budget for zero recorded progress. Do
+    not remove the repair step, do not let it turn into a second full
+    iteration, and do not make the audit pass optional or skippable.
 
 ## When adding a new agent/provider (e.g. OpenAI Codex)
 

@@ -101,7 +101,11 @@ def write_autonomous_log(logs_dir: Path, run_id: str, project: str, goal: str, r
         lines += [
             "",
             f"=== iterace {it.index} ===",
-            f"testy prošly: {it.tests_passed}",
+            f"testy prošly: {it.tests_passed}  |  dávka: {it.requested_indices}  |  "
+            f"prompt: {it.prompt_chars} znaků (~{it.prompt_chars // 4} tokenů)  |  "
+            f"protokolová chyba: {it.protocol_error}  |  repair pokus: {it.repair_attempted}"
+            f"{' (uspěl)' if it.repair_succeeded else ''}  |  audit proveden: {it.audit_performed}"
+            + (f"  |  audit odmítl: {it.audit_rejected_indices}" if it.audit_rejected_indices else ""),
             "--- zadání agentovi ---",
             it.prompt,
             "",

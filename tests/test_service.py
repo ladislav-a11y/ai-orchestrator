@@ -3,7 +3,7 @@ from pathlib import Path
 
 from orchestrator import service as service_module
 from orchestrator.agents.base import Agent, AgentRunResult
-from orchestrator.autonomous import AutonomousStatus
+from orchestrator.autonomous import AUDIT_MARKER, AutonomousStatus
 from orchestrator.config import ApiConfig, Config, GitConfig, PathsConfig, ProjectEntry, TestingConfig
 from orchestrator.service import OrchestratorService
 
@@ -15,6 +15,12 @@ class FakeAgent(Agent):
         return True, "fake agent always available"
 
     def run(self, request):
+        # The autonomous loop's independent audit pass (see AGENTS.md rule
+        # 8/10) sends a separate, distinctly-marked prompt before trusting
+        # this agent's own "done" claim - it must be answered too, or the
+        # loop never completes and instead exhausts max_iterations.
+        if AUDIT_MARKER in request.prompt:
+            return AgentRunResult(success=True, output_text='{"rejected_indices": [], "notes": "audit ok"}')
         return AgentRunResult(
             success=True,
             output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',

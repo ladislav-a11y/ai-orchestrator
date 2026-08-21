@@ -184,8 +184,17 @@ class ClaudeCodeAgent(Agent):
             is_error = bool(raw.get("is_error", proc.returncode != 0))
             result_text = raw.get("result", "")
             denials = raw.get("permission_denials") or []
-            if denials:
-                result_text += f"\n\n[orchestrator] Claude odmítl {len(denials)} akci(í) kvůli oprávněním."
+            # Never append anything to result_text/output_text here:
+            # autonomous.py's DoD contract requires the agent's *own* last
+            # message to be exactly one JSON object, and callers parse
+            # `output_text` for it. Text appended after a valid JSON payload
+            # (this note used to be concatenated directly onto it) breaks a
+            # naive full-string json.loads and was the root cause of every
+            # iteration in run 11b4aaae08b4 being misreported as
+            # protocol_error despite an otherwise valid agent response - see
+            # autonomous._extract_json (now robust to trailing/leading text
+            # too, as defense in depth) and AgentRunResult.permission_denials
+            # (the structured, out-of-band place for this count).
             return AgentRunResult(
                 success=(not is_error),
                 output_text=result_text,
@@ -193,6 +202,7 @@ class ClaudeCodeAgent(Agent):
                 session_id=raw.get("session_id"),
                 cost_usd=raw.get("total_cost_usd"),
                 error=None if not is_error else (result_text or "Claude Code vrátil chybu."),
+                permission_denials=len(denials),
             )
 
         # Could not parse JSON - fall back to raw stdout/stderr.
