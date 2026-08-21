@@ -13,10 +13,17 @@ from pathlib import Path
 from typing import Optional
 
 from orchestrator.agents.registry import build_agent
+from orchestrator.autonomous import (
+    AutonomousResult,
+    DEFAULT_MAX_ITERATIONS,
+    parse_definition_of_done,
+    run_autonomous_loop,
+)
+from orchestrator.claude_settings import ensure_project_claude_settings
 from orchestrator.config import Config, load_config
-from orchestrator.logging_config import setup_logging, write_task_log
+from orchestrator.logging_config import setup_logging, write_autonomous_log, write_task_log
 from orchestrator.models import Task, TaskStatus
-from orchestrator.queue import TaskQueue, make_task
+from orchestrator.queue import TaskQueue, make_task, new_task_id
 from orchestrator.runner import run_task
 
 
@@ -49,6 +56,10 @@ class OrchestratorService:
             # agent can scaffold it from scratch on its first task.
             project_dir.mkdir(parents=True, exist_ok=True)
             self.logger.info("Vytvořen nový adresář projektu '%s': %s", entry.name, project_dir)
+
+        # Same safe allow/deny permissions for every project the orchestrator
+        # touches - no-op if the project already has its own settings file.
+        ensure_project_claude_settings(project_dir)
 
         test_command = test_command_override
         if test_command is None:
@@ -95,6 +106,84 @@ class OrchestratorService:
         out_path.write_text(
             json.dumps(task.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+    # -- autonomous development mode ----------------------------------------
+
+    def run_autonomous(
+        self,
+        project_ref: str,
+        goal: Optional[str] = None,
+        spec_text: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        test_command_override: Optional[str] = None,
+        max_iterations: Optional[int] = None,
+        auto_commit: Optional[bool] = None,
+    ) -> tuple[str, AutonomousResult]:
+        """Run the autonomous implement -> test -> evaluate -> fix loop until
+        the Definition of Done is met or a safe iteration/no-progress limit is
+        hit. See orchestrator/autonomous.py for the loop itself; this method
+        only wires it up the same way submit()/run_sync() wire up a normal
+        task (project resolution, workspace_root check, Claude settings,
+        agent construction, logging).
+        """
+        if not (goal or spec_text):
+            raise ValueError("Je potřeba zadat --goal nebo --spec (Definition of Done).")
+
+        entry = self.config.resolve_project(project_ref)
+        project_dir = Path(entry.path)
+        if not project_dir.exists():
+            project_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info("Vytvořen nový adresář projektu '%s': %s", entry.name, project_dir)
+
+        ensure_project_claude_settings(project_dir)
+
+        dod_source = spec_text if spec_text else goal
+        dod_items = parse_definition_of_done(dod_source)
+        goal_text = goal or dod_source.strip().splitlines()[0]
+
+        test_command = test_command_override
+        if test_command is None:
+            test_command = entry.test_command or self.config.testing.test_command or None
+
+        agent = build_agent(agent_name or self.config.default_agent, self.config)
+        run_id = new_task_id()
+
+        def on_iteration(partial_result: AutonomousResult) -> None:
+            write_autonomous_log(self.config.logs_dir, run_id, entry.name, goal_text, partial_result)
+
+        result = run_autonomous_loop(
+            run_id=run_id,
+            project_path=project_dir,
+            goal=goal_text,
+            dod_items=dod_items,
+            config=self.config,
+            agent=agent,
+            logger=self.logger,
+            test_command=test_command,
+            max_iterations=max_iterations or DEFAULT_MAX_ITERATIONS,
+            auto_commit_requested=(self.config.git.auto_commit if auto_commit is None else auto_commit),
+            on_iteration=on_iteration,
+        )
+
+        write_autonomous_log(self.config.logs_dir, run_id, entry.name, goal_text, result)
+        self._write_autonomous_outbox(run_id, entry.name, goal_text, result)
+        return run_id, result
+
+    def _write_autonomous_outbox(self, run_id: str, project: str, goal: str, result: AutonomousResult) -> None:
+        self.config.outbox_dir.mkdir(parents=True, exist_ok=True)
+        out_path = self.config.outbox_dir / f"autonomous-{run_id}.json"
+        payload = {
+            "run_id": run_id,
+            "project": project,
+            "goal": goal,
+            "status": result.status.value,
+            "dod_items": [{"text": i.text, "done": i.done} for i in result.dod_items],
+            "iterations": [it.to_dict() for it in result.iterations],
+            "committed": result.committed,
+            "commit_hash": result.commit_hash,
+            "error": result.error,
+        }
+        out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # -- inbox (future external bridge, e.g. from ChatGPT) -----------------
 

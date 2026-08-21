@@ -38,6 +38,9 @@ Toto je implementováno v `orchestrator/runner.py` funkcí `run_task`.
   `git` (status, diff, commit). Žádné mazání historie, žádný force push,
   žádný push vůbec.
 - `orchestrator/runner.py` - samotný pipeline výše.
+- `orchestrator/autonomous.py` - druhý pipeline: autonomní smyčka
+  implementace -> testy -> vyhodnocení -> oprava, viz "Autonomní vývojový
+  režim" níže.
 - `orchestrator/service.py` - spojuje config + frontu + agenta + runner;
   sdílí ho CLI i API. Úkoly zpracovává jedno worker vlákno (žádné dva
   úkoly neběží na stejném projektu současně).
@@ -66,10 +69,27 @@ selhání jednoho z nich a druhé to stejně odchytí.
 Důsledek: v neinteraktivním běhu nemá kdo odklikávat žádosti o oprávnění.
 Proto výchozí `permission_mode: acceptEdits` (automaticky schvaluje úpravy
 souborů, ale ne cokoliv riskantnějšího) a proto je důležité mít v cílovém
-projektu (`.claude/settings.json`) předem povolené nástroje, které agent
-bude opravdu potřebovat. Pokud Claude nějakou akci kvůli oprávnění odmítne,
-orchestrátor to zaznamená do výsledku úkolu (`permission_denials`), ale
-neudělá to sám za tebe.
+projektu předem povolené nástroje, které agent bude opravdu potřebovat.
+Pokud Claude nějakou akci kvůli oprávnění odmítne, orchestrátor to
+zaznamená do výsledku úkolu (`permission_denials`), ale neudělá to sám
+za tebe.
+
+### Allow/deny pravidla per projekt (`orchestrator/claude_settings.py`)
+
+Protože nikdo neodklikává interaktivní dotazy, `service.py` (`submit()`) při
+založení/prvním sáhnutí na projekt zapíše do `<projekt>/.claude/settings.local.json`
+pevně daná allow/deny pravidla (`orchestrator.claude_settings.build_settings()`):
+allow pokrývá čtení/úpravu/vytváření souborů projektu, lokální
+Python/`.venv`/`pytest`/`python -m unittest` a neškodnou půlku Gitu (`init`,
+`status`, `diff`, `add`, `commit`, `log`); deny natvrdo blokuje `git push`,
+`git reset --hard`, `git clean -fd`/`-fdx`, smazání `.git` a přepis historie
+(`rebase`, `filter-branch`, `commit --amend`, mazání větví/tagů) - druhá,
+nezávislá vrstva vedle `permission_mode` a `FORBIDDEN_*` kontrol výše. Nikdy
+soubor nepřepíše, pokud už existuje (ruční úpravy zůstanou zachované), takže
+je to jen bezpečné výchozí nastavení pro projekty, které si sám založí.
+`doctor` stejná pravidla dodatečně zapíše i do už existujících registrovaných
+projektů (`_check_claude_settings`), takže to platí i pro projekty založené
+před zavedením tohoto mechanismu.
 
 ## Pracovní prostor (`workspace_root`)
 
@@ -92,6 +112,88 @@ Uvnitř `workspace_root` pak o skutečná oprávnění (co smí Claude v daném
 projektu upravit/spustit) dál rozhoduje `permission_mode` a `.claude/settings.json`
 cílového projektu, jak je popsáno níže - `workspace_root` je jen vnější
 hranice "kam vůbec smí sáhnout", ne náhrada za tato jemnější oprávnění.
+
+## Autonomní vývojový režim (`orchestrator autonomous`)
+
+Druhý, samostatný pipeline vedle jednorázového `run`/`Task` toku výše -
+implementovaný v `orchestrator/autonomous.py`, zapojený do `service.py`
+metodou `run_autonomous()` a do CLI příkazem `autonomous` (`cli.py`).
+Cílem je opakovat cyklus **implementace -> testy -> vyhodnocení -> oprava**,
+dokud není splněná uživatelem zadaná Definition of Done (DoD), nebo dokud
+není dosažen bezpečný limit iterací:
+
+```
+projekt + cíl + Definition of Done
+    |
+    +--> iterace 1..N (max. `max_iterations`, natvrdo omezeno na
+    |     ABSOLUTE_MAX_ITERATIONS bez ohledu na to, co si uživatel zadá):
+    |       1. sestav prompt: cíl, aktuální (nesplněné) body DoD, aktuální
+    |          `git status`, výsledek testů z minulé iterace, poznámka
+    |          agenta z minulé iterace
+    |       2. spusť agenta (stejné `Agent.run()` rozhraní jako `runner.py`,
+    |          session se navazuje přes `--resume`)
+    |       3. spusť testy, pokud je nastavený test_command (stejná funkce
+    |          `runner.run_test_command`)
+    |       4. agent ve své poslední zprávě vrátí JSON s vyhodnocením, které
+    |          body DoD jsou už splněné - orchestrátor to napárovuje na
+    |          seznam DoD položek (`_apply_dod_updates`)
+    |       5. zaloguj iteraci (logger + průběžný soubor
+    |          logs/autonomous/<id>.log)
+    |
+    +--> completed:  všechny body DoD splněné A testy prošly (nebo žádné
+    |                 testy nejsou nastavené) -> pokus o Git commit za
+    |                 stejných podmínek jako `runner._maybe_commit`
+    |                 (auto_commit zapnutý, testy neselhaly, je co
+    |                 commitnout)
+    +--> blocked:     stejný stav (stejné nesplněné body DoD + stejný
+    |                 výsledek testů) se opakuje `NO_PROGRESS_LIMIT`
+    |                 (3) iterací po sobě bez posunu
+    +--> max_iterations: vyčerpán limit iterací, DoD stále nesplněná
+    +--> error:       samotné volání agenta selhalo (chyba/timeout) - loop
+                      se hned zastaví, nezkouší to slepě znovu
+```
+
+### Definition of Done
+
+Uživatel zadá `--goal` (volný text, kontext cíle) a/nebo `--spec` (cesta k
+souboru s DoD). `parse_definition_of_done()` v `autonomous.py` rozseká text
+na jednotlivé položky: rozpozná checklist (`- [ ] ...` / `- [x] ...` -
+stav zaškrtnutí se stane počátečním stavem položky), odrážky (`- ...`) i
+číslované seznamy; jinak je každý neprázdný řádek jedna položka. Bez `--spec`
+se jako DoD použije samotný `--goal`.
+
+### Kontrakt agent <-> orchestrátor (JSON vyhodnocení)
+
+Protože orchestrátor nemá jinou cestu, jak zjistit, které body DoD jsou
+splněné, než se zeptat samotného agenta, každý prompt v `_build_iteration_prompt`
+explicitně žádá, aby úplně poslední zpráva agenta byla výhradně jeden JSON
+objekt tvaru `{"items": [{"index": 0, "done": true}, ...], "notes": "..."}`
+- jeden záznam pro každou DoD položku. `_extract_json` to parsuje (i přes
+případný markdown blok), `_apply_dod_updates` promítne výsledek do stavu.
+Pokud agent JSON nevrátí nebo je neplatný, stav DoD se pro tuto iteraci
+nezmění (a poznámka se zaloguje) - to typicky samo vede k detekci "bez
+pokroku" níže, místo tichého selhání.
+
+### Detekce "bez pokroku" (blocked)
+
+`_iteration_signature()` spočítá otisk z (nesplněné body DoD, výsledek
+testů, konec výstupu testů). Pokud se otisk `NO_PROGRESS_LIMIT` (3) iterací
+po sobě nezmění, běh se ukončí jako `blocked` - to je jediný způsob, jak
+orchestrátor pozná "stejná chyba/stejný stav pořád dokola", protože sám
+neumí posoudit, jestli je oprava kódu skutečně jiná, jen že se vnější stav
+(DoD + testy) neposunul.
+
+### Logování
+
+Každá iterace se loguje na dvou místech: (1) `logger.info`/`warning` do
+sdíleného `logs/orchestrator.log` (stejný logger jako zbytek orchestrátoru),
+(2) plný přepis (zadání, výstup agenta, výstup testů, poznámka) do
+`logs/autonomous/<run_id>.log`, přepisovaný po každé iteraci (`on_iteration`
+callback v `service.py`), takže i běh přerušený uprostřed nechá na disku
+kompletní záznam všech dosavadních iterací. Strojově čitelný výsledek
+(stav, DoD položky, všechny iterace) jde do
+`outbox/autonomous-<run_id>.json`, stejně jako `outbox/<task_id>.json` u
+běžných úkolů.
 
 ## Review agent (zatím neaktivní)
 

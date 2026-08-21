@@ -20,11 +20,11 @@ TEST_TIMEOUT_SECONDS = 900
 MAX_LOG_TAIL_CHARS = 6000
 
 
-def _tail(text: str, limit: int = MAX_LOG_TAIL_CHARS) -> str:
+def tail_text(text: str, limit: int = MAX_LOG_TAIL_CHARS) -> str:
     return text if len(text) <= limit else text[-limit:]
 
 
-def _run_tests(project_path: Path, test_command: str, logger: logging.Logger) -> tuple[bool, str]:
+def run_test_command(project_path: Path, test_command: str, logger: logging.Logger) -> tuple[bool, str]:
     logger.info("Spouštím testy: %s", test_command)
     try:
         proc = subprocess.run(
@@ -47,7 +47,7 @@ def _fix_prompt(original_prompt: str, test_command: str, test_output: str) -> st
     return (
         "Předchozí pokus o splnění tohoto úkolu prošel, ale automatické testy selhaly.\n"
         f"Testovací příkaz: {test_command}\n\n"
-        f"Výstup testů (může být zkrácený):\n{_tail(test_output)}\n\n"
+        f"Výstup testů (může být zkrácený):\n{tail_text(test_output)}\n\n"
         "Oprav kód tak, aby testy prošly. Neměň nic, co s chybou nesouvisí. "
         f"Původní zadání pro kontext: {original_prompt}"
     )
@@ -79,7 +79,7 @@ def run_task(task: Task, config: Config, agent: Agent, queue: TaskQueue, logger:
         while True:
             task.status = TaskStatus.TESTING
             queue.update(task)
-            passed, output = _run_tests(project_path, task.test_command, logger)
+            passed, output = run_test_command(project_path, task.test_command, logger)
             task.test_output = output
             task.tests_passed = passed
             if passed:

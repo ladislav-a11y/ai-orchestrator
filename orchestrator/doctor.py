@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from orchestrator.agents.claude_code import ClaudeCodeAgent
+from orchestrator.claude_settings import ensure_project_claude_settings
 from orchestrator.config import Config, load_config
 
 
@@ -90,6 +91,27 @@ def _check_dirs(config: Config) -> Check:
     return Check("Pracovní adresáře", True, msg)
 
 
+def _check_claude_settings(config: Config) -> Check:
+    """Retrofit the safe allow/deny permissions onto already-existing
+    registered projects (new projects get this from `service.submit()` on
+    their first task; this check catches ones that predate that, e.g. this
+    repo itself)."""
+    prepared = []
+    for name, entry in config.projects.items():
+        project_dir = Path(entry.path)
+        if not project_dir.exists():
+            continue  # created (and given settings) on first submitted task
+        settings_path = project_dir / ".claude" / "settings.local.json"
+        already_had_it = settings_path.exists()
+        ensure_project_claude_settings(project_dir)
+        if not already_had_it:
+            prepared.append(name)
+    msg = f"{len(config.projects)} registrovaný(ch) projekt(ů) zkontrolováno"
+    if prepared:
+        msg += f"; nastaveny bezpečné allow/deny permissions pro: {', '.join(prepared)}"
+    return Check("Claude Code permissions", True, msg)
+
+
 def _check_config(config: Config) -> Check:
     notes = []
     for name, entry in config.projects.items():
@@ -125,6 +147,7 @@ def run_doctor(live: bool = False, live_project: Optional[str] = None) -> Doctor
 
     checks.append(_check_dirs(config))
     checks.append(_check_config(config))
+    checks.append(_check_claude_settings(config))
 
     claude_check, agent = _check_claude_cli(config)
     checks.append(claude_check)

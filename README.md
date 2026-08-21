@@ -91,14 +91,69 @@ konfigurace spustí testy, a vypíše, co se stalo (výsledek, výstup testů,
 zda vznikl commit). Detailní log najdeš v `logs/tasks/<id>.log` a strojově
 čitelný výsledek v `outbox/<id>.json`.
 
-## 6. Zjištění stavu úkolů
+## 6. Autonomní vývojový režim
+
+Kromě jednorázového `run` umí orchestrátor i autonomní režim: zadáš projekt
+a "Definition of Done" (co musí platit, aby byl úkol hotový) a orchestrátor
+sám opakuje cyklus **implementace -> testy -> vyhodnocení -> oprava**, dokud
+Definition of Done není splněná, nebo dokud nedosáhne bezpečného maximálního
+počtu iterací (výchozí 10, natvrdo omezeno na 50 bez ohledu na to, co
+zadáš).
+
+```bash
+.venv\Scripts\python orchestrator.py autonomous --project station-agent --goal "Zaloz projekt station-agent a napis health-check endpoint" --spec dod-station-agent.md --max-iterations 10
+```
+
+`dod-station-agent.md` je obyčejný textový soubor s Definition of Done,
+jeden bod na řádek, klidně jako checklist:
+
+```markdown
+- [ ] Existuje FastAPI endpoint /health, ktery vraci {"status": "ok"}
+- [ ] Endpoint ma test, ktery overi 200 a spravne telo odpovedi
+- [ ] README popisuje, jak endpoint spustit a otestovat
+```
+
+Bez `--spec` stačí i jen `--goal` - použije se jako jediný bod Definition of
+Done. Co se děje v každé iteraci:
+
+1. Agent dostane cíl, aktuální (nesplněné) body Definition of Done, aktuální
+   stav projektu (`git status`), výsledek testů z minulé iterace a svou
+   vlastní poznámku z minulé iterace.
+2. Agent upraví/doplní kód.
+3. Pokud je nastavený testovací příkaz, orchestrátor spustí testy.
+4. Agent sám vyhodnotí, které body Definition of Done jsou už splněné.
+5. Každá iterace se zaloguje do `logs/autonomous/<id>.log` (a do
+   `logs/orchestrator.log`).
+
+Běh skončí jedním ze čtyř stavů:
+
+- **completed** - všechny body Definition of Done splněné A testy prošly (nebo
+  žádné testy nejsou nastavené). Pokud je navíc zapnutý `git.auto_commit` v
+  `config.yaml`, vytvoří se Git commit. Pokud testy neprošly, commit se
+  **nikdy** nevytvoří.
+- **blocked** - stejný stav (stejné nesplněné body + stejný výsledek testů)
+  se opakuje 3x po sobě bez posunu - orchestrátor to nezkouší dál dokola.
+- **max_iterations** - vyčerpán limit iterací, Definition of Done pořád není
+  splněná celá.
+- **error** - samotné volání agenta selhalo (např. timeout) - loop se hned
+  zastaví.
+
+Výsledek uvidíš přímo ve výstupu příkazu (které body jsou splněné/nesplněné,
+jestli vznikl commit), detailní log v `logs/autonomous/<id>.log` a strojově
+čitelný výsledek v `outbox/autonomous-<id>.json`.
+
+Platí úplně stejná bezpečnostní pravidla jako pro `run` (viz níže) -
+`workspace_root`, žádné `bypassPermissions`, žádný force push, žádné mazání
+historie, žádný commit při selhaných testech.
+
+## 7. Zjištění stavu úkolů
 
 ```bash
 .venv\Scripts\python orchestrator.py status
 .venv\Scripts\python orchestrator.py status <id-ukolu>
 ```
 
-## 7. Lokální API (zatím jen pro tvůj počítač)
+## 8. Lokální API (zatím jen pro tvůj počítač)
 
 ```bash
 .venv\Scripts\python orchestrator.py api
@@ -108,7 +163,7 @@ Spustí HTTP API na `http://127.0.0.1:8765` (jen na tomto počítači, nikam
 ven). To je příprava na budoucí propojení s jinými nástroji, např. mostem
 z ChatGPT - zatím to nikam nepřipojujeme.
 
-## 8. Adresáře inbox/outbox
+## 9. Adresáře inbox/outbox
 
 `inbox/` a `outbox/` jsou připravené pro budoucí automatické předávání
 úkolů/výsledků mezi orchestrátorem a jiným nástrojem, viz README v každém

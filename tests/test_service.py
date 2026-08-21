@@ -1,7 +1,24 @@
+import json
 from pathlib import Path
 
+from orchestrator import service as service_module
+from orchestrator.agents.base import Agent, AgentRunResult
+from orchestrator.autonomous import AutonomousStatus
 from orchestrator.config import ApiConfig, Config, GitConfig, PathsConfig, ProjectEntry, TestingConfig
 from orchestrator.service import OrchestratorService
+
+
+class FakeAgent(Agent):
+    name = "fake"
+
+    def is_available(self):
+        return True, "fake agent always available"
+
+    def run(self, request):
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+        )
 
 
 def make_cfg(tmp_path: Path) -> Config:
@@ -45,3 +62,69 @@ def test_submit_leaves_existing_project_dir_untouched(tmp_path):
     service.submit(project_ref="station-agent", prompt="pokracuj")
 
     assert marker.read_text(encoding="utf-8") == "existing content"
+
+
+def test_submit_writes_safe_claude_settings_for_new_project(tmp_path):
+    cfg = make_cfg(tmp_path)
+    project_dir = tmp_path / "workspace" / "station-agent"
+
+    service = OrchestratorService(cfg)
+    service.submit(project_ref="station-agent", prompt="zaloz projekt")
+
+    settings_path = project_dir / ".claude" / "settings.local.json"
+    assert settings_path.exists()
+    content = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "Bash(git push:*)" in content["permissions"]["deny"]
+    assert "Bash(git status:*)" in content["permissions"]["allow"]
+
+
+def test_submit_does_not_overwrite_existing_claude_settings(tmp_path):
+    cfg = make_cfg(tmp_path)
+    project_dir = tmp_path / "workspace" / "station-agent"
+    claude_dir = project_dir / ".claude"
+    claude_dir.mkdir(parents=True)
+    custom_settings = claude_dir / "settings.local.json"
+    custom_settings.write_text('{"permissions": {"allow": ["Bash(npm test:*)"]}}', encoding="utf-8")
+
+    service = OrchestratorService(cfg)
+    service.submit(project_ref="station-agent", prompt="pokracuj")
+
+    content = json.loads(custom_settings.read_text(encoding="utf-8"))
+    assert content == {"permissions": {"allow": ["Bash(npm test:*)"]}}
+
+
+def test_run_autonomous_completed_writes_log_and_outbox(tmp_path, monkeypatch):
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: FakeAgent())
+    cfg = make_cfg(tmp_path)
+    cfg.git = GitConfig(auto_commit=False)
+
+    service = OrchestratorService(cfg)
+    run_id, result = service.run_autonomous(
+        project_ref="station-agent",
+        goal="Priprav zakladni projekt",
+        spec_text="- [ ] Zaloz projekt",
+        max_iterations=3,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert all(item.done for item in result.dod_items)
+
+    log_path = cfg.logs_dir / "autonomous" / f"{run_id}.log"
+    assert log_path.exists()
+    assert "Priprav zakladni projekt" in log_path.read_text(encoding="utf-8")
+
+    outbox_path = cfg.outbox_dir / f"autonomous-{run_id}.json"
+    assert outbox_path.exists()
+    payload = json.loads(outbox_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "completed"
+    assert payload["run_id"] == run_id
+
+
+def test_run_autonomous_requires_goal_or_spec(tmp_path):
+    cfg = make_cfg(tmp_path)
+    service = OrchestratorService(cfg)
+    try:
+        service.run_autonomous(project_ref="station-agent")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "goal" in str(e) or "spec" in str(e)

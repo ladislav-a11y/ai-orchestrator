@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
+from orchestrator.autonomous import ABSOLUTE_MAX_ITERATIONS, AutonomousStatus, DEFAULT_MAX_ITERATIONS
 from orchestrator.doctor import run_doctor
 from orchestrator.models import TaskStatus
 from orchestrator.service import OrchestratorService
@@ -67,6 +69,73 @@ def _print_task(task) -> int:
     print(f"\nCena (odhad): ${task.cost_usd or 0:.4f}")
     print(f"Log: logs/tasks/{task.id}.log  |  Výsledek: outbox/{task.id}.json")
     return 0 if task.status == TaskStatus.DONE else 1
+
+
+def cmd_autonomous(args: argparse.Namespace) -> int:
+    if args.max_iterations < 1:
+        print("Chyba: --max-iterations musí být alespoň 1.")
+        return 1
+    if args.max_iterations > ABSOLUTE_MAX_ITERATIONS:
+        print(
+            f"Chyba: --max-iterations={args.max_iterations} přesahuje bezpečný strop "
+            f"{ABSOLUTE_MAX_ITERATIONS}. Orchestrátor nesmí běžet neomezeně dlouho - "
+            "zvol nižší hodnotu."
+        )
+        return 1
+
+    spec_text = None
+    if args.spec:
+        spec_path = Path(args.spec)
+        if not spec_path.exists():
+            print(f"Chyba: --spec soubor '{spec_path}' neexistuje.")
+            return 1
+        spec_text = spec_path.read_text(encoding="utf-8")
+
+    service = OrchestratorService()
+    try:
+        run_id, result = service.run_autonomous(
+            project_ref=args.project,
+            goal=args.goal,
+            spec_text=spec_text,
+            agent_name=args.agent,
+            test_command_override=args.test_command,
+            max_iterations=args.max_iterations,
+            auto_commit=(False if args.no_commit else None),
+        )
+    except ValueError as e:
+        print(f"Chyba: {e}")
+        return 1
+
+    return _print_autonomous_result(run_id, result)
+
+
+def _print_autonomous_result(run_id: str, result) -> int:
+    print(f"\n== Autonomní běh {run_id} - {result.status.value} ==")
+    print(f"Iterací provedeno: {len(result.iterations)}")
+    print("\n--- Definition of Done ---")
+    for i, item in enumerate(result.dod_items):
+        mark = "[x]" if item.done else "[ ]"
+        print(f"{mark} {i}. {item.text}")
+
+    if result.status == AutonomousStatus.BLOCKED:
+        print("\nZastaveno: stejný stav/chyba se opakuje bez pokroku (blocked).")
+    elif result.status == AutonomousStatus.MAX_ITERATIONS:
+        print("\nZastaveno: dosažen maximální počet iterací, Definition of Done ještě není splněná.")
+    elif result.status == AutonomousStatus.ERROR:
+        print("\nZastaveno: agent selhal.")
+
+    if result.committed:
+        print(f"\nVytvořen commit: {result.commit_hash}")
+    elif result.status == AutonomousStatus.COMPLETED:
+        print(
+            "\nCommit nebyl vytvořen (auto_commit vypnutý, žádné změny, nebo projekt "
+            "není Git repozitář)."
+        )
+    if result.error:
+        print(f"\nChyba: {result.error}")
+
+    print(f"\nLog: logs/autonomous/{run_id}.log  |  Výsledek: outbox/autonomous-{run_id}.json")
+    return 0 if result.status == AutonomousStatus.COMPLETED else 1
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -137,6 +206,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--test-command", help="Přepíše testovací příkaz pro tento běh")
     p_run.add_argument("--no-commit", action="store_true", help="Nikdy nevytvářet commit, i kdyby auto_commit bylo zapnuté")
     p_run.set_defaults(func=cmd_run)
+
+    p_auto = sub.add_parser(
+        "autonomous",
+        help="Autonomní vývojový režim: opakuje implementace -> testy -> vyhodnocení -> oprava, "
+        "dokud není splněná Definition of Done nebo není dosažen max. počet iterací",
+    )
+    p_auto.add_argument("--project", required=True, help="Jméno projektu z config.yaml, nebo cesta na disku")
+    p_auto.add_argument("--goal", help="Stručný popis cíle projektu (kontext pro agenta)")
+    p_auto.add_argument(
+        "--spec",
+        help="Cesta k souboru s Definition of Done (jeden bod na řádek, volitelně jako "
+        "checklist '- [ ] ...'). Pokud je zadán i --goal, --spec určuje Definition of Done "
+        "a --goal jen kontext cíle.",
+    )
+    p_auto.add_argument(
+        "--max-iterations", type=int, default=DEFAULT_MAX_ITERATIONS,
+        help=f"Bezpečný maximální počet iterací (výchozí {DEFAULT_MAX_ITERATIONS}, "
+        f"strop {ABSOLUTE_MAX_ITERATIONS})",
+    )
+    p_auto.add_argument("--agent", help="Který agent se má použít (výchozí: default_agent z config.yaml)")
+    p_auto.add_argument("--test-command", help="Přepíše testovací příkaz pro tento běh")
+    p_auto.add_argument("--no-commit", action="store_true", help="Nikdy nevytvářet commit, i kdyby auto_commit bylo zapnuté")
+    p_auto.set_defaults(func=cmd_autonomous)
 
     p_status = sub.add_parser("status", help="Zobrazí stav úkolu/úkolů")
     p_status.add_argument("task_id", nargs="?", help="ID konkrétního úkolu (bez ID zobrazí seznam)")

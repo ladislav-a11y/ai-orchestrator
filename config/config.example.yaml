@@ -38,14 +38,21 @@ claude_code:
   cli_path: ""
   # Prázdné = použije se výchozí model nastavený v samotném Claude Code.
   model: ""
-  # POVOLENÉ hodnoty: acceptEdits, auto, manual, dontAsk, plan.
+  # POVOLENÉ hodnoty (skutečné hodnoty CLI přepínače --permission-mode):
+  # default, acceptEdits, plan, bypassPermissions.
   # NIKDY nepoužívej "bypassPermissions" - orchestrátor to i tak odmítne
   # při startu, protože je to stejné jako --dangerously-skip-permissions.
   permission_mode: acceptEdits
-  # Volitelně omez, jaké nástroje smí Claude v této session použít.
-  # Prázdný seznam = použije se nastavení daného projektu (.claude/settings.json).
+  # Volitelně omez, jaké nástroje smí Claude v této session použít (obecné
+  # jméno nástroje, např. "Bash" nebo "Edit" - ne jednotlivé příkazy).
+  # Prázdný seznam = řídí se to jen jemnějšími allow/deny pravidly níže.
   allowed_tools: []
   disallowed_tools: []
+  # Jemná allow/deny pravidla na úrovni konkrétních příkazů (např.
+  # "Bash(git status:*)") orchestrátor nastavuje automaticky za tebe do
+  # <projekt>/.claude/settings.local.json - viz orchestrator/claude_settings.py
+  # a ARCHITECTURE.md. Tady v config.yaml nejsou, protože platí per-projekt,
+  # ne globálně pro agenta.
   # Tvrdý strop útraty za jeden úkol v USD. null = bez limitu (agent si
   # ale i tak hlídá běžné rozpočtové chování Claude Code).
   max_budget_usd: null

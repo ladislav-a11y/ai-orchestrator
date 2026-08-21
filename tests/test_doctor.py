@@ -44,6 +44,29 @@ def test_check_config_ok_when_paths_exist(tmp_path):
     assert check.ok is True
 
 
+def test_check_claude_settings_prepares_existing_project(tmp_path):
+    project_dir = tmp_path / "existing-project"
+    project_dir.mkdir()
+    cfg = Config()
+    cfg.projects = {"existing": ProjectEntry(name="existing", path=str(project_dir))}
+
+    check = doctor._check_claude_settings(cfg)
+
+    assert check.ok is True
+    assert "existing" in check.message
+    assert (project_dir / ".claude" / "settings.local.json").exists()
+
+
+def test_check_claude_settings_skips_project_that_does_not_exist_yet(tmp_path):
+    cfg = Config()
+    cfg.projects = {"ghost": ProjectEntry(name="ghost", path=str(tmp_path / "nope"))}
+
+    check = doctor._check_claude_settings(cfg)
+
+    assert check.ok is True
+    assert not (tmp_path / "nope").exists()
+
+
 def test_run_doctor_uses_real_config():
     report = doctor.run_doctor(live=False)
     names = [c.name for c in report.checks]

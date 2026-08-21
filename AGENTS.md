@@ -19,12 +19,18 @@ this file, stop and ask - do not silently override safety rules.
    `--force-with-lease`, no deleting branches or tags. `orchestrator/git_utils.py`
    intentionally exposes no such operation - do not add one without an
    explicit, separate user request and a new confirmation step.
+   `orchestrator/claude_settings.py` enforces the same list a second time, as
+   explicit Claude Code `deny` rules written into every project's
+   `.claude/settings.local.json` - keep both in sync if this list changes.
 3. **Never push to a remote** in this phase of the project. Pushing is not
    implemented at all; adding it requires an explicit user decision (see
    ARCHITECTURE.md).
 4. **Never create a commit when tests failed.** `runner.py`'s
-   `_maybe_commit` refuses to commit if `task.tests_passed is False`. Do not
-   route around this by calling `git commit` directly elsewhere.
+   `_maybe_commit` refuses to commit if `task.tests_passed is False`.
+   `autonomous.py`'s `_commit_if_ready` enforces the exact same rule a second
+   time for the autonomous loop (only commits when every Definition of Done
+   item is done AND the test command, if any, passed on that iteration). Do
+   not route around either by calling `git commit` directly elsewhere.
 5. **Never expose the local API beyond localhost.** `config.py` rejects any
    `api.host` other than `127.0.0.1` / `localhost` / `::1`. Do not add a
    flag or config path that binds to `0.0.0.0` or a public interface without
@@ -45,6 +51,13 @@ this file, stop and ask - do not silently override safety rules.
    or weaken this check, and do not add a code path that builds a
    `project_path`/`cwd` for an agent without going through
    `resolve_project()`.
+9. **The autonomous loop (`orchestrator/autonomous.py`) must never run
+   forever.** `run_autonomous_loop` hard-clamps `max_iterations` to
+   `ABSOLUTE_MAX_ITERATIONS` regardless of what a caller/CLI flag requests,
+   and stops (status `blocked`) after `NO_PROGRESS_LIMIT` consecutive
+   iterations with an unchanged (unmet Definition-of-Done items, test
+   result) signature. Do not remove either cap, and do not add a "retry
+   forever" or "ignore the cap" option.
 
 ## When adding a new agent/provider (e.g. OpenAI Codex)
 

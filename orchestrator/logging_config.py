@@ -71,3 +71,53 @@ def write_task_log(logs_dir: Path, task) -> Path:
         lines += ["", "--- chyba ---", task.error]
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+def autonomous_log_path(logs_dir: Path, run_id: str) -> Path:
+    d = logs_dir / "autonomous"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{run_id}.log"
+
+
+def write_autonomous_log(logs_dir: Path, run_id: str, project: str, goal: str, result) -> Path:
+    """Write a full human-readable transcript of one autonomous run, every
+    iteration included. Overwritten (not appended) after each iteration by the
+    caller, so a run that crashes mid-way still leaves a full record on disk
+    of every iteration completed so far."""
+    path = autonomous_log_path(logs_dir, run_id)
+    lines = [
+        f"Autonomní běh {run_id}",
+        f"projekt: {project}",
+        f"cíl: {goal}",
+        f"stav: {result.status.value}",
+        "",
+        "--- Definition of Done ---",
+    ]
+    for i, item in enumerate(result.dod_items):
+        mark = "[x]" if item.done else "[ ]"
+        lines.append(f"{mark} {i}. {item.text}")
+
+    for it in result.iterations:
+        lines += [
+            "",
+            f"=== iterace {it.index} ===",
+            f"testy prošly: {it.tests_passed}",
+            "--- zadání agentovi ---",
+            it.prompt,
+            "",
+            "--- výstup agenta ---",
+            it.agent_output or "(žádný)",
+        ]
+        if it.agent_error:
+            lines += ["", "--- chyba ---", it.agent_error]
+        if it.test_output:
+            lines += ["", "--- výstup testů ---", it.test_output]
+        if it.note:
+            lines += ["", f"poznámka: {it.note}"]
+
+    if result.committed:
+        lines += ["", "--- commit ---", f"hash: {result.commit_hash}"]
+    if result.error:
+        lines += ["", "--- chyba běhu ---", result.error]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
