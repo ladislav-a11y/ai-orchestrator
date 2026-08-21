@@ -8,9 +8,9 @@ touching the queue, runner, CLI, or API.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 @dataclass
@@ -36,6 +36,11 @@ class AgentRunResult:
     # any caller parsing a strict contract out of the agent's own message
     # (see autonomous.py) must only ever see what the agent itself said.
     permission_denials: int = 0
+    # The denied actions themselves (tool name/input etc.), exactly as
+    # reported by the agent's own raw response - so a human/log can see
+    # *which* commands were denied, not just how many. Same rationale as
+    # `permission_denials` for staying out of `output_text`.
+    permission_denial_details: list[dict[str, Any]] = field(default_factory=list)
 
 
 class Agent(ABC):

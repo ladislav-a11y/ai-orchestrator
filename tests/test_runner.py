@@ -102,6 +102,21 @@ def test_run_task_tests_exhaust_attempts_marks_failed(tmp_path):
     assert result.committed is False
 
 
+def test_run_task_records_permission_denial_details(tmp_path):
+    queue = TaskQueue(tmp_path / "tasks.db")
+    task = make_task("demo", str(tmp_path), "dej mi ahoj", "fake", None, 2, False)
+    queue.add(task)
+
+    denials = [{"tool_name": "Bash", "tool_input": {"command": "git push --force"}}]
+    agent = FakeAgent(
+        [AgentRunResult(success=True, output_text="hotovo", permission_denials=1, permission_denial_details=denials)]
+    )
+    result = run_task(task, make_cfg(tmp_path), agent, queue, LOGGER)
+
+    assert result.permission_denials == 1
+    assert result.permission_denial_details == denials
+
+
 def test_run_task_commits_when_enabled_and_tests_pass(tmp_path, git_repo):
     queue = TaskQueue(tmp_path / "tasks.db")
     (git_repo / "changed.txt").write_text("nova zmena\n", encoding="utf-8")

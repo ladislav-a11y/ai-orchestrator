@@ -71,8 +71,11 @@ Proto výchozí `permission_mode: acceptEdits` (automaticky schvaluje úpravy
 souborů, ale ne cokoliv riskantnějšího) a proto je důležité mít v cílovém
 projektu předem povolené nástroje, které agent bude opravdu potřebovat.
 Pokud Claude nějakou akci kvůli oprávnění odmítne, orchestrátor to
-zaznamená do výsledku úkolu (`permission_denials`), ale neudělá to sám
-za tebe.
+zaznamená do výsledku úkolu - jak počet (`Task.permission_denials`), tak
+konkrétní zamítnuté akce (`Task.permission_denial_details`, převzaté beze
+změny z `AgentRunResult.permission_denial_details`/Claude Code JSON
+odpovědi), do outbox JSON, do task logu i do výstupu CLI - ale neudělá to
+sám za tebe.
 
 ### Allow/deny pravidla per projekt (`orchestrator/claude_settings.py`)
 
@@ -80,11 +83,16 @@ Protože nikdo neodklikává interaktivní dotazy, `service.py` (`submit()`) př
 založení/prvním sáhnutí na projekt zapíše do `<projekt>/.claude/settings.local.json`
 pevně daná allow/deny pravidla (`orchestrator.claude_settings.build_settings()`):
 allow pokrývá čtení/úpravu/vytváření souborů projektu, lokální
-Python/`.venv`/`pytest`/`python -m unittest` a neškodnou půlku Gitu (`init`,
-`status`, `diff`, `add`, `commit`, `log`); deny natvrdo blokuje `git push`,
-`git reset --hard`, `git clean -fd`/`-fdx`, smazání `.git` a přepis historie
-(`rebase`, `filter-branch`, `commit --amend`, mazání větví/tagů) - druhá,
-nezávislá vrstva vedle `permission_mode` a `FORBIDDEN_*` kontrol výše. Nikdy
+Python/`.venv`/`pytest`/`python -m unittest` a jen čtecí/stage půlku Gitu
+(`init`, `status`, `diff`, `add`, `log` - záměrně BEZ `commit`); deny
+natvrdo blokuje `git push`, `git reset --hard`, `git clean -fd`/`-fdx`,
+smazání `.git`, přepis historie (`rebase`, `filter-branch`,
+`commit --amend`, mazání větví/tagů) a taky `git commit` samotný - commit
+smí vytvořit jedině orchestrátor (`runner.py`/`_maybe_commit`,
+`autonomous.py`/`_commit_if_ready`), nikdy sám agent (viz AGENTS.md
+pravidlo 11 a `NO_COMMIT_INSTRUCTION` v `claude_code.py` pro druhou,
+nezávislou vrstvu na úrovni promptu) - to celé je druhá, nezávislá vrstva
+vedle `permission_mode` a `FORBIDDEN_*` kontrol výše. Nikdy
 soubor nepřepíše, pokud už existuje (ruční úpravy zůstanou zachované), takže
 je to jen bezpečné výchozí nastavení pro projekty, které si sám založí.
 `doctor` stejná pravidla dodatečně zapíše i do už existujících registrovaných

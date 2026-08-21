@@ -31,6 +31,8 @@ this file, stop and ask - do not silently override safety rules.
    time for the autonomous loop (only commits when every Definition of Done
    item is done AND the test command, if any, passed on that iteration). Do
    not route around either by calling `git commit` directly elsewhere.
+   Related to rule 11: the implementation agent itself is never the one
+   creating this commit.
 5. **Never expose the local API beyond localhost.** `config.py` rejects any
    `api.host` other than `127.0.0.1` / `localhost` / `::1`. Do not add a
    flag or config path that binds to `0.0.0.0` or a public interface without
@@ -79,6 +81,17 @@ this file, stop and ask - do not silently override safety rules.
     recovery path, burning a session's budget for zero recorded progress. Do
     not remove the repair step, do not let it turn into a second full
     iteration, and do not make the audit pass optional or skippable.
+11. **The implementation agent must never create its own Git commit.**
+    Committing only ever happens through the orchestrator's own Git layer
+    (`git_utils.py`, called from `runner.py`'s `_maybe_commit` and
+    `autonomous.py`'s `_commit_if_ready`), never as a side effect of the
+    agent's own tool use, so it stays gated on the same verified-tests check
+    as rule 4. This is enforced twice: `claude_settings.py` denies
+    `Bash(git commit:*)` in every project's `.claude/settings.local.json`,
+    and `orchestrator/agents/claude_code.py` appends
+    `NO_COMMIT_INSTRUCTION` to every prompt sent to the agent. `git status`
+    and `git diff` stay allowed (the agent may need them to reason about its
+    own changes). Keep both layers in sync if this rule ever changes.
 
 ## When adding a new agent/provider (e.g. OpenAI Codex)
 

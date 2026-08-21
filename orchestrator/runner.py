@@ -10,7 +10,7 @@ import logging
 import subprocess
 from pathlib import Path
 
-from orchestrator.agents.base import Agent, AgentRunRequest
+from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult
 from orchestrator.config import Config
 from orchestrator.git_utils import GitError, commit as git_commit, has_uncommitted_changes, is_git_repo
 from orchestrator.models import Task, TaskStatus
@@ -62,6 +62,20 @@ def _fix_prompt(original_prompt: str, test_command: str, test_output: str) -> st
     )
 
 
+def _record_permission_denials(task: Task, result: AgentRunResult, logger: logging.Logger) -> None:
+    """Accumulate one agent.run() call's denied actions onto the task, and
+    log the concrete denied commands (not just the count) so it's visible
+    without having to open the outbox JSON."""
+    if not result.permission_denials:
+        return
+    task.permission_denials += result.permission_denials
+    task.permission_denial_details.extend(result.permission_denial_details)
+    logger.warning(
+        "Task %s: agent narazil na %s zamítnutou akci(í) kvůli oprávněním: %s",
+        task.id, result.permission_denials, result.permission_denial_details,
+    )
+
+
 def run_task(task: Task, config: Config, agent: Agent, queue: TaskQueue, logger: logging.Logger) -> Task:
     project_path = Path(task.project_path)
     task.status = TaskStatus.RUNNING
@@ -71,6 +85,7 @@ def run_task(task: Task, config: Config, agent: Agent, queue: TaskQueue, logger:
     result = agent.run(AgentRunRequest(project_path=project_path, prompt=task.prompt))
     task.claude_session_id = result.session_id
     task.cost_usd = result.cost_usd
+    _record_permission_denials(task, result, logger)
 
     if not result.success:
         task.status = TaskStatus.ERROR
@@ -113,6 +128,7 @@ def run_task(task: Task, config: Config, agent: Agent, queue: TaskQueue, logger:
             )
             task.attempts += 1
             task.claude_session_id = fix_result.session_id or task.claude_session_id
+            _record_permission_denials(task, fix_result, logger)
             if fix_result.cost_usd:
                 task.cost_usd = (task.cost_usd or 0) + fix_result.cost_usd
             if not fix_result.success:

@@ -50,11 +50,23 @@ def cmd_run(args: argparse.Namespace) -> int:
     return _print_task(result_task)
 
 
+def _format_denial(denial) -> str:
+    if isinstance(denial, dict):
+        tool = denial.get("tool_name") or denial.get("tool") or denial.get("name") or "?"
+        tool_input = denial.get("tool_input") or denial.get("input") or denial.get("parameters")
+        return f"{tool}({tool_input})" if tool_input is not None else str(tool)
+    return str(denial)
+
+
 def _print_task(task) -> int:
     print(f"\n== Task {task.id} - {task.status.value} ==")
     if task.result:
         print("\n--- Výsledek agenta ---")
         print(task.result)
+    if task.permission_denials:
+        print(f"\n--- Zamítnuté akce kvůli oprávněním ({task.permission_denials}) ---")
+        for denial in task.permission_denial_details:
+            print(f"  - {_format_denial(denial)}")
     if task.test_command:
         print(f"\n--- Testy ({task.test_command}) ---")
         print(f"Prošly: {task.tests_passed}")

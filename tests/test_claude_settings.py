@@ -28,13 +28,23 @@ def test_allows_only_the_non_destructive_git_commands():
         "Bash(git status:*)",
         "Bash(git diff:*)",
         "Bash(git add:*)",
-        "Bash(git commit:*)",
         "Bash(git log:*)",
     }
     assert expected.issubset(set(ALLOWED_RULES))
     # None of the allowed rules grant a bare/unrestricted Bash or PowerShell.
     for rule in ALLOWED_RULES:
         assert rule not in ("Bash", "Bash(*)", "Bash(*:*)")
+
+
+def test_does_not_allow_agent_to_commit():
+    # Committing is exclusively the orchestrator's own job (see AGENTS.md
+    # rule 11) - the agent must never be auto-approved to run `git commit`
+    # itself, only to inspect/stage the tree.
+    assert "Bash(git commit:*)" not in ALLOWED_RULES
+
+
+def test_denies_agent_from_committing():
+    assert "Bash(git commit:*)" in DENIED_RULES
 
 
 def test_denies_push_and_force_push():

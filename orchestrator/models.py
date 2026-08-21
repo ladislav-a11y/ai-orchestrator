@@ -55,6 +55,13 @@ class Task:
     cost_usd: Optional[float] = None
     source: str = "cli"  # cli | api | inbox
 
+    # Count of tool calls the agent wanted to make but were denied by the
+    # permission system, and the denied actions themselves (see
+    # AgentRunResult in orchestrator/agents/base.py) - accumulated across
+    # every agent.run() call for this task (initial run + any fix attempts).
+    permission_denials: int = 0
+    permission_denial_details: list[dict[str, Any]] = field(default_factory=list)
+
     def to_dict(self) -> dict[str, Any]:
         d = dict(self.__dict__)
         d["status"] = self.status.value if isinstance(self.status, TaskStatus) else self.status

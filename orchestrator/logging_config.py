@@ -67,6 +67,13 @@ def write_task_log(logs_dir: Path, task) -> Path:
         ]
     if task.committed:
         lines += ["", "--- commit ---", f"hash: {task.commit_hash}"]
+    if task.permission_denials:
+        lines += [
+            "",
+            f"--- zamítnuté akce kvůli oprávněním ({task.permission_denials}) ---",
+        ]
+        for denial in task.permission_denial_details:
+            lines.append(str(denial))
     if task.error:
         lines += ["", "--- chyba ---", task.error]
     path.write_text("\n".join(lines), encoding="utf-8")

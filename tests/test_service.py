@@ -99,6 +99,40 @@ def test_submit_does_not_overwrite_existing_claude_settings(tmp_path):
     assert content == {"permissions": {"allow": ["Bash(npm test:*)"]}}
 
 
+def test_run_task_permission_denial_details_reach_outbox(tmp_path, monkeypatch):
+    denials = [{"tool_name": "Bash", "tool_input": {"command": "git push --force"}}]
+
+    class DenyingAgent(Agent):
+        name = "fake"
+
+        def is_available(self):
+            return True, "fake agent always available"
+
+        def run(self, request):
+            return AgentRunResult(
+                success=True,
+                output_text="hotovo",
+                permission_denials=len(denials),
+                permission_denial_details=denials,
+            )
+
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: DenyingAgent())
+    cfg = make_cfg(tmp_path)
+
+    service = OrchestratorService(cfg)
+    task = service.submit(project_ref="station-agent", prompt="zkus neco zakazaneho")
+    result_task = service.run_sync(task)
+
+    assert result_task.permission_denials == len(denials)
+    assert result_task.permission_denial_details == denials
+
+    outbox_path = cfg.outbox_dir / f"{task.id}.json"
+    assert outbox_path.exists()
+    payload = json.loads(outbox_path.read_text(encoding="utf-8"))
+    assert payload["permission_denials"] == len(denials)
+    assert payload["permission_denial_details"] == denials
+
+
 def test_run_autonomous_completed_writes_log_and_outbox(tmp_path, monkeypatch):
     monkeypatch.setattr(service_module, "build_agent", lambda name, config: FakeAgent())
     cfg = make_cfg(tmp_path)

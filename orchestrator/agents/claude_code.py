@@ -7,6 +7,10 @@ Invocation contract (do not weaken this without updating AGENTS.md too):
     this is a second, independent guard in case config validation is ever bypassed)
   - runs with cwd = the target project's directory, so Claude's own
     project-level .claude/settings.json permission rules apply as normal
+  - every prompt gets NO_COMMIT_INSTRUCTION appended: the agent must never
+    run `git commit` itself (claude_settings.py denies it at the permission
+    level too) - only the orchestrator's own Git layer commits, and only
+    after tests are verified (see runner.py/_maybe_commit)
 """
 
 from __future__ import annotations
@@ -27,6 +31,18 @@ FORBIDDEN_FLAGS = (
     "--allow-dangerously-skip-permissions",
 )
 FORBIDDEN_PERMISSION_MODE = "bypassPermissions"
+
+# Committing is the orchestrator's job (runner.py/_maybe_commit,
+# autonomous.py/_commit_if_ready), done through its own Git layer only after
+# tests have been verified - never the agent's. This is enforced a second,
+# stronger way too (claude_settings.py denies `Bash(git commit:*)` outright),
+# but the prompt still says it explicitly so the agent doesn't waste a turn
+# attempting it and getting denied. `git status`/`git diff` stay fine to run.
+NO_COMMIT_INSTRUCTION = (
+    "Důležité pravidlo: NIKDY nespouštěj `git commit` (ani `git commit --amend`) - commit "
+    "po skončení tvého běhu vytváří výhradně orchestrátor, až ověří testy. `git status` a "
+    "`git diff` používat smíš a můžeš k ověření stavu, jen sám nic necommituj."
+)
 
 
 def _version_key(folder_name: str) -> tuple:
@@ -148,6 +164,7 @@ class ClaudeCodeAgent(Agent):
         prompt = request.prompt
         if request.context:
             prompt = f"{request.prompt}\n\n---\n{request.context}"
+        prompt = f"{prompt}\n\n---\n{NO_COMMIT_INSTRUCTION}"
         effective_request = AgentRunRequest(
             project_path=request.project_path,
             prompt=prompt,
@@ -203,6 +220,7 @@ class ClaudeCodeAgent(Agent):
                 cost_usd=raw.get("total_cost_usd"),
                 error=None if not is_error else (result_text or "Claude Code vrátil chybu."),
                 permission_denials=len(denials),
+                permission_denial_details=denials,
             )
 
         # Could not parse JSON - fall back to raw stdout/stderr.

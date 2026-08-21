@@ -9,13 +9,19 @@ engine itself enforces the same boundaries the orchestrator already relies on
 `orchestrator/config.py` / `orchestrator/agents/claude_code.py` and the
 `workspace_root` check (see AGENTS.md).
 
-Deliberately narrow: allow exactly what a normal edit-test-commit task needs
+Deliberately narrow: allow exactly what a normal edit-test task needs
 (read/create/edit project files, run local Python/pytest/unittest, and the
-non-destructive half of Git), and explicitly deny the Git operations that
+read-only/staging half of Git), and explicitly deny the Git operations that
 lose work (push, hard reset, clean, deleting .git, history rewrites - see
-AGENTS.md rule 2). Anything not listed simply is not auto-approved, which is
-the safe default when nobody can click "yes". No blanket "Bash" allow is
-granted here on purpose.
+AGENTS.md rule 2) *and* `git commit` itself - committing is the
+orchestrator's own job (runner.py/_maybe_commit, autonomous.py/
+_commit_if_ready), done only after tests are verified; the agent may
+inspect the tree (`git status`, `git diff`, `git add`) but must never create
+the commit itself (see AGENTS.md, and NO_COMMIT_INSTRUCTION in
+orchestrator/agents/claude_code.py for the matching prompt-level rule).
+Anything not listed simply is not auto-approved, which is the safe default
+when nobody can click "yes". No blanket "Bash" allow is granted here on
+purpose.
 """
 
 from __future__ import annotations
@@ -43,12 +49,12 @@ ALLOWED_RULES: list[str] = [
     "Bash(.venv/Scripts/python.exe:*)",
     "Bash(.venv\\Scripts\\python.exe:*)",
     "Bash(pytest:*)",
-    # Non-destructive Git.
+    # Non-destructive Git - deliberately excludes `git commit`: see
+    # DENIED_RULES below and the module docstring.
     "Bash(git init:*)",
     "Bash(git status:*)",
     "Bash(git diff:*)",
     "Bash(git add:*)",
-    "Bash(git commit:*)",
     "Bash(git log:*)",
 ]
 
@@ -64,6 +70,11 @@ DENIED_RULES: list[str] = [
     "Bash(git rebase:*)",
     "Bash(git filter-branch:*)",
     "Bash(git filter-repo:*)",
+    # Committing is exclusively the orchestrator's job, never the agent's -
+    # see module docstring and AGENTS.md. This also covers `--amend`, kept
+    # listed explicitly too since it doubles as a history-rewrite guard
+    # (AGENTS.md rule 2).
+    "Bash(git commit:*)",
     "Bash(git commit --amend:*)",
     "Bash(git reflog expire:*)",
     "Bash(git branch -D:*)",
