@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+config/config.yaml
+data/
+logs/*.log
+logs/tasks/
+outbox/*.json
+inbox/*.json
+inbox/processed/*.json
+.pytest_cache/

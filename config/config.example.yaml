@@ -1,0 +1,70 @@
+# Konfigurace ai-orchestrator.
+#
+# Tento soubor je VZOR. Při prvním spuštění se automaticky zkopíruje do
+# config/config.yaml, pokud config.yaml ještě neexistuje. Uprav si rovnou
+# config.yaml, ne tento vzor (ten slouží jako "tovární nastavení" pro obnovu).
+
+# Který agent se použije, pokud úkol žádný nevybere výslovně.
+default_agent: claude-code
+
+# Registr projektů: krátké jméno -> cesta na disku (+ volitelný testovací
+# příkaz specifický pro daný projekt). Do "run" pak stačí zadat jméno
+# projektu, ne celou cestu. Cesty na Windows piš buď s dvojitým zpětným
+# lomítkem ("D:\\claudemail"), nebo s obyčejným lomítkem ("D:/claudemail").
+projects:
+  ai-orchestrator:
+    path: "D:/orchestrator/ai-orchestrator"
+  # claudemail:
+  #   path: "D:/claudemail"
+  #   test_command: "pytest"
+
+# Nastavení agenta Claude Code.
+claude_code:
+  # Prázdné = orchestrátor si cestu k "claude" najde sám (nejdřív v PATH,
+  # pak ve standardních instalačních adresářích Claude Desktop / Claude Code).
+  cli_path: ""
+  # Prázdné = použije se výchozí model nastavený v samotném Claude Code.
+  model: ""
+  # POVOLENÉ hodnoty: acceptEdits, auto, manual, dontAsk, plan.
+  # NIKDY nepoužívej "bypassPermissions" - orchestrátor to i tak odmítne
+  # při startu, protože je to stejné jako --dangerously-skip-permissions.
+  permission_mode: acceptEdits
+  # Volitelně omez, jaké nástroje smí Claude v této session použít.
+  # Prázdný seznam = použije se nastavení daného projektu (.claude/settings.json).
+  allowed_tools: []
+  disallowed_tools: []
+  # Tvrdý strop útraty za jeden úkol v USD. null = bez limitu (agent si
+  # ale i tak hlídá běžné rozpočtové chování Claude Code).
+  max_budget_usd: null
+  # Po kolika sekundách bez odpovědi orchestrátor běh Claude Code ukončí.
+  timeout_seconds: 1800
+
+# Git integrace.
+git:
+  # Automaticky vytvořit commit po úspěšně dokončeném a otestovaném úkolu.
+  # Výchozí je false - dokud si nejsi jistý, že tomu chceš důvěřovat, nech
+  # to vypnuté a commituj si sám podle "git diff" výstupu z orchestrátoru.
+  auto_commit: false
+  commit_message_prefix: "[ai-orchestrator] "
+
+# Testování.
+testing:
+  # Výchozí testovací příkaz, pokud projekt v "projects" nemá vlastní
+  # test_command. Prázdné = testy se pro daný projekt přeskočí (a tím pádem
+  # se rovnou přejde k commitu, pokud je auto_commit zapnutý).
+  test_command: ""
+  # Kolikrát se má agent pokusit kód opravit, když testy selžou, než se
+  # úkol označí jako FAILED.
+  max_fix_attempts: 2
+
+# Lokální API (zatím jen pro localhost, nikdy nevystavovat do internetu).
+api:
+  host: "127.0.0.1"
+  port: 8765
+
+# Pracovní adresáře - relativní cesty jsou vůči kořeni projektu.
+paths:
+  inbox: "inbox"
+  outbox: "outbox"
+  logs: "logs"
+  data: "data"
