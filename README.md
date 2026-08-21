@@ -64,10 +64,18 @@ projekty, např.:
 projects:
   ai-orchestrator:
     path: "D:/orchestrator/ai-orchestrator"
-  muj-projekt:
-    path: "D:/cesta/k/projektu"
-    test_command: "pytest"   # nepovinné - jak spustit testy tohoto projektu
+  station-agent:
+    path: "D:/orchestrator/station-agent"   # nemusí ještě existovat
+    test_command: "pytest"
 ```
+
+Cesta projektu nemusí předem existovat - pokud adresář chybí, orchestrátor
+ho při prvním úkolu na daném projektu sám založí, takže agent může založit
+úplně nový projekt od nuly (např. `station-agent` vedle `ai-orchestrator`).
+Jediné omezení: cesta musí ležet uvnitř pracovního prostoru nastaveného v
+`workspace_root` (výchozí je nadřazený adresář tohoto repozitáře, tedy
+`D:\orchestrator`) - mimo něj orchestrátor a Claude Code nikdy nesmí
+pracovat, a to i kdyby ses překlepl v `config.yaml`.
 
 `auto_commit: false` je výchozí nastavení - orchestrátor tedy zatím NIKDY
 sám necommituje, dokud to v `config.yaml` (sekce `git`) ručně nezapneš.
@@ -111,6 +119,9 @@ z nich. Zatím to lze použít i ručně: `python orchestrator.py import-inbox`.
 - Orchestrátor **nikdy** nepoužije `--dangerously-skip-permissions` ani
   jinou obdobu obcházení kontroly oprávnění - je to natvrdo zakázané i v
   konfiguraci (viz `AGENTS.md`).
+- Agent smí pracovat jen uvnitř pracovního prostoru (`workspace_root`,
+  výchozí `D:\orchestrator`) - jakýkoliv projekt mimo něj (v `config.yaml`
+  i v `--project`) orchestrátor natvrdo odmítne.
 - **Nikdy nesmaže Git historii** ani nepoužije force push. Push na internet
   v této fázi vůbec neexistuje.
 - Commit vznikne jen tehdy, když to povolíš (`git.auto_commit: true`) A

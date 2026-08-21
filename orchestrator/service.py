@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Optional
 
 from orchestrator.agents.registry import build_agent
@@ -38,6 +39,17 @@ class OrchestratorService:
         source: str = "cli",
     ) -> Task:
         entry = self.config.resolve_project(project_ref)
+        project_dir = Path(entry.path)
+        if not project_dir.exists():
+            # Only registered projects (config.yaml) can reach this point
+            # with a non-existent path - resolve_project() already requires
+            # a raw filesystem path to exist, and already checked entry.path
+            # lies inside workspace_root. This lets a project like
+            # "station-agent" be registered before it exists on disk, so the
+            # agent can scaffold it from scratch on its first task.
+            project_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info("Vytvořen nový adresář projektu '%s': %s", entry.name, project_dir)
+
         test_command = test_command_override
         if test_command is None:
             test_command = entry.test_command or self.config.testing.test_command or None

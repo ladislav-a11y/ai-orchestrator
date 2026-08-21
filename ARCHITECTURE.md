@@ -27,8 +27,8 @@ Toto je implementováno v `orchestrator/runner.py` funkcí `run_task`.
 - `orchestrator/models.py` - `Task` (id, created_at, project, prompt, status,
   result, agent, error, + auditní pole jako attempts, test_output, commit_hash).
 - `orchestrator/config.py` - načtení `config/config.yaml`, validace
-  (natvrdo odmítne `permission_mode: bypassPermissions` a jiný `api.host`
-  než localhost).
+  (natvrdo odmítne `permission_mode: bypassPermissions`, jiný `api.host`
+  než localhost, a jakýkoliv projekt mimo `workspace_root`).
 - `orchestrator/queue.py` - fronta úkolů v SQLite (`data/tasks.db`). SQLite
   proto, aby CLI i API mohly bezpečně číst stav, zatímco worker vlákno píše.
 - `orchestrator/agents/` - abstraktní rozhraní agenta (`base.py`) a
@@ -70,6 +70,28 @@ projektu (`.claude/settings.json`) předem povolené nástroje, které agent
 bude opravdu potřebovat. Pokud Claude nějakou akci kvůli oprávnění odmítne,
 orchestrátor to zaznamená do výsledku úkolu (`permission_denials`), ale
 neudělá to sám za tebe.
+
+## Pracovní prostor (`workspace_root`)
+
+`ClaudeCodeAgent` dostává `cwd` = cesta projektu vrácená
+`Config.resolve_project()`. Tahle metoda (a `load_config()` při startu pro
+registrované projekty) natvrdo odmítne jakoukoliv cestu, která neleží uvnitř
+`workspace_root` - ať je zadaná jménem z `projects` v `config.yaml`, nebo
+jako syrová cesta v `--project`. Výchozí `workspace_root` (když není v
+`config.yaml` vyplněný) je nadřazený adresář tohoto repozitáře, tedy
+`D:\orchestrator` - takže agent smí pracovat v libovolném podadresáři
+`D:\orchestrator` (např. `D:\orchestrator\station-agent`), ale nikdy mimo
+něj. Cesta registrovaného projektu nemusí předem existovat: `service.py`
+(`OrchestratorService.submit`) ji při prvním úkolu založí (`mkdir -p`),
+takže agent může založit úplně nový projekt od nuly - `--project` se
+syrovou cestou naopak stále vyžaduje, aby adresář už existoval (ochrana
+proti překlepu, který by jinak potichu založil adresář kdekoliv v
+pracovním prostoru).
+
+Uvnitř `workspace_root` pak o skutečná oprávnění (co smí Claude v daném
+projektu upravit/spustit) dál rozhoduje `permission_mode` a `.claude/settings.json`
+cílového projektu, jak je popsáno níže - `workspace_root` je jen vnější
+hranice "kam vůbec smí sáhnout", ne náhrada za tato jemnější oprávnění.
 
 ## Review agent (zatím neaktivní)
 

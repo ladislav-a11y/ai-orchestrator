@@ -27,12 +27,14 @@ def test_check_dirs_creates_missing(tmp_path):
     assert (tmp_path / "outbox").exists()
 
 
-def test_check_config_flags_missing_project_path(tmp_path):
+def test_check_config_notes_missing_project_path_within_workspace(tmp_path):
     cfg = Config()
+    cfg.workspace_root = str(tmp_path)
     cfg.projects = {"ghost": ProjectEntry(name="ghost", path=str(tmp_path / "does-not-exist"))}
     check = doctor._check_config(cfg)
-    assert check.ok is False
+    assert check.ok is True
     assert "ghost" in check.message
+    assert "vytvoří se automaticky" in check.message
 
 
 def test_check_config_ok_when_paths_exist(tmp_path):

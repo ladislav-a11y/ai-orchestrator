@@ -36,6 +36,15 @@ this file, stop and ask - do not silently override safety rules.
 7. **Never silently delete user data.** `inbox/` files are moved to
    `inbox/processed/`, never deleted. Task history in `data/tasks.db` is
    never pruned automatically.
+8. **Never let a project resolve outside `workspace_root`.** Every project
+   path - whether a registry entry in `config.yaml` or a raw path passed to
+   `--project` - is checked by `Config._ensure_within_workspace()`
+   (`orchestrator/config.py`), once at config load time (registry entries)
+   and again in `resolve_project()` (all callers). Default `workspace_root`
+   is the parent directory of this repo (`D:\orchestrator`). Do not remove
+   or weaken this check, and do not add a code path that builds a
+   `project_path`/`cwd` for an agent without going through
+   `resolve_project()`.
 
 ## When adding a new agent/provider (e.g. OpenAI Codex)
 

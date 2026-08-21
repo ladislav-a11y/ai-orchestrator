@@ -78,6 +78,10 @@ class Config:
     testing: TestingConfig = field(default_factory=TestingConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
+    # Prázdné = kořen pracovního prostoru je nadřazený adresář tohoto projektu
+    # (typicky D:\orchestrator). Žádný projekt (registrovaný ani zadaný jako
+    # syrová cesta) nesmí ležet mimo tento adresář - viz _ensure_within_workspace.
+    workspace_root: str = ""
     source_path: Optional[Path] = None
 
     def resolve_path(self, relative_or_absolute: str) -> Path:
@@ -85,6 +89,22 @@ class Config:
         if p.is_absolute():
             return p
         return PROJECT_ROOT / p
+
+    @property
+    def workspace_root_dir(self) -> Path:
+        raw = self.workspace_root or str(PROJECT_ROOT.parent)
+        return Path(raw).resolve()
+
+    def _ensure_within_workspace(self, path: Path) -> Path:
+        resolved = path.resolve()
+        root = self.workspace_root_dir
+        if resolved != root and root not in resolved.parents:
+            raise ValueError(
+                f"Cesta '{resolved}' je mimo povolený pracovní prostor "
+                f"'{root}' (workspace_root v config.yaml). Orchestrátor a "
+                "ClaudeCodeAgent smí pracovat jen uvnitř tohoto adresáře."
+            )
+        return resolved
 
     @property
     def inbox_dir(self) -> Path:
@@ -105,10 +125,16 @@ class Config:
     def resolve_project(self, project_ref: str) -> ProjectEntry:
         """Resolve a project by its registry name, or accept a raw filesystem path."""
         if project_ref in self.projects:
-            return self.projects[project_ref]
+            # Registered entries are already validated against workspace_root
+            # in load_config() at startup - re-checked here too (cheap, and
+            # protects callers that construct a Config by hand).
+            entry = self.projects[project_ref]
+            self._ensure_within_workspace(Path(entry.path))
+            return entry
         p = Path(project_ref)
         if p.exists():
-            return ProjectEntry(name=project_ref, path=str(p.resolve()))
+            resolved = self._ensure_within_workspace(p)
+            return ProjectEntry(name=project_ref, path=str(resolved))
         raise ValueError(
             f"Neznámý projekt '{project_ref}'. Není ani v config.yaml (projects), "
             f"ani to není existující cesta na disku."
@@ -193,7 +219,7 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         data=paths_raw.get("data", "data"),
     )
 
-    return Config(
+    config = Config(
         default_agent=raw.get("default_agent", "claude-code"),
         projects=projects,
         claude_code=claude_code,
@@ -201,5 +227,17 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         testing=testing,
         api=api,
         paths=paths,
+        workspace_root=raw.get("workspace_root", ""),
         source_path=cfg_path,
     )
+
+    # Fail fast: reject any registered project that lies outside
+    # workspace_root, at load time, so a bad config.yaml is caught before
+    # any task runs (not just when that particular project is used).
+    for name, entry in projects.items():
+        try:
+            config._ensure_within_workspace(Path(entry.path))
+        except ValueError as e:
+            raise ValueError(f"projekt '{name}' v config.yaml: {e}") from e
+
+    return config

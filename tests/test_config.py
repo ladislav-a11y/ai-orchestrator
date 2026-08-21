@@ -36,6 +36,7 @@ def test_project_registry_parsing(tmp_path):
     project_dir = tmp_path / "myproj"
     project_dir.mkdir()
     cfg_path.write_text(
+        f"workspace_root: \"{tmp_path.as_posix()}\"\n"
         f"projects:\n  myproj:\n    path: \"{project_dir.as_posix()}\"\n    test_command: pytest\n",
         encoding="utf-8",
     )
@@ -47,7 +48,7 @@ def test_project_registry_parsing(tmp_path):
 
 def test_resolve_project_by_raw_path(tmp_path):
     cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text("projects: {}\n", encoding="utf-8")
+    cfg_path.write_text(f"workspace_root: \"{tmp_path.as_posix()}\"\nprojects: {{}}\n", encoding="utf-8")
     cfg = load_config(cfg_path, create_if_missing=False)
     entry = cfg.resolve_project(str(tmp_path))
     assert Path(entry.path) == tmp_path.resolve()
@@ -55,7 +56,54 @@ def test_resolve_project_by_raw_path(tmp_path):
 
 def test_resolve_unknown_project_raises(tmp_path):
     cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text("projects: {}\n", encoding="utf-8")
+    cfg_path.write_text(f"workspace_root: \"{tmp_path.as_posix()}\"\nprojects: {{}}\n", encoding="utf-8")
     cfg = load_config(cfg_path, create_if_missing=False)
     with pytest.raises(ValueError):
         cfg.resolve_project("does-not-exist-anywhere-xyz")
+
+
+def test_default_workspace_root_is_repo_parent():
+    cfg = load_config(EXAMPLE, create_if_missing=False)
+    assert cfg.workspace_root_dir == EXAMPLE.resolve().parent.parent.parent
+
+
+def test_registered_project_outside_workspace_root_rejected(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        f"workspace_root: \"{workspace.as_posix()}\"\n"
+        f"projects:\n  evil:\n    path: \"{outside.as_posix()}\"\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="pracovní prostor"):
+        load_config(cfg_path, create_if_missing=False)
+
+
+def test_raw_path_outside_workspace_root_rejected(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(f"workspace_root: \"{workspace.as_posix()}\"\nprojects: {{}}\n", encoding="utf-8")
+    cfg = load_config(cfg_path, create_if_missing=False)
+    with pytest.raises(ValueError, match="pracovní prostor"):
+        cfg.resolve_project(str(outside))
+
+
+def test_project_inside_workspace_root_subdir_accepted(tmp_path):
+    workspace = tmp_path / "workspace"
+    nested = workspace / "sub" / "myproj"
+    nested.mkdir(parents=True)
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        f"workspace_root: \"{workspace.as_posix()}\"\n"
+        f"projects:\n  myproj:\n    path: \"{nested.as_posix()}\"\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_path, create_if_missing=False)
+    entry = cfg.resolve_project("myproj")
+    assert Path(entry.path) == nested

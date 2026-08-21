@@ -7,13 +7,26 @@
 # Který agent se použije, pokud úkol žádný nevybere výslovně.
 default_agent: claude-code
 
+# Kořen pracovního prostoru: hranice, mimo kterou orchestrátor (a jím řízený
+# ClaudeCodeAgent) nikdy nesmí pracovat - natvrdo vynuceno v config.py, ať už
+# je projekt zadaný jménem z registru níže, nebo jako syrová cesta na disku.
+# Prázdné = automaticky nadřazený adresář tohoto repozitáře, tedy
+# "D:/orchestrator" (protože tento projekt leží v "D:/orchestrator/ai-orchestrator").
+workspace_root: ""
+
 # Registr projektů: krátké jméno -> cesta na disku (+ volitelný testovací
 # příkaz specifický pro daný projekt). Do "run" pak stačí zadat jméno
 # projektu, ne celou cestu. Cesty na Windows piš buď s dvojitým zpětným
 # lomítkem ("D:\\claudemail"), nebo s obyčejným lomítkem ("D:/claudemail").
+# Cesta nemusí existovat předem - pokud neexistuje, orchestrátor adresář
+# při prvním úkolu na tomto projektu sám založí (agent tak může založit
+# úplně nový projekt od nuly). Musí ale vždy ležet uvnitř workspace_root.
 projects:
   ai-orchestrator:
     path: "D:/orchestrator/ai-orchestrator"
+  # station-agent:
+  #   path: "D:/orchestrator/station-agent"   # zatím nemusí existovat
+  #   test_command: "pytest"
   # claudemail:
   #   path: "D:/claudemail"
   #   test_command: "pytest"

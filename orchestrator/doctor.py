@@ -91,17 +91,18 @@ def _check_dirs(config: Config) -> Check:
 
 
 def _check_config(config: Config) -> Check:
-    problems = []
+    notes = []
     for name, entry in config.projects.items():
         if not Path(entry.path).exists():
-            problems.append(f"projekt '{name}' odkazuje na neexistující cestu: {entry.path}")
-    if problems:
-        return Check("Konfigurace", False, "; ".join(problems))
-    return Check(
-        "Konfigurace",
-        True,
-        f"{config.source_path} ({len(config.projects)} projekt(ů), agent='{config.default_agent}')",
-    )
+            notes.append(
+                f"projekt '{name}' ({entry.path}) zatím na disku neexistuje - "
+                "vytvoří se automaticky při prvním spuštěném úkolu"
+            )
+    msg = f"{config.source_path} ({len(config.projects)} projekt(ů), agent='{config.default_agent}')"
+    msg += f", pracovní prostor: {config.workspace_root_dir}"
+    if notes:
+        msg += "; " + "; ".join(notes)
+    return Check("Konfigurace", True, msg)
 
 
 @dataclass
