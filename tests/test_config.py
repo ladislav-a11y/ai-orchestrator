@@ -24,6 +24,21 @@ def test_forbidden_permission_mode_rejected(tmp_path):
         load_config(bad, create_if_missing=False)
 
 
+def test_antigravity_default_mode_is_accept_edits():
+    cfg = load_config(EXAMPLE, create_if_missing=False)
+    assert cfg.antigravity.mode == "accept-edits"
+
+
+def test_antigravity_unsafe_mode_rejected(tmp_path):
+    bad = tmp_path / "config.yaml"
+    bad.write_text(
+        "antigravity:\n  mode: dangerously-skip-permissions\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="antigravity.mode"):
+        load_config(bad, create_if_missing=False)
+
+
 def test_non_localhost_api_host_rejected(tmp_path):
     bad = tmp_path / "config.yaml"
     bad.write_text("api:\n  host: 0.0.0.0\n", encoding="utf-8")

@@ -59,6 +59,22 @@ claude_code:
   # Po kolika sekundách bez odpovědi orchestrátor běh Claude Code ukončí.
   timeout_seconds: 1800
 
+# Nastavení agenta Antigravity (lokální CLI "agy"). Vybere se buď jako
+# default_agent výše, nebo za běhu přepínačem "--agent antigravity".
+antigravity:
+  # Prázdné = orchestrátor si cestu k "agy" najde sám (v PATH).
+  cli_path: ""
+  # Prázdné = použije se výchozí model nastavený v samotném Antigravity CLI.
+  model: ""
+  # Předává se jako "--mode" CLI přepínači "agy". "accept-edits" automaticky
+  # schvaluje úpravy souborů, ale ostatní akce (např. shellové příkazy) i tak
+  # v neinteraktivním režimu ve výchozím stavu zamítá. NIKDY sem nedávej nic,
+  # co by odpovídalo "--dangerously-skip-permissions" - ten přepínač adapter
+  # nikdy nepoužije bez ohledu na tuto hodnotu.
+  mode: accept-edits
+  # Po kolika sekundách bez odpovědi orchestrátor běh Antigravity ukončí.
+  timeout_seconds: 1800
+
 # Git integrace.
 git:
   # Automaticky vytvořit commit po úspěšně dokončeném a otestovaném úkolu.

@@ -1,0 +1,19 @@
+﻿- [ ] Přidat nového agenta/provider adapter `antigravity` do ai-orchestratoru vedle `claude-code`.
+- [ ] Adapter musí používat lokálně nainstalované Antigravity CLI `agy`.
+- [ ] Pro jednorázový běh používat neinteraktivní režim `agy --print <prompt> --output-format json`.
+- [ ] Parsovat JSON výstup minimálně z polí `status`, `response`, `conversation_id` a `usage`.
+- [ ] Za úspěch považovat pouze odpověď se stavem SUCCESS; ostatní stavy převést na jasnou chybu providera.
+- [ ] Zachovat společný Agent/provider kontrakt používaný orchestrátorem, aby autonomous režim nemusel znát detaily Antigravity CLI.
+- [ ] Umožnit výběr agenta přes `--agent antigravity`.
+- [ ] Nepoužívat `--dangerously-skip-permissions`.
+- [ ] Pro práci nad projektem spouštět Antigravity v pracovním adresáři konkrétního projektu a nepovolit přístup mimo povolený workspace.
+- [ ] Ověřit bezpečný režim editace Antigravity CLI bez automatického obcházení permission kontrol.
+- [ ] Podporovat timeout a zachytit návratový kód, stderr a nevalidní JSON.
+- [ ] Z usage statistik ukládat alespoň input_tokens, output_tokens, thinking_tokens a total_tokens, pokud jsou dostupné.
+- [ ] Přidat detekci quota/session limitu Antigravity a převést ji na provider stav LIMITED s retry informací, pokud ji CLI poskytne.
+- [ ] Přidat unit test úspěšného JSON výstupu.
+- [ ] Přidat test nevalidního JSON, chybového návratového kódu a quota chyby.
+- [ ] Přidat integrační test přes mock CLI tak, aby testy nespotřebovávaly skutečnou Antigravity kvótu.
+- [ ] Přidat jeden volitelný live smoke test, který se spustí pouze explicitně a pouze přečte stav projektu bez změn.
+- [ ] Agent nesmí vytvářet git commit; commitování zůstává odpovědností orchestrátoru.
+- [ ] Spustit celý test suite a všechny testy musí projít.

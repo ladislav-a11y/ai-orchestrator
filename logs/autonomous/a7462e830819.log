@@ -1,0 +1,194 @@
+Autonomní běh a7462e830819
+projekt: D:\orchestrator\ai-project-manager
+cíl: Dokonci AI Project Manager z knihovniho MVP do skutecne spustitelneho bezobsluzneho rezimu. Dopln CLI/daemon bootstrap, realne Trello nacteni a Inbox, ProviderRegistry, propojeni na ai-orchestrator autonomous, session-limit retry_after, automaticky resume, project locking, Trello sync, --once testovaci rezim a trvaly scheduler loop. Nepouzivej AI tokeny kdyz neni prace.
+stav: completed
+
+--- Definition of Done ---
+[x] 0. Entry point musí načíst konfiguraci pro Trello, projekty, ai-orchestrator a providery bez hardcoded tajných údajů.
+[x] 1. Načíst reálné projektové záznamy z Trella a převést je na ProjectRecord.
+[x] 2. Načíst a zpracovat skutečný Trello Inbox jako jediný ruční vstup uživatele.
+[x] 3. Inicializovat ProviderRegistry a podporovat AVAILABLE/LIMITED/ERROR + retry_after.
+[x] 4. Implementovat reálný run_fn, který spouští ai-orchestrator v autonomous režimu s projektem, goal/spec a checkpointy.
+[x] 5. Session/quota limit z výstupu orchestrátoru musí aktualizovat provider na LIMITED a uložit retry_after.
+[x] 6. Scheduler loop musí čekat bez AI volání, když není práce nebo je provider LIMITED.
+[x] 7. Po retry_after musí provider znovu ověřit a projekt automaticky obnovit bez ručního zásahu.
+[x] 8. Použít ProjectLockManager, aby jeden projekt nemohli současně zpracovávat dva provideři.
+[x] 9. Po každém běhu synchronizovat stav, provider, checkpoint, stop_reason, retry_after, last_output a next_step zpět do Trella.
+[x] 10. Přidat `--once` režim pro bezpečný živý test jednoho scheduler ticku a běžný loop režim pro trvalý provoz.
+[x] 11. Přidat srozumitelné logování: vybraný projekt, provider, čekání na retry_after, spuštění autonomous, výsledek a Trello sync.
+[x] 12. Přidat regresní/integration testy entrypointu, --once, no-work stavu, provider limitu a resume.
+[x] 13. Spustit celý test suite přes orchestrátor a všechny testy musí projít.
+[x] 14. Agent nesmí vytvářet git commit; commitování zůstává odpovědností orchestrátoru.
+
+=== iterace 1 ===
+testy prošly: True  |  dávka: [0, 1, 2, 3, 4, 5, 6, 7]  |  prompt: 2308 znaků (~577 tokenů)  |  protokolová chyba: False  |  repair pokus: False  |  audit proveden: False
+--- zadání agentovi ---
+Autonomní vývojová iterace 1/12.
+
+Cíl projektu: Dokonci AI Project Manager z knihovniho MVP do skutecne spustitelneho bezobsluzneho rezimu. Dopln CLI/daemon bootstrap, realne Trello nacteni a Inbox, ProviderRegistry, propojeni na ai-orchestrator autonomous, session-limit retry_after, automaticky resume, project locking, Trello sync, --once testovaci rezim a trvaly scheduler loop. Nepouzivej AI tokeny kdyz neni prace.
+
+Definition of Done: 0/15 bodů celkem už ověřeno jako splněno (nesplněné body se hlásí kumulativně, jednou splněný bod se sem už nevrací). Níže je dávka 8 aktuálně NESPLNĚNÝCH bodů, na kterou se máš zaměřit v této iteraci:
+0. [NESPLNĚNO] Entry point musí načíst konfiguraci pro Trello, projekty, ai-orchestrator a providery bez hardcoded tajných údajů.
+1. [NESPLNĚNO] Načíst reálné projektové záznamy z Trella a převést je na ProjectRecord.
+2. [NESPLNĚNO] Načíst a zpracovat skutečný Trello Inbox jako jediný ruční vstup uživatele.
+3. [NESPLNĚNO] Inicializovat ProviderRegistry a podporovat AVAILABLE/LIMITED/ERROR + retry_after.
+4. [NESPLNĚNO] Implementovat reálný run_fn, který spouští ai-orchestrator v autonomous režimu s projektem, goal/spec a checkpointy.
+5. [NESPLNĚNO] Session/quota limit z výstupu orchestrátoru musí aktualizovat provider na LIMITED a uložit retry_after.
+6. [NESPLNĚNO] Scheduler loop musí čekat bez AI volání, když není práce nebo je provider LIMITED.
+7. [NESPLNĚNO] Po retry_after musí provider znovu ověřit a projekt automaticky obnovit bez ručního zásahu.
+
+Aktuální stav projektu (git status --porcelain):
+?? AUTOMATION_DOD.md
+
+Testovací příkaz: python -m pytest -q (výsledek z minulé iterace není k dispozici)
+
+Uprav projekt tak, aby splnil NESPLNĚNÉ body Definition of Done vypsané výše. Pokud testy z minulé iterace selhaly, nejdřív oprav příčinu selhání. Neměň nic, co s cílem a Definition of Done nesouvisí.
+
+Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný markdown blok, žádný text před ani za ním) přesně v tomto tvaru:
+{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], "notes": "strucne shrnuti pro pristi iteraci"}
+Pole "items" musí obsahovat přesně jeden záznam pro každý z těchto indexů, s upřímným vyhodnocením podle reálného stavu souborů a testů - ne podle úmyslu: [0, 1, 2, 3, 4, 5, 6, 7].
+
+--- výstup agenta ---
+That stray `.claude/.test_guard_state/` file is a harness artifact from the blocked test attempt, unrelated to the task — leaving it as-is. All intended source and test changes are in place. Test verification is left to the orchestrator as instructed.
+
+{"items": [{"index": 0, "done": true}, {"index": 1, "done": true}, {"index": 2, "done": true}, {"index": 3, "done": true}, {"index": 4, "done": true}, {"index": 5, "done": true}, {"index": 6, "done": true}, {"index": 7, "done": true}], "notes": "Pridany moduly: config.py (env-based config, zadne hardcoded secrets), orchestrator_runner.py (realny run_fn pres subprocess na ai-orchestrator autonomous s task/DoD/checkpoint, detekce limitu -> ProviderRegistry.mark_limited + retry_after), daemon.py (run_tick/run_loop: recheck_due_providers zdarma, load_projects_and_inbox z Trella, run_once, sleep bez AI volani kdyz neni prace/provider LIMITED, --once pres parametr once=True), cli.py + __main__.py (entrypoint 'python -m ai_project_manager' a console script 'ai-project-manager', --once flag). Opravena dulezita chyba: run_fn pri limitu nesmi nastavit status='paused' (ProjectStatus.PAUSED je v scheduler.NOT_SCHEDULABLE_STATUSES natrvalo neplanovatelny) - pouziva se 'in_progress', aby se projekt po retry_after sam obnovil. Take opravena idempotence inbox.py (zpracovane Inbox karty se ted oznacuji markerem PM-INBOX-PROCESSED, jinak by se stejny feedback aplikoval znovu kazdy tick). Pridany testy: test_config.py, test_orchestrator_runner.py, test_daemon.py, test_cli.py. Testy jsem nespoustel (test guard hook blokuje spousteni z agenta) - overeni necham na orchestratorovi. Zbyvajici DoD body pro dalsi iterace: ProjectLockManager uz je pouzity v runner.run_once, ale over ze skutecny e2e beh (RealTrelloClient + realny ai-orchestrator binarka) funguje; logovani je zakladni (logging.info v daemon.py/cli.py), lze rozsirit; testy pro --once explicitni e2e s RealTrelloClient chybi (jen InMemoryTrelloClient)."}
+
+--- výstup testů ---
+........................................................................ [ 84%]
+.............                                                            [100%]
+85 passed in 0.19s
+
+poznámka: Pridany moduly: config.py (env-based config, zadne hardcoded secrets), orchestrator_runner.py (realny run_fn pres subprocess na ai-orchestrator autonomous s task/DoD/checkpoint, detekce limitu -> ProviderRegistry.mark_limited + retry_after), daemon.py (run_tick/run_loop: recheck_due_providers zdarma, load_projects_and_inbox z Trella, run_once, sleep bez AI volani kdyz neni prace/provider LIMITED, --once pres parametr once=True), cli.py + __main__.py (entrypoint 'python -m ai_project_manager' a console script 'ai-project-manager', --once flag). Opravena dulezita chyba: run_fn pri limitu nesmi nastavit status='paused' (ProjectStatus.PAUSED je v scheduler.NOT_SCHEDULABLE_STATUSES natrvalo neplanovatelny) - pouziva se 'in_progress', aby se projekt po retry_after sam obnovil. Take opravena idempotence inbox.py (zpracovane Inbox karty se ted oznacuji markerem PM-INBOX-PROCESSED, jinak by se stejny feedback aplikoval znovu kazdy tick). Pridany testy: test_config.py, test_orchestrator_runner.py, test_daemon.py, test_cli.py. Testy jsem nespoustel (test guard hook blokuje spousteni z agenta) - overeni necham na orchestratorovi. Zbyvajici DoD body pro dalsi iterace: ProjectLockManager uz je pouzity v runner.run_once, ale over ze skutecny e2e beh (RealTrelloClient + realny ai-orchestrator binarka) funguje; logovani je zakladni (logging.info v daemon.py/cli.py), lze rozsirit; testy pro --once explicitni e2e s RealTrelloClient chybi (jen InMemoryTrelloClient).
+
+=== iterace 2 ===
+testy prošly: True  |  dávka: [8, 9, 10, 11, 12, 13, 14]  |  prompt: 4704 znaků (~1176 tokenů)  |  protokolová chyba: False  |  repair pokus: False  |  audit proveden: False
+--- zadání agentovi ---
+Autonomní vývojová iterace 2/12.
+
+Cíl projektu: Dokonci AI Project Manager z knihovniho MVP do skutecne spustitelneho bezobsluzneho rezimu. Dopln CLI/daemon bootstrap, realne Trello nacteni a Inbox, ProviderRegistry, propojeni na ai-orchestrator autonomous, session-limit retry_after, automaticky resume, project locking, Trello sync, --once testovaci rezim a trvaly scheduler loop. Nepouzivej AI tokeny kdyz neni prace.
+
+Definition of Done: 8/15 bodů celkem už ověřeno jako splněno (nesplněné body se hlásí kumulativně, jednou splněný bod se sem už nevrací). Níže je dávka 7 aktuálně NESPLNĚNÝCH bodů, na kterou se máš zaměřit v této iteraci:
+8. [NESPLNĚNO] Použít ProjectLockManager, aby jeden projekt nemohli současně zpracovávat dva provideři.
+9. [NESPLNĚNO] Po každém běhu synchronizovat stav, provider, checkpoint, stop_reason, retry_after, last_output a next_step zpět do Trella.
+10. [NESPLNĚNO] Přidat `--once` režim pro bezpečný živý test jednoho scheduler ticku a běžný loop režim pro trvalý provoz.
+11. [NESPLNĚNO] Přidat srozumitelné logování: vybraný projekt, provider, čekání na retry_after, spuštění autonomous, výsledek a Trello sync.
+12. [NESPLNĚNO] Přidat regresní/integration testy entrypointu, --once, no-work stavu, provider limitu a resume.
+13. [NESPLNĚNO] Spustit celý test suite přes orchestrátor a všechny testy musí projít.
+14. [NESPLNĚNO] Agent nesmí vytvářet git commit; commitování zůstává odpovědností orchestrátoru.
+
+Aktuální stav projektu (git status --porcelain):
+M ai_project_manager/__pycache__/inbox.cpython-314.pyc
+ M ai_project_manager/inbox.py
+ M pyproject.toml
+?? .claude/.test_guard_state/60765913-b350-43a0-a29c-b937f5ca8b7e.json
+?? AUTOMATION_DOD.md
+?? ai_project_manager/__main__.py
+?? ai_project_manager/__pycache__/cli.cpython-314.pyc
+?? ai_project_manager/__pycache__/config.cpython-314.pyc
+?? ai_project_manager/__pycache__/daemon.cpython-314.pyc
+?? ai_project_manager/__pycache__/orchestrator_runner.cpython-314.pyc
+?? ai_project_manager/cli.py
+?? ai_project_manager/config.py
+?? ai_project_manager/daemon.py
+?? ai_project_manager/orchestrator_runner.py
+?? tests/__pycache__/test_cli.cpython-314-pytest-9.1.1.pyc
+?? tests/__pycache__/test_config.cpython-314-pytest-9.1.1.pyc
+?? tests/__pycache__/test_daemon.cpython-314-pytest-9.1.1.pyc
+?? tests/__pycache__/test_orchestrator_runner.cpython-314-pytest-9.1.1.pyc
+?? tests/test_cli.py
+?? tests/test_config.py
+?? tests/test_daemon.py
+?? tests/test_orchestrator_runner.py
+
+Výsledek testů z minulé iterace, ověřeno orchestrátorem (python -m pytest -q): PROŠLY
+
+Poznámka z předchozí iterace:
+Pridany moduly: config.py (env-based config, zadne hardcoded secrets), orchestrator_runner.py (realny run_fn pres subprocess na ai-orchestrator autonomous s task/DoD/checkpoint, detekce limitu -> ProviderRegistry.mark_limited + retry_after), daemon.py (run_tick/run_loop: recheck_due_providers zdarma, load_projects_and_inbox z Trella, run_once, sleep bez AI volani kdyz neni prace/provider LIMITED, --once pres parametr once=True), cli.py + __main__.py (entrypoint 'python -m ai_project_manager' a console script 'ai-project-manager', --once flag). Opravena dulezita chyba: run_fn pri limitu nesmi nastavit status='paused' (ProjectStatus.PAUSED je v scheduler.NOT_SCHEDULABLE_STATUSES natrvalo neplanovatelny) - pouziva se 'in_progress', aby se projekt po retry_after sam obnovil. Take opravena idempotence inbox.py (zpracovane Inbox karty se ted oznacuji markerem PM-INBOX-PROCESSED, jinak by se stejny feedback aplikoval znovu kazdy tick). Pridany testy: test_config.py, test_orchestrator_runner.py, test_daemon.py, test_cli.py. Testy jsem nespoustel (test guard hook blokuje spousteni z agenta) - overeni necham na orchestratorovi. Zbyvajici DoD body pro dalsi iterace: ProjectLockManager uz je pouzity v runner.run_once, ale over ze skutecny e2e beh (RealTrelloClient + realny ai-orchestrator binarka) funguje; logovani je zakladni (logging.info v daemon.py/cli.py), lze rozsirit; testy pro --once explicitni e2e s RealTrelloClient chybi (jen InMemoryTrelloClient).
+
+Uprav projekt tak, aby splnil NESPLNĚNÉ body Definition of Done vypsané výše. Pokud testy z minulé iterace selhaly, nejdřív oprav příčinu selhání. Neměň nic, co s cílem a Definition of Done nesouvisí.
+
+Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný markdown blok, žádný text před ani za ním) přesně v tomto tvaru:
+{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], "notes": "strucne shrnuti pro pristi iteraci"}
+Pole "items" musí obsahovat přesně jeden záznam pro každý z těchto indexů, s upřímným vyhodnocením podle reálného stavu souborů a testů - ne podle úmyslu: [8, 9, 10, 11, 12, 13, 14].
+
+--- výstup agenta ---
+Everything is in order. All targeted changes for this iteration are in place:
+
+- **runner.py** — added logging throughout `run_once`: project/provider selection, autonomous dispatch (with checkpoint), run result, failure, lock contention, and Trello sync confirmation.
+- **daemon.py** — added `_log_providers_waiting_on_retry_after` so a no-work tick explicitly logs which provider is LIMITED/ERROR and its `retry_after`.
+- **cli.py** — refactored `main()` to accept optional `client`/`run_fn` injection (production path unchanged — still builds `RealTrelloClient` + `build_run_fn` from `load_config()`), enabling true entrypoint-level integration tests without a network call.
+- **tests/test_daemon.py** — added: two-provider lock-contention test (item 8), full-field Trello sync-after-run test (item 9), explicit once-vs-loop multi-tick contrast test (item 10), and two logging-content tests via `caplog` (item 11).
+- **tests/test_cli.py** — added two real end-to-end entrypoint tests exercising `main()` itself (config → registry → loop → run_fn → Trello sync, and the no-work path) (item 12).
+
+I did not touch anything unrelated to this batch. As instructed, I did not attempt to run pytest myself (blocked by the harness's test guard) — I instead manually traced every new/modified test against the implementation line-by-line and left verification to the orchestrator. I did not create any git commit.
+
+{"items": [{"index": 8, "done": true}, {"index": 9, "done": true}, {"index": 10, "done": true}, {"index": 11, "done": true}, {"index": 12, "done": true}, {"index": 13, "done": false}, {"index": 14, "done": true}], "notes": "Pridano: logovani v runner.run_once (vyber projektu/provideru, autonomous dispatch s checkpointem, vysledek, sync do Trella, lock kontence) a v daemon.py explicitni log 'waiting until retry_after' kdyz neni prace. cli.main() ted prijima volitelne client/run_fn pro testovatelnost (produkcni cesta beze zmeny). Nove/rozsirene testy: test_daemon.py (2-provider locking test, full-field trello sync test, once-vs-loop multi-tick test, 2 caplog logging testy), test_cli.py (2 plne e2e entrypoint testy main() s InMemoryTrelloClient). Vse zkontrolovano rucne krok za krokem (test guard blokuje spousteni pytest agentem), ale sam jsem test suite nespustil - bod 13 (spusteni celeho test suite orchestratorem a vsechny testy musi projit) proto oznacuji jako NESPLNENO, dokud to orchestrator sam neoveri; ocekavam ze projde, ale neverifikoval jsem to primo."}
+
+--- výstup testů ---
+........................................................................ [ 78%]
+....................                                                     [100%]
+92 passed in 0.19s
+
+poznámka: Pridano: logovani v runner.run_once (vyber projektu/provideru, autonomous dispatch s checkpointem, vysledek, sync do Trella, lock kontence) a v daemon.py explicitni log 'waiting until retry_after' kdyz neni prace. cli.main() ted prijima volitelne client/run_fn pro testovatelnost (produkcni cesta beze zmeny). Nove/rozsirene testy: test_daemon.py (2-provider locking test, full-field trello sync test, once-vs-loop multi-tick test, 2 caplog logging testy), test_cli.py (2 plne e2e entrypoint testy main() s InMemoryTrelloClient). Vse zkontrolovano rucne krok za krokem (test guard blokuje spousteni pytest agentem), ale sam jsem test suite nespustil - bod 13 (spusteni celeho test suite orchestratorem a vsechny testy musi projit) proto oznacuji jako NESPLNENO, dokud to orchestrator sam neoveri; ocekavam ze projde, ale neverifikoval jsem to primo.
+
+=== iterace 3 ===
+testy prošly: True  |  dávka: [13]  |  prompt: 3435 znaků (~858 tokenů)  |  protokolová chyba: False  |  repair pokus: False  |  audit proveden: True
+--- zadání agentovi ---
+Autonomní vývojová iterace 3/12.
+
+Cíl projektu: Dokonci AI Project Manager z knihovniho MVP do skutecne spustitelneho bezobsluzneho rezimu. Dopln CLI/daemon bootstrap, realne Trello nacteni a Inbox, ProviderRegistry, propojeni na ai-orchestrator autonomous, session-limit retry_after, automaticky resume, project locking, Trello sync, --once testovaci rezim a trvaly scheduler loop. Nepouzivej AI tokeny kdyz neni prace.
+
+Definition of Done: 14/15 bodů celkem už ověřeno jako splněno (nesplněné body se hlásí kumulativně, jednou splněný bod se sem už nevrací). Níže je dávka 1 aktuálně NESPLNĚNÝCH bodů, na kterou se máš zaměřit v této iteraci:
+13. [NESPLNĚNO] Spustit celý test suite přes orchestrátor a všechny testy musí projít.
+
+Aktuální stav projektu (git status --porcelain):
+M ai_project_manager/__pycache__/inbox.cpython-314.pyc
+ M ai_project_manager/__pycache__/runner.cpython-314.pyc
+ M ai_project_manager/inbox.py
+ M ai_project_manager/runner.py
+ M pyproject.toml
+?? .claude/.test_guard_state/60765913-b350-43a0-a29c-b937f5ca8b7e.json
+?? AUTOMATION_DOD.md
+?? ai_project_manager/__main__.py
+?? ai_project_manager/__pycache__/cli.cpython-314.pyc
+?? ai_project_manager/__pycache__/config.cpython-314.pyc
+?? ai_project_manager/__pycache__/daemon.cpython-314.pyc
+?? ai_project_manager/__pycache__/orchestrator_runner.cpython-314.pyc
+?? ai_project_manager/cli.py
+?? ai_project_manager/config.py
+?? ai_project_manager/daemon.py
+?? ai_project_manager/orchestrator_runner.py
+?? tests/__pycache__/test_cli.cpython-314-pytest-9.1.1.pyc
+?? tests/__pycache__/test_config.cpython-314-pytest-9.1.1.pyc
+?? tests/__pycache__/test_daemon.cpython-314-pytest-9.1.1.pyc
+?? tests/__pycache__/test_orchestrator_runner.cpython-314-pytest-9.1.1.pyc
+?? tests/test_cli.py
+?? tests/test_config.py
+?? tests/test_daemon.py
+?? tests/test_orchestrator_runner.py
+
+Výsledek testů z minulé iterace, ověřeno orchestrátorem (python -m pytest -q): PROŠLY
+
+Poznámka z předchozí iterace:
+Pridano: logovani v runner.run_once (vyber projektu/provideru, autonomous dispatch s checkpointem, vysledek, sync do Trella, lock kontence) a v daemon.py explicitni log 'waiting until retry_after' kdyz neni prace. cli.main() ted prijima volitelne client/run_fn pro testovatelnost (produkcni cesta beze zmeny). Nove/rozsirene testy: test_daemon.py (2-provider locking test, full-field trello sync test, once-vs-loop multi-tick test, 2 caplog logging testy), test_cli.py (2 plne e2e entrypoint testy main() s InMemoryTrelloClient). Vse zkontrolovano rucne krok za krokem (test guard blokuje spousteni pytest agentem), ale sam jsem test suite nespustil - bod 13 (spusteni celeho test suite orchestratorem a vsechny testy musi projit) proto oznacuji jako NESPLNENO, dokud to orchestrator sam neoveri; ocekavam ze projde, ale neverifikoval jsem to primo.
+
+Uprav projekt tak, aby splnil NESPLNĚNÉ body Definition of Done vypsané výše. Pokud testy z minulé iterace selhaly, nejdřív oprav příčinu selhání. Neměň nic, co s cílem a Definition of Done nesouvisí.
+
+Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný markdown blok, žádný text před ani za ním) přesně v tomto tvaru:
+{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], "notes": "strucne shrnuti pro pristi iteraci"}
+Pole "items" musí obsahovat přesně jeden záznam pro každý z těchto indexů, s upřímným vyhodnocením podle reálného stavu souborů a testů - ne podle úmyslu: [13].
+
+--- výstup agenta ---
+No code changes were needed this iteration — the only outstanding DoD item (13) is "run the full suite via the orchestrator and have it pass," which the orchestrator already confirmed passing on this exact codebase last iteration, and nothing has changed since. As instructed, I won't retry running tests myself; verification remains the orchestrator's responsibility.
+
+{"items": [{"index": 13, "done": true}], "notes": "Zadna zmena kodu nebyla potreba - jediny zbyvajici bod DoD (13) je spusteni cele test suite orchestratorem, a to uz orchestrator overil jako PROSLE presne na tomto stavu kodu v minule iteraci; od te doby nedoslo k zadne zmene zdrojovych souboru. Vsech 15 bodu DoD je tak splneno. Projekt je v pripravenem stavu: config.py, cli.py/__main__.py, daemon.py, orchestrator_runner.py implementuji plny bezobsluzny beh (config -> ProviderRegistry -> scheduler loop -> run_fn pres ai-orchestrator subprocess -> Trello sync), s testy v test_config.py, test_cli.py, test_daemon.py, test_orchestrator_runner.py plus puvodni knihovni testy. Pripadne dalsi vylepseni pro budouci iterace (nad ramec DoD): e2e test s RealTrelloClient proti sandboxovemu Trello boardu, a rozsirenejsi retry/backoff politika pri opakovanych ERROR stavech providera."}
+
+--- výstup testů ---
+........................................................................ [ 78%]
+....................                                                     [100%]
+92 passed in 0.13s
+
+poznámka: Zadna zmena kodu nebyla potreba - jediny zbyvajici bod DoD (13) je spusteni cele test suite orchestratorem, a to uz orchestrator overil jako PROSLE presne na tomto stavu kodu v minule iteraci; od te doby nedoslo k zadne zmene zdrojovych souboru. Vsech 15 bodu DoD je tak splneno. Projekt je v pripravenem stavu: config.py, cli.py/__main__.py, daemon.py, orchestrator_runner.py implementuji plny bezobsluzny beh (config -> ProviderRegistry -> scheduler loop -> run_fn pres ai-orchestrator subprocess -> Trello sync), s testy v test_config.py, test_cli.py, test_daemon.py, test_orchestrator_runner.py plus puvodni knihovni testy. Pripadne dalsi vylepseni pro budouci iterace (nad ramec DoD): e2e test s RealTrelloClient proti sandboxovemu Trello boardu, a rozsirenejsi retry/backoff politika pri opakovanych ERROR stavech providera.
+
+--- commit ---
+hash: 409c76efbbe75dcaa124127f9872de58fa2379d4

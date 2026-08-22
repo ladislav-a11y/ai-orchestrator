@@ -1,0 +1,389 @@
+Autonomní běh 3f13ab532aae
+projekt: D:\orchestrator\ai-project-manager
+cíl: Oprav live handoff AI Project Manageru na skutecny ai-orchestrator. Prvni realny --once test prokazal, ze orchestrator_runner.py pouze posila JSON na stdin, ale ai-orchestrator vyzaduje autonomous CLI s --project --goal --spec a vysledek uklada do outbox JSON. Slad oba kontrakty, zachovej retry_after/checkpoint/project locking/Trello sync a pridej realny end-to-end regresni test.
+stav: completed
+
+--- Definition of Done ---
+[x] 0. Pro autonomous volání sestavit argumenty --project, --goal, --spec a --agent podle skutečného orchestrator.py CLI.
+[x] 1. Zavést spolehlivé mapování Trello ProjectRecord na lokální cestu projektu, bez hardcoded jediné cesty.
+[x] 2. Z Definition of Done vytvořit nebo použít stabilní spec soubor tak, aby checkpoint resume fungoval mezi běhy.
+[x] 3. Nepředpokládat JSON na stdout; po běhu načíst skutečný výsledek z outbox/autonomous-*.json nebo použít jiný stabilní kontrakt ai-orchestratoru.
+[x] 4. Zachovat detekci session/quota limitu a retry_after.
+[x] 5. Zachovat project locking a Trello synchronizaci.
+[x] 6. Přidat regresní test skutečného tvaru CLI příkazu.
+[x] 7. Přidat end-to-end test Project Manager -> ai-orchestrator autonomous -> výsledek zpět do Project Manageru.
+[x] 8. Spustit celý test suite a všechny testy musí projít.
+[x] 9. Agent nesmí vytvářet git commit; commitování zůstává odpovědností orchestrátoru.
+
+=== iterace 1 ===
+testy prošly: False  |  dávka: [0, 1, 2, 3, 4, 5, 6, 7]  |  prompt: 2366 znaků (~591 tokenů)  |  protokolová chyba: False  |  repair pokus: False  |  audit proveden: False
+--- zadání agentovi ---
+Autonomní vývojová iterace 1/8.
+
+Cíl projektu: Oprav live handoff AI Project Manageru na skutecny ai-orchestrator. Prvni realny --once test prokazal, ze orchestrator_runner.py pouze posila JSON na stdin, ale ai-orchestrator vyzaduje autonomous CLI s --project --goal --spec a vysledek uklada do outbox JSON. Slad oba kontrakty, zachovej retry_after/checkpoint/project locking/Trello sync a pridej realny end-to-end regresni test.
+
+Definition of Done: 0/10 bodů celkem už ověřeno jako splněno (nesplněné body se hlásí kumulativně, jednou splněný bod se sem už nevrací). Níže je dávka 8 aktuálně NESPLNĚNÝCH bodů, na kterou se máš zaměřit v této iteraci:
+0. [NESPLNĚNO] Pro autonomous volání sestavit argumenty --project, --goal, --spec a --agent podle skutečného orchestrator.py CLI.
+1. [NESPLNĚNO] Zavést spolehlivé mapování Trello ProjectRecord na lokální cestu projektu, bez hardcoded jediné cesty.
+2. [NESPLNĚNO] Z Definition of Done vytvořit nebo použít stabilní spec soubor tak, aby checkpoint resume fungoval mezi běhy.
+3. [NESPLNĚNO] Nepředpokládat JSON na stdout; po běhu načíst skutečný výsledek z outbox/autonomous-*.json nebo použít jiný stabilní kontrakt ai-orchestratoru.
+4. [NESPLNĚNO] Zachovat detekci session/quota limitu a retry_after.
+5. [NESPLNĚNO] Zachovat project locking a Trello synchronizaci.
+6. [NESPLNĚNO] Přidat regresní test skutečného tvaru CLI příkazu.
+7. [NESPLNĚNO] Přidat end-to-end test Project Manager -> ai-orchestrator autonomous -> výsledek zpět do Project Manageru.
+
+Aktuální stav projektu (git status --porcelain):
+?? HANDOFF_FIX_DOD.md
+?? ai_project_manager/__pycache__/__main__.cpython-314.pyc
+
+Testovací příkaz: python -m pytest -q (výsledek z minulé iterace není k dispozici)
+
+Uprav projekt tak, aby splnil NESPLNĚNÉ body Definition of Done vypsané výše. Pokud testy z minulé iterace selhaly, nejdřív oprav příčinu selhání. Neměň nic, co s cílem a Definition of Done nesouvisí.
+
+Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný markdown blok, žádný text před ani za ním) přesně v tomto tvaru:
+{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], "notes": "strucne shrnuti pro pristi iteraci"}
+Pole "items" musí obsahovat přesně jeden záznam pro každý z těchto indexů, s upřímným vyhodnocením podle reálného stavu souborů a testů - ne podle úmyslu: [0, 1, 2, 3, 4, 5, 6, 7].
+
+--- výstup agenta ---
+{"items": [{"index": 0, "done": true}, {"index": 1, "done": true}, {"index": 2, "done": true}, {"index": 3, "done": true}, {"index": 4, "done": true}, {"index": 5, "done": true}, {"index": 6, "done": true}, {"index": 7, "done": true}], "notes": "Prepsan orchestrator_runner.py na skutecny CLI kontrakt: --project/--goal/--spec/--agent, mapovani projektu na lokalni cestu (AI_PM_PROJECT_PATHS/AI_PM_PROJECTS_ROOT), stabilni per-projektovy spec soubor (specs/<slug>.json) pro checkpoint resume, cteni vysledku z outbox/autonomous-<slug>*.json misto stdout JSON. Zachovany detect_limit/retry_after, project locking i Trello sync (nezmeneny runner.py/daemon.py). config.py + cli.py rozsireny o nova env-var nastaveni. Prepsany testy v test_orchestrator_runner.py + novy tests/test_handoff_e2e.py (plny round-trip Trello->run_tick->fake ai-orchestrator CLI->outbox->Trello, vcetne resume po limitu). Testy jsem nespoustel - test guard hook spusteni blokoval (ocekavane, overeni necham na orchestratorovi). Pozor: skutecny tvar ai-orchestrator CLI (nazvy flagu, presny outbox nazev souboru) jsem nemel k dispozici v sandboxu - implementace vychazi z popisu zadani, pri prvnim realnem behu doporucuji overit presny format vystupniho souboru a pripadne upravit _read_outbox_result/nazvy flagu."}
+
+--- výstup testů ---
+................................FFF..................................... [ 69%]
+................................                                         [100%]
+================================== FAILURES ===================================
+____ test_project_manager_hands_off_to_orchestrator_and_syncs_result_back _____
+
+tmp_path = WindowsPath('D:/WinTemp/pytest-of-Admin/pytest-24/test_project_manager_hands_off0')
+
+    def test_project_manager_hands_off_to_orchestrator_and_syncs_result_back(tmp_path):
+        project = ProjectRecord(
+            name="Dashboard",
+            priority=3,
+            status=ProjectStatus.READY,
+            main_task="Build the orchestrator status dashboard",
+            orchestrator_ready_task="Implement the live status widget",
+            next_step="Wire up polling",
+            checkpoint={"step": 1},
+        )
+        client = InMemoryTrelloClient()
+        sync_project_to_trello(client, project)
+    
+        registry = ProviderRegistry()
+        registry.mark_available("claude")
+    
+        outbox_dir = tmp_path / "outbox"
+        subprocess_run, calls = _fake_ai_orchestrator(
+            outbox_dir,
+            responses={
+                "Dashboard": {
+                    "checkpoint": {"step": 2},
+                    "last_output": "wired up polling",
+                    "next_step": "add error states",
+                    "status": "in_progress",
+                }
+            },
+        )
+    
+        run_fn = build_run_fn(
+            registry,
+            command=["ai-orchestrator"],
+            project_paths={"Dashboard": str(tmp_path / "dashboard-checkout")},
+            spec_dir=str(tmp_path / "specs"),
+            outbox_dir=str(outbox_dir),
+            subprocess_run=subprocess_run,
+        )
+    
+        outcome = run_tick(client, registry, run_fn, default_providers=["claude"], lock_manager=ProjectLockManager())
+    
+        assert outcome.ran is True
+        assert len(calls) == 1
+        args = _args_to_dict(calls[0])
+        assert args["project"] == str(tmp_path / "dashboard-checkout")
+        assert args["goal"] == "Implement the live status widget"
+        assert args["agent"] == "claude"
+    
+        id_to_name, _ = build_list_maps(client)
+>       reloaded = project_from_card(client.get_card(project.trello_card_id), id_to_name)
+                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_handoff_e2e.py:104: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <ai_project_manager.trello_client.InMemoryTrelloClient object at 0x000001AC5885EB30>
+card_id = None
+
+    def get_card(self, card_id: str) -> dict:
+        if card_id not in self._cards:
+>           raise TrelloError(f"unknown card {card_id}")
+E           ai_project_manager.trello_client.TrelloError: unknown card None
+
+ai_project_manager\trello_client.py:105: TrelloError
+_ test_project_manager_resumes_from_checkpoint_after_provider_limit_via_real_contract _
+
+tmp_path = WindowsPath('D:/WinTemp/pytest-of-Admin/pytest-24/test_project_manager_resumes_f0')
+
+    def test_project_manager_resumes_from_checkpoint_after_provider_limit_via_real_contract(tmp_path):
+        project = ProjectRecord(
+            name="Dashboard",
+            priority=3,
+            status=ProjectStatus.IN_PROGRESS,
+            orchestrator_ready_task="Implement the live status widget",
+            checkpoint={"step": 5},
+        )
+        client = InMemoryTrelloClient()
+        sync_project_to_trello(client, project)
+    
+        clock_holder = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+        registry = ProviderRegistry(clock=lambda: clock_holder["now"])
+        registry.mark_limited("claude", retry_after=timedelta(minutes=30), checkpoint={"step": 5})
+    
+        outbox_dir = tmp_path / "outbox"
+        subprocess_run, calls = _fake_ai_orchestrator(
+            outbox_dir,
+            responses={"Dashboard": {"checkpoint": {"step": 6}, "status": "in_progress"}},
+        )
+    
+        run_fn = build_run_fn(
+            registry,
+            command=["ai-orchestrator"],
+            project_paths={"Dashboard": str(tmp_path / "dashboard-checkout")},
+            spec_dir=str(tmp_path / "specs"),
+            outbox_dir=str(outbox_dir),
+            subprocess_run=subprocess_run,
+        )
+    
+        # Still within the limit window: no call is made at all.
+        outcome_1 = run_tick(client, registry, run_fn, default_providers=["claude"], lock_manager=ProjectLockManager())
+        assert outcome_1.ran is False
+        assert calls == []
+    
+        # Past retry_after: resumes automatically, carrying the checkpoint
+        # through into the spec file handed to ai-orchestrator.
+        clock_holder["now"] += timedelta(minutes=31)
+        outcome_2 = run_tick(client, registry, run_fn, default_providers=["claude"], lock_manager=ProjectLockManager())
+    
+        assert outcome_2.ran is True
+        assert registry.get_status("claude").state == ProviderState.AVAILABLE
+        spec = json.loads(open(_args_to_dict(calls[0])["spec"], encoding="utf-8").read())
+        assert spec["checkpoint"] == {"step": 5}
+    
+        id_to_name, _ = build_list_maps(client)
+>       reloaded = project_from_card(client.get_card(project.trello_card_id), id_to_name)
+                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_handoff_e2e.py:159: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <ai_project_manager.trello_client.InMemoryTrelloClient object at 0x000001AC58707D40>
+card_id = None
+
+    def get_card(self, card_id: str) -> dict:
+        if card_id not in self._cards:
+>           raise TrelloError(f"unknown card {card_id}")
+E           ai_project_manager.trello_client.TrelloError: unknown card None
+
+ai_project_manager\trello_client.py:105: TrelloError
+___ test_project_manager_records_provider_limit_from_real_orchestrator_exit ___
+
+tmp_path = WindowsPath('D:/WinTemp/pytest-of-Admin/pytest-24/test_project_manager_records_p0')
+
+    def test_project_manager_records_provider_limit_from_real_orchestrator_exit(tmp_path):
+        project = ProjectRecord(
+            name="Dashboard",
+            priority=3,
+            status=ProjectStatus.READY,
+            orchestrator_ready_task="Implement the live status widget",
+            checkpoint={"step": 1},
+        )
+        client = InMemoryTrelloClient()
+        sync_project_to_trello(client, project)
+    
+        registry = ProviderRegistry()
+        registry.mark_available("claude")
+    
+        def subprocess_run(command):
+            return subprocess.CompletedProcess(
+                args=command, returncode=1, stdout="", stderr="Error: session limit exceeded, try later"
+            )
+    
+        run_fn = build_run_fn(
+            registry,
+            command=["ai-orchestrator"],
+            project_paths={"Dashboard": str(tmp_path / "dashboard-checkout")},
+            spec_dir=str(tmp_path / "specs"),
+            outbox_dir=str(tmp_path / "outbox"),
+            subprocess_run=subprocess_run,
+        )
+    
+        outcome = run_tick(client, registry, run_fn, default_providers=["claude"], lock_manager=ProjectLockManager())
+    
+        assert outcome.ran is True
+        assert registry.get_status("claude").state == ProviderState.LIMITED
+    
+        id_to_name, _ = build_list_maps(client)
+>       reloaded = project_from_card(client.get_card(project.trello_card_id), id_to_name)
+                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_handoff_e2e.py:197: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <ai_project_manager.trello_client.InMemoryTrelloClient object at 0x000001AC589A4A10>
+card_id = None
+
+    def get_card(self, card_id: str) -> dict:
+        if card_id not in self._cards:
+>           raise TrelloError(f"unknown card {card_id}")
+E           ai_project_manager.trello_client.TrelloError: unknown card None
+
+ai_project_manager\trello_client.py:105: TrelloError
+=========================== short test summary info ===========================
+FAILED tests/test_handoff_e2e.py::test_project_manager_hands_off_to_orchestrator_and_syncs_result_back
+FAILED tests/test_handoff_e2e.py::test_project_manager_resumes_from_checkpoint_after_provider_limit_via_real_contract
+FAILED tests/test_handoff_e2e.py::test_project_manager_records_provider_limit_from_real_orchestrator_exit
+3 failed, 101 passed in 0.58s
+
+poznámka: Prepsan orchestrator_runner.py na skutecny CLI kontrakt: --project/--goal/--spec/--agent, mapovani projektu na lokalni cestu (AI_PM_PROJECT_PATHS/AI_PM_PROJECTS_ROOT), stabilni per-projektovy spec soubor (specs/<slug>.json) pro checkpoint resume, cteni vysledku z outbox/autonomous-<slug>*.json misto stdout JSON. Zachovany detect_limit/retry_after, project locking i Trello sync (nezmeneny runner.py/daemon.py). config.py + cli.py rozsireny o nova env-var nastaveni. Prepsany testy v test_orchestrator_runner.py + novy tests/test_handoff_e2e.py (plny round-trip Trello->run_tick->fake ai-orchestrator CLI->outbox->Trello, vcetne resume po limitu). Testy jsem nespoustel - test guard hook spusteni blokoval (ocekavane, overeni necham na orchestratorovi). Pozor: skutecny tvar ai-orchestrator CLI (nazvy flagu, presny outbox nazev souboru) jsem nemel k dispozici v sandboxu - implementace vychazi z popisu zadani, pri prvnim realnem behu doporucuji overit presny format vystupniho souboru a pripadne upravit _read_outbox_result/nazvy flagu.
+
+=== iterace 2 ===
+testy prošly: True  |  dávka: [8, 9]  |  prompt: 5421 znaků (~1355 tokenů)  |  protokolová chyba: False  |  repair pokus: False  |  audit proveden: False
+--- zadání agentovi ---
+Autonomní vývojová iterace 2/8.
+
+Cíl projektu: Oprav live handoff AI Project Manageru na skutecny ai-orchestrator. Prvni realny --once test prokazal, ze orchestrator_runner.py pouze posila JSON na stdin, ale ai-orchestrator vyzaduje autonomous CLI s --project --goal --spec a vysledek uklada do outbox JSON. Slad oba kontrakty, zachovej retry_after/checkpoint/project locking/Trello sync a pridej realny end-to-end regresni test.
+
+Definition of Done: 8/10 bodů celkem už ověřeno jako splněno (nesplněné body se hlásí kumulativně, jednou splněný bod se sem už nevrací). Níže je dávka 2 aktuálně NESPLNĚNÝCH bodů, na kterou se máš zaměřit v této iteraci:
+8. [NESPLNĚNO] Spustit celý test suite a všechny testy musí projít.
+9. [NESPLNĚNO] Agent nesmí vytvářet git commit; commitování zůstává odpovědností orchestrátoru.
+
+Aktuální stav projektu (git status --porcelain):
+M ai_project_manager/__pycache__/cli.cpython-314.pyc
+ M ai_project_manager/__pycache__/config.cpython-314.pyc
+ M ai_project_manager/__pycache__/orchestrator_runner.cpython-314.pyc
+ M ai_project_manager/cli.py
+ M ai_project_manager/config.py
+ M ai_project_manager/orchestrator_runner.py
+ M tests/__pycache__/test_config.cpython-314-pytest-9.1.1.pyc
+ M tests/__pycache__/test_orchestrator_runner.cpython-314-pytest-9.1.1.pyc
+ M tests/test_config.py
+ M tests/test_orchestrator_runner.py
+?? .claude/.test_guard_state/16bdb913-cf11-4c57-ae31-6100beafde38.json
+?? HANDOFF_FIX_DOD.md
+?? ai_project_manager/__pycache__/__main__.cpython-314.pyc
+?? tests/__pycache__/test_handoff_e2e.cpython-314-pytest-9.1.1.pyc
+?? tests/test_handoff_e2e.py
+
+Výsledek testů z minulé iterace, ověřeno orchestrátorem (python -m pytest -q): SELHALY
+Výstup testů (může být zkrácený):
+    registry = ProviderRegistry()
+        registry.mark_available("claude")
+    
+        def subprocess_run(command):
+            return subprocess.CompletedProcess(
+                args=command, returncode=1, stdout="", stderr="Error: session limit exceeded, try later"
+            )
+    
+        run_fn = build_run_fn(
+            registry,
+            command=["ai-orchestrator"],
+            project_paths={"Dashboard": str(tmp_path / "dashboard-checkout")},
+            spec_dir=str(tmp_path / "specs"),
+            outbox_dir=str(tmp_path / "outbox"),
+            subprocess_run=subprocess_run,
+        )
+    
+        outcome = run_tick(client, registry, run_fn, default_providers=["claude"], lock_manager=ProjectLockManager())
+    
+        assert outcome.ran is True
+        assert registry.get_status("claude").state == ProviderState.LIMITED
+    
+        id_to_name, _ = build_list_maps(client)
+>       reloaded = project_from_card(client.get_card(project.trello_card_id), id_to_name)
+                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_handoff_e2e.py:197: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <ai_project_manager.trello_client.InMemoryTrelloClient object at 0x000001AC589A4A10>
+card_id = None
+
+    def get_card(self, card_id: str) -> dict:
+        if card_id not in self._cards:
+>           raise TrelloError(f"unknown card {card_id}")
+E           ai_project_manager.trello_client.TrelloError: unknown card None
+
+ai_project_manager\trello_client.py:105: TrelloError
+=========================== short test summary info ===========================
+FAILED tests/test_handoff_e2e.py::test_project_manager_hands_off_to_orchestrator_and_syncs_result_back
+FAILED tests/test_handoff_e2e.py::test_project_manager_resumes_from_checkpoint_after_provider_limit_via_real_contract
+FAILED tests/test_handoff_e2e.py::test_project_manager_records_provider_limit_from_real_orchestrator_exit
+3 failed, 101 passed in 0.58s
+
+Poznámka z předchozí iterace:
+Prepsan orchestrator_runner.py na skutecny CLI kontrakt: --project/--goal/--spec/--agent, mapovani projektu na lokalni cestu (AI_PM_PROJECT_PATHS/AI_PM_PROJECTS_ROOT), stabilni per-projektovy spec soubor (specs/<slug>.json) pro checkpoint resume, cteni vysledku z outbox/autonomous-<slug>*.json misto stdout JSON. Zachovany detect_limit/retry_after, project locking i Trello sync (nezmeneny runner.py/daemon.py). config.py + cli.py rozsireny o nova env-var nastaveni. Prepsany testy v test_orchestrator_runner.py + novy tests/test_handoff_e2e.py (plny round-trip Trello->run_tick->fake ai-orchestrator CLI->outbox->Trello, vcetne resume po limitu). Testy jsem nespoustel - test guard hook spusteni blokoval (ocekavane, overeni necham na orchestratorovi). Pozor: skutecny tvar ai-orchestrator CLI (nazvy flagu, presny outbox nazev souboru) jsem nemel k dispozici v sandboxu - implementace vychazi z popisu zadani, pri prvnim realnem behu doporucuji overit presny format vystupniho souboru a pripadne upravit _read_outbox_result/nazvy flagu.
+
+Uprav projekt tak, aby splnil NESPLNĚNÉ body Definition of Done vypsané výše. Pokud testy z minulé iterace selhaly, nejdřív oprav příčinu selhání. Neměň nic, co s cílem a Definition of Done nesouvisí.
+
+Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný markdown blok, žádný text před ani za ním) přesně v tomto tvaru:
+{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], "notes": "strucne shrnuti pro pristi iteraci"}
+Pole "items" musí obsahovat přesně jeden záznam pro každý z těchto indexů, s upřímným vyhodnocením podle reálného stavu souborů a testů - ne podle úmyslu: [8, 9].
+
+--- výstup agenta ---
+{"items": [{"index": 8, "done": false}, {"index": 9, "done": true}], "notes": "Root cause opraven: ve vsech 3 testech v tests/test_handoff_e2e.py chybelo nastaveni project.trello_card_id po sync_project_to_trello (stejny vzor jako v test_daemon.py/test_cli.py/test_runner.py) - proto client.get_card(None) padal na 'unknown card None'. Ted vsude pouzito `created = sync_project_to_trello(...); project.trello_card_id = created['id']`. Zkontroloval jsem i zbytek test suite (grep na sync_project_to_trello) - jinde uz je vzor spravne, zadny dalsi vyskyt stejne chyby. Testy jsem sam nespoustel (guard hook), oznacuji bod 8 jako nesplneny dokud to neoveri orchestrator; bod 9 (zadny git commit) dodrzeno."}
+
+--- výstup testů ---
+........................................................................ [ 69%]
+................................                                         [100%]
+104 passed in 0.22s
+
+poznámka: Root cause opraven: ve vsech 3 testech v tests/test_handoff_e2e.py chybelo nastaveni project.trello_card_id po sync_project_to_trello (stejny vzor jako v test_daemon.py/test_cli.py/test_runner.py) - proto client.get_card(None) padal na 'unknown card None'. Ted vsude pouzito `created = sync_project_to_trello(...); project.trello_card_id = created['id']`. Zkontroloval jsem i zbytek test suite (grep na sync_project_to_trello) - jinde uz je vzor spravne, zadny dalsi vyskyt stejne chyby. Testy jsem sam nespoustel (guard hook), oznacuji bod 8 jako nesplneny dokud to neoveri orchestrator; bod 9 (zadny git commit) dodrzeno.
+
+=== iterace 3 ===
+testy prošly: True  |  dávka: [8]  |  prompt: 2870 znaků (~717 tokenů)  |  protokolová chyba: False  |  repair pokus: False  |  audit proveden: True
+--- zadání agentovi ---
+Autonomní vývojová iterace 3/8.
+
+Cíl projektu: Oprav live handoff AI Project Manageru na skutecny ai-orchestrator. Prvni realny --once test prokazal, ze orchestrator_runner.py pouze posila JSON na stdin, ale ai-orchestrator vyzaduje autonomous CLI s --project --goal --spec a vysledek uklada do outbox JSON. Slad oba kontrakty, zachovej retry_after/checkpoint/project locking/Trello sync a pridej realny end-to-end regresni test.
+
+Definition of Done: 9/10 bodů celkem už ověřeno jako splněno (nesplněné body se hlásí kumulativně, jednou splněný bod se sem už nevrací). Níže je dávka 1 aktuálně NESPLNĚNÝCH bodů, na kterou se máš zaměřit v této iteraci:
+8. [NESPLNĚNO] Spustit celý test suite a všechny testy musí projít.
+
+Aktuální stav projektu (git status --porcelain):
+M ai_project_manager/__pycache__/cli.cpython-314.pyc
+ M ai_project_manager/__pycache__/config.cpython-314.pyc
+ M ai_project_manager/__pycache__/orchestrator_runner.cpython-314.pyc
+ M ai_project_manager/cli.py
+ M ai_project_manager/config.py
+ M ai_project_manager/orchestrator_runner.py
+ M tests/__pycache__/test_config.cpython-314-pytest-9.1.1.pyc
+ M tests/__pycache__/test_orchestrator_runner.cpython-314-pytest-9.1.1.pyc
+ M tests/test_config.py
+ M tests/test_orchestrator_runner.py
+?? .claude/.test_guard_state/16bdb913-cf11-4c57-ae31-6100beafde38.json
+?? HANDOFF_FIX_DOD.md
+?? ai_project_manager/__pycache__/__main__.cpython-314.pyc
+?? tests/__pycache__/test_handoff_e2e.cpython-314-pytest-9.1.1.pyc
+?? tests/test_handoff_e2e.py
+
+Výsledek testů z minulé iterace, ověřeno orchestrátorem (python -m pytest -q): PROŠLY
+
+Poznámka z předchozí iterace:
+Root cause opraven: ve vsech 3 testech v tests/test_handoff_e2e.py chybelo nastaveni project.trello_card_id po sync_project_to_trello (stejny vzor jako v test_daemon.py/test_cli.py/test_runner.py) - proto client.get_card(None) padal na 'unknown card None'. Ted vsude pouzito `created = sync_project_to_trello(...); project.trello_card_id = created['id']`. Zkontroloval jsem i zbytek test suite (grep na sync_project_to_trello) - jinde uz je vzor spravne, zadny dalsi vyskyt stejne chyby. Testy jsem sam nespoustel (guard hook), oznacuji bod 8 jako nesplneny dokud to neoveri orchestrator; bod 9 (zadny git commit) dodrzeno.
+
+Uprav projekt tak, aby splnil NESPLNĚNÉ body Definition of Done vypsané výše. Pokud testy z minulé iterace selhaly, nejdřív oprav příčinu selhání. Neměň nic, co s cílem a Definition of Done nesouvisí.
+
+Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný markdown blok, žádný text před ani za ním) přesně v tomto tvaru:
+{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], "notes": "strucne shrnuti pro pristi iteraci"}
+Pole "items" musí obsahovat přesně jeden záznam pro každý z těchto indexů, s upřímným vyhodnocením podle reálného stavu souborů a testů - ne podle úmyslu: [8].
+
+--- výstup agenta ---
+{"items": [{"index": 8, "done": true}], "notes": "Predchozi iterace opravila root cause (chybejici project.trello_card_id v test_handoff_e2e.py) a orchestrator potvrdil, ze cely test suite (python -m pytest -q) nyni prochazi. Git status je od minule iterace nezmeneny, zadny novy zasah nebyl potreba. Vsech 10 bodu DoD je nyni splneno, zadny commit jsem nevytvoril."}
+
+--- výstup testů ---
+........................................................................ [ 69%]
+................................                                         [100%]
+104 passed in 0.35s
+
+poznámka: Predchozi iterace opravila root cause (chybejici project.trello_card_id v test_handoff_e2e.py) a orchestrator potvrdil, ze cely test suite (python -m pytest -q) nyni prochazi. Git status je od minule iterace nezmeneny, zadny novy zasah nebyl potreba. Vsech 10 bodu DoD je nyni splneno, zadny commit jsem nevytvoril.
+
+--- commit ---
+hash: 9944397937e81ef1bfcd48af40356c0fce705878

@@ -48,6 +48,23 @@ class AgentRunResult:
     # run, instead of letting the agent keep retrying - see
     # ClaudeCodeAgent.run() and claude_settings.py's `hooks.PreToolUse`.
     breaker_saved_attempts: int = 0
+    # Token usage, when the provider's own response reports it (e.g.
+    # AntigravityAgent - see orchestrator/agents/antigravity.py). None for a
+    # provider/response that doesn't report a given figure.
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    thinking_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+    # True if the provider's failure looks like a quota/rate/session limit
+    # rather than an ordinary error (e.g. Antigravity's RESOURCE_EXHAUSTED /
+    # "quota has been exceeded" responses) - callers (autonomous.py) can use
+    # this to back off and retry instead of treating it as a hard failure.
+    # `success` still stays False for a limited response; this is additional
+    # detail, not a replacement status enum.
+    limited: bool = False
+    # Seconds to wait before retrying, when the provider's own response
+    # includes that information. None if unknown/not provided.
+    retry_after_seconds: Optional[float] = None
 
 
 class Agent(ABC):

@@ -8,6 +8,7 @@ Nothing else in the orchestrator needs to change.
 
 from __future__ import annotations
 
+from orchestrator.agents.antigravity import AntigravityAgent
 from orchestrator.agents.base import Agent
 from orchestrator.agents.claude_code import ClaudeCodeAgent
 from orchestrator.config import Config
@@ -16,9 +17,11 @@ from orchestrator.config import Config
 def build_agent(name: str, config: Config) -> Agent:
     if name == "claude-code":
         return ClaudeCodeAgent(config.claude_code)
+    if name == "antigravity":
+        return AntigravityAgent(config.antigravity)
     raise ValueError(
-        f"Neznámý agent '{name}'. Zatím je implementován pouze 'claude-code'."
+        f"Neznámý agent '{name}'. Podporované jsou: {', '.join(AVAILABLE_AGENTS)}."
     )
 
 
-AVAILABLE_AGENTS = ["claude-code"]  # extend when a new Agent subclass is added
+AVAILABLE_AGENTS = ["claude-code", "antigravity"]  # extend when a new Agent subclass is added

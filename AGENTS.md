@@ -13,7 +13,12 @@ this file, stop and ask - do not silently override safety rules.
    set `permission_mode: bypassPermissions`. This is enforced in code
    (`orchestrator/config.py`, `orchestrator/agents/claude_code.py`) - do not
    remove or weaken those checks. If a task seems to require it, that is a
-   sign the task needs a human, not a workaround.
+   sign the task needs a human, not a workaround. The same rule applies to
+   the `agy` (Antigravity) CLI: `orchestrator/agents/antigravity.py` never
+   passes `--dangerously-skip-permissions` either, and always runs with
+   `--mode accept-edits` (or another non-bypass mode from config) instead -
+   verified against the real CLI to deny-by-default (not hang, not silently
+   allow) anything that mode doesn't cover, such as shell commands.
 2. **Never rewrite or delete Git history.** No `git reset --hard`, no
    `git rebase`, no `git filter-branch`, no `git push --force` /
    `--force-with-lease`, no deleting branches or tags. `orchestrator/git_utils.py`
@@ -86,12 +91,29 @@ this file, stop and ask - do not silently override safety rules.
     (`git_utils.py`, called from `runner.py`'s `_maybe_commit` and
     `autonomous.py`'s `_commit_if_ready`), never as a side effect of the
     agent's own tool use, so it stays gated on the same verified-tests check
-    as rule 4. This is enforced twice: `claude_settings.py` denies
-    `Bash(git commit:*)` in every project's `.claude/settings.local.json`,
-    and `orchestrator/agents/claude_code.py` appends
-    `NO_COMMIT_INSTRUCTION` to every prompt sent to the agent. `git status`
-    and `git diff` stay allowed (the agent may need them to reason about its
-    own changes). Keep both layers in sync if this rule ever changes.
+    as rule 4. For `claude-code` this is enforced twice: `claude_settings.py`
+    denies `Bash(git commit:*)` in every project's
+    `.claude/settings.local.json`, and `orchestrator/agents/claude_code.py`
+    appends `NO_COMMIT_INSTRUCTION` to every prompt sent to the agent.
+    `orchestrator/agents/antigravity.py` appends the same
+    `NO_COMMIT_INSTRUCTION` text to every prompt it sends to `agy`; it has no
+    equivalent to `claude_settings.py` because the real `agy` CLI has no
+    project-local permission file to write into (its own permission config
+    lives under the user's home directory, `~/.gemini/...`, keyed by an
+    internally-managed project-ID mapping this orchestrator does not control
+    - writing into that shared, undocumented, user-global file is out of
+    scope and a materially bigger blast radius than a repo-local settings
+    file). This is not a gap in practice: `AntigravityAgent` never passes
+    `--dangerously-skip-permissions` (rule 1) and always runs with a
+    non-bypass `--mode`, and that combination was verified against the real
+    installed CLI to deny-by-default any Bash-equivalent tool call
+    (`git commit` included) unless the user's own pre-existing global
+    settings already allow-listed it - something entirely outside this
+    orchestrator's control or knowledge either way, for any provider. `git
+    status` and `git diff` stay allowed (the agent may need them to reason
+    about its own changes). Keep the `claude-code` layers in sync if that
+    rule ever changes; `orchestrator/agents/antigravity.py`'s module
+    docstring documents the antigravity side of the same guarantee.
 
 ## When adding a new agent/provider (e.g. OpenAI Codex)
 

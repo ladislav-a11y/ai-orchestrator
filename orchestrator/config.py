@@ -24,6 +24,15 @@ CONFIG_EXAMPLE_PATH = CONFIG_DIR / "config.example.yaml"
 # even if someone edits the YAML by hand.
 FORBIDDEN_PERMISSION_MODES = {"bypassPermissions"}
 
+# The only `--mode` values the real `agy` CLI accepts (confirmed via
+# `agy --help`). "" means "don't pass --mode at all" - confirmed against the
+# real CLI to still deny-by-default (not bypass) anything outside file edits.
+# There is no mode value that means "skip permissions" - that only exists as
+# the separate `--dangerously-skip-permissions` boolean flag, which
+# AntigravityAgent never passes regardless of this setting - this allowlist
+# is a second, independent guard against a typo'd/malicious config.yaml.
+ANTIGRAVITY_ALLOWED_MODES = {"accept-edits", "plan", ""}
+
 
 @dataclass
 class ProjectEntry:
@@ -40,6 +49,19 @@ class ClaudeCodeAgentConfig:
     allowed_tools: list[str] = field(default_factory=list)
     disallowed_tools: list[str] = field(default_factory=list)
     max_budget_usd: Optional[float] = None
+    timeout_seconds: int = 1800
+
+
+@dataclass
+class AntigravityAgentConfig:
+    cli_path: str = ""  # empty = auto-detect ("agy" in PATH)
+    model: str = ""  # empty = CLI default
+    # Passed as --mode to `agy`. "accept-edits" auto-approves file edits but
+    # still denies anything else (e.g. shell commands) by default - NEVER set
+    # this up to bypass permissions; that is only possible via the separate
+    # --dangerously-skip-permissions flag, which this adapter never passes
+    # regardless of config (see orchestrator/agents/antigravity.py).
+    mode: str = "accept-edits"
     timeout_seconds: int = 1800
 
 
@@ -74,6 +96,7 @@ class Config:
     default_agent: str = "claude-code"
     projects: dict[str, ProjectEntry] = field(default_factory=dict)
     claude_code: ClaudeCodeAgentConfig = field(default_factory=ClaudeCodeAgentConfig)
+    antigravity: AntigravityAgentConfig = field(default_factory=AntigravityAgentConfig)
     git: GitConfig = field(default_factory=GitConfig)
     testing: TestingConfig = field(default_factory=TestingConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -190,6 +213,21 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         timeout_seconds=int(cc_raw.get("timeout_seconds", 1800)),
     )
 
+    ag_raw = raw.get("antigravity") or {}
+    antigravity_mode = ag_raw.get("mode", "accept-edits") or ""
+    if antigravity_mode not in ANTIGRAVITY_ALLOWED_MODES:
+        raise ValueError(
+            f"config.yaml nastavuje antigravity.mode='{antigravity_mode}', ale to není mezi "
+            f"povolenými hodnotami {sorted(ANTIGRAVITY_ALLOWED_MODES - {''})} (nebo prázdné). "
+            "Non-interactive běh nikdy nesmí obcházet kontrolu oprávnění."
+        )
+    antigravity = AntigravityAgentConfig(
+        cli_path=ag_raw.get("cli_path", ""),
+        model=ag_raw.get("model", ""),
+        mode=antigravity_mode,
+        timeout_seconds=int(ag_raw.get("timeout_seconds", 1800)),
+    )
+
     git_raw = raw.get("git") or {}
     git = GitConfig(
         auto_commit=bool(git_raw.get("auto_commit", False)),
@@ -223,6 +261,7 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         default_agent=raw.get("default_agent", "claude-code"),
         projects=projects,
         claude_code=claude_code,
+        antigravity=antigravity,
         git=git,
         testing=testing,
         api=api,
