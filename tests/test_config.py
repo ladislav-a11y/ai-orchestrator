@@ -39,6 +39,21 @@ def test_antigravity_unsafe_mode_rejected(tmp_path):
         load_config(bad, create_if_missing=False)
 
 
+def test_codex_default_sandbox_mode_is_workspace_write():
+    cfg = load_config(EXAMPLE, create_if_missing=False)
+    assert cfg.codex.sandbox_mode == "workspace-write"
+
+
+def test_codex_unsafe_sandbox_mode_rejected(tmp_path):
+    bad = tmp_path / "config.yaml"
+    bad.write_text(
+        "codex:\n  sandbox_mode: danger-full-access\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="codex.sandbox_mode"):
+        load_config(bad, create_if_missing=False)
+
+
 def test_non_localhost_api_host_rejected(tmp_path):
     bad = tmp_path / "config.yaml"
     bad.write_text("api:\n  host: 0.0.0.0\n", encoding="utf-8")

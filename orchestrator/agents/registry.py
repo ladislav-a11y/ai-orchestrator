@@ -11,6 +11,7 @@ from __future__ import annotations
 from orchestrator.agents.antigravity import AntigravityAgent
 from orchestrator.agents.base import Agent
 from orchestrator.agents.claude_code import ClaudeCodeAgent
+from orchestrator.agents.codex import CodexAgent
 from orchestrator.config import Config
 
 
@@ -19,9 +20,11 @@ def build_agent(name: str, config: Config) -> Agent:
         return ClaudeCodeAgent(config.claude_code)
     if name == "antigravity":
         return AntigravityAgent(config.antigravity)
+    if name == "codex":
+        return CodexAgent(config.codex)
     raise ValueError(
         f"Neznámý agent '{name}'. Podporované jsou: {', '.join(AVAILABLE_AGENTS)}."
     )
 
 
-AVAILABLE_AGENTS = ["claude-code", "antigravity"]  # extend when a new Agent subclass is added
+AVAILABLE_AGENTS = ["claude-code", "antigravity", "codex"]  # extend when a new Agent subclass is added

@@ -33,6 +33,17 @@ FORBIDDEN_PERMISSION_MODES = {"bypassPermissions"}
 # is a second, independent guard against a typo'd/malicious config.yaml.
 ANTIGRAVITY_ALLOWED_MODES = {"accept-edits", "plan", ""}
 
+# The only `--sandbox` values CodexAgent may pass to the `codex` CLI.
+# "danger-full-access" is deliberately excluded - that is Codex's equivalent
+# of an unrestricted-write sandbox and, combined with the separate
+# `--dangerously-bypass-approvals-and-sandbox` flag (which CodexAgent never
+# passes regardless of this setting), would remove the filesystem/network
+# containment this orchestrator relies on. "workspace-write" is the default:
+# it auto-permits edits inside the project directory but still denies
+# network access and writes outside it; "read-only" is available for a
+# read-only/inspection run.
+CODEX_ALLOWED_SANDBOX_MODES = {"read-only", "workspace-write"}
+
 
 @dataclass
 class ProjectEntry:
@@ -62,6 +73,19 @@ class AntigravityAgentConfig:
     # --dangerously-skip-permissions flag, which this adapter never passes
     # regardless of config (see orchestrator/agents/antigravity.py).
     mode: str = "accept-edits"
+    timeout_seconds: int = 1800
+
+
+@dataclass
+class CodexAgentConfig:
+    cli_path: str = ""  # empty = auto-detect ("codex" in PATH)
+    model: str = ""  # empty = CLI default
+    # Passed as --sandbox to `codex exec`. "workspace-write" auto-approves
+    # file edits inside the project directory but still denies network
+    # access and writes outside it - NEVER set this to "danger-full-access";
+    # config.py rejects that at load time, and this adapter never passes
+    # --dangerously-bypass-approvals-and-sandbox regardless of this setting.
+    sandbox_mode: str = "workspace-write"
     timeout_seconds: int = 1800
 
 
@@ -97,6 +121,7 @@ class Config:
     projects: dict[str, ProjectEntry] = field(default_factory=dict)
     claude_code: ClaudeCodeAgentConfig = field(default_factory=ClaudeCodeAgentConfig)
     antigravity: AntigravityAgentConfig = field(default_factory=AntigravityAgentConfig)
+    codex: CodexAgentConfig = field(default_factory=CodexAgentConfig)
     git: GitConfig = field(default_factory=GitConfig)
     testing: TestingConfig = field(default_factory=TestingConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -228,6 +253,21 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         timeout_seconds=int(ag_raw.get("timeout_seconds", 1800)),
     )
 
+    codex_raw = raw.get("codex") or {}
+    codex_sandbox_mode = codex_raw.get("sandbox_mode", "workspace-write") or ""
+    if codex_sandbox_mode not in CODEX_ALLOWED_SANDBOX_MODES:
+        raise ValueError(
+            f"config.yaml nastavuje codex.sandbox_mode='{codex_sandbox_mode}', ale to není mezi "
+            f"povolenými hodnotami {sorted(CODEX_ALLOWED_SANDBOX_MODES)}. Non-interactive běh "
+            "nikdy nesmí obcházet sandbox (danger-full-access je zakázané)."
+        )
+    codex = CodexAgentConfig(
+        cli_path=codex_raw.get("cli_path", ""),
+        model=codex_raw.get("model", ""),
+        sandbox_mode=codex_sandbox_mode,
+        timeout_seconds=int(codex_raw.get("timeout_seconds", 1800)),
+    )
+
     git_raw = raw.get("git") or {}
     git = GitConfig(
         auto_commit=bool(git_raw.get("auto_commit", False)),
@@ -262,6 +302,7 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         projects=projects,
         claude_code=claude_code,
         antigravity=antigravity,
+        codex=codex,
         git=git,
         testing=testing,
         api=api,

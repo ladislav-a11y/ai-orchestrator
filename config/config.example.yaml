@@ -75,6 +75,24 @@ antigravity:
   # Po kolika sekundách bez odpovědi orchestrátor běh Antigravity ukončí.
   timeout_seconds: 1800
 
+# Nastavení agenta OpenAI Codex (lokální CLI "codex"). Vybere se buď jako
+# default_agent výše, nebo za běhu přepínačem "--agent codex".
+codex:
+  # Prázdné = orchestrátor si cestu ke "codex" najde sám (v PATH).
+  cli_path: ""
+  # Prázdné = použije se výchozí model nastavený v samotném Codex CLI.
+  model: ""
+  # Předává se jako "--sandbox" přepínači "codex exec". "workspace-write"
+  # automaticky povoluje úpravy souborů uvnitř projektu, ale síťový přístup
+  # a zápis mimo projekt i tak zamítá. POVOLENÉ hodnoty: "workspace-write",
+  # "read-only". NIKDY sem nedávej "danger-full-access" - orchestrátor to
+  # i tak odmítne při startu, protože v kombinaci s
+  # --dangerously-bypass-approvals-and-sandbox (ten adapter nikdy nepoužije
+  # bez ohledu na tuto hodnotu) by to znamenalo obejití sandboxu.
+  sandbox_mode: workspace-write
+  # Po kolika sekundách bez odpovědi orchestrátor běh Codexu ukončí.
+  timeout_seconds: 1800
+
 # Git integrace.
 git:
   # Automaticky vytvořit commit po úspěšně dokončeném a otestovaném úkolu.

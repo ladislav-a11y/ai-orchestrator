@@ -1,0 +1,34 @@
+Autonomní běh 2f52becd5789
+projekt: D:\orchestrator\ai-orchestrator
+cíl: Proved pouze read-only live smoke test Antigravity adapteru. Zkontroluj stav projektu a vrat kratke shrnuti. Nemeň zadne soubory, nespoustej commit a nic nezapisuj.
+stav: max_iterations
+
+--- Definition of Done ---
+[x] 0. Adapter musí používat lokálně nainstalované Antigravity CLI `agy`.
+[x] 1. Pro jednorázový běh používat neinteraktivní režim `agy --print <prompt> --output-format json`.
+[x] 2. Parsovat JSON výstup minimálně z polí `status`, `response`, `conversation_id` a `usage`.
+[x] 3. Za úspěch považovat pouze odpověď se stavem SUCCESS; ostatní stavy převést na jasnou chybu providera.
+[x] 4. Zachovat společný Agent/provider kontrakt používaný orchestrátorem, aby autonomous režim nemusel znát detaily Antigravity CLI.
+[x] 5. Umožnit výběr agenta přes `--agent antigravity`.
+[x] 6. Nepoužívat `--dangerously-skip-permissions`.
+[x] 7. Pro práci nad projektem spouštět Antigravity v pracovním adresáři konkrétního projektu a nepovolit přístup mimo povolený workspace.
+[x] 8. Ověřit bezpečný režim editace Antigravity CLI bez automatického obcházení permission kontrol.
+[x] 9. Podporovat timeout a zachytit návratový kód, stderr a nevalidní JSON.
+[x] 10. Z usage statistik ukládat alespoň input_tokens, output_tokens, thinking_tokens a total_tokens, pokud jsou dostupné.
+[x] 11. Přidat detekci quota/session limitu Antigravity a převést ji na provider stav LIMITED s retry informací, pokud ji CLI poskytne.
+[x] 12. Přidat unit test úspěšného JSON výstupu.
+[x] 13. Přidat test nevalidního JSON, chybového návratového kódu a quota chyby.
+[x] 14. Přidat integrační test přes mock CLI tak, aby testy nespotřebovávaly skutečnou Antigravity kvótu.
+[x] 15. Přidat jeden volitelný live smoke test, který se spustí pouze explicitně a pouze přečte stav projektu bez změn.
+[x] 16. Agent nesmí vytvářet git commit; commitování zůstává odpovědností orchestrátoru.
+[x] 17. Spustit celý test suite a všechny testy musí projít.
+
+=== iterace 1 ===
+testy prošly: None  |  dávka: []  |  prompt: 73 znaků (~18 tokenů)  |  protokolová chyba: False  |  repair pokus: False  |  audit proveden: True
+--- zadání agentovi ---
+(žádné nesplněné body - iterace přeskočila volání implementačního agenta)
+
+--- výstup agenta ---
+(žádný)
+
+poznámka: [audit] Audit selhal (chyba agenta), zkusim priste znovu.

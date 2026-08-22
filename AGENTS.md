@@ -18,7 +18,15 @@ this file, stop and ask - do not silently override safety rules.
    passes `--dangerously-skip-permissions` either, and always runs with
    `--mode accept-edits` (or another non-bypass mode from config) instead -
    verified against the real CLI to deny-by-default (not hang, not silently
-   allow) anything that mode doesn't cover, such as shell commands.
+   allow) anything that mode doesn't cover, such as shell commands. The same
+   rule applies to the `codex` (OpenAI Codex) CLI:
+   `orchestrator/agents/codex.py` never passes
+   `--dangerously-bypass-approvals-and-sandbox` (or its `--yolo` alias), and
+   always runs with an explicit `--sandbox` value restricted to
+   `read-only`/`workspace-write` (never `danger-full-access`) plus
+   `--ask-for-approval never`, which is required for a non-interactive run
+   (there is no terminal to answer a prompt) but does not by itself lift the
+   sandbox restriction.
 2. **Never rewrite or delete Git history.** No `git reset --hard`, no
    `git rebase`, no `git filter-branch`, no `git push --force` /
    `--force-with-lease`, no deleting branches or tags. `orchestrator/git_utils.py`
@@ -114,6 +122,12 @@ this file, stop and ask - do not silently override safety rules.
     about its own changes). Keep the `claude-code` layers in sync if that
     rule ever changes; `orchestrator/agents/antigravity.py`'s module
     docstring documents the antigravity side of the same guarantee.
+    `orchestrator/agents/codex.py` appends the same `NO_COMMIT_INSTRUCTION`
+    text to every prompt it sends to `codex exec`; same rationale as
+    Antigravity (no repo-local permission file this orchestrator controls),
+    backstopped the same way by rule 1's sandbox/approval guarantee - a
+    denied `git commit` from a sandboxed run comes back as an ordinary
+    `error` event, not a hang or a silent allow.
 
 ## When adding a new agent/provider (e.g. OpenAI Codex)
 

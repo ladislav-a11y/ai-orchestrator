@@ -1,0 +1,288 @@
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from orchestrator.agents.codex import CodexAgent, find_codex_cli
+from orchestrator.agents.base import AgentRunRequest
+from orchestrator.config import CodexAgentConfig
+
+LIVE_ENV_VAR = "AI_ORCHESTRATOR_RUN_LIVE_CODEX_TEST"
+
+
+def make_config(**overrides) -> CodexAgentConfig:
+    base = dict(cli_path=sys.executable, sandbox_mode="workspace-write")
+    base.update(overrides)
+    return CodexAgentConfig(**base)
+
+
+def jsonl(*events) -> str:
+    return "\n".join(json.dumps(e) for e in events)
+
+
+def test_rejects_unsafe_sandbox_mode_at_construction():
+    with pytest.raises(ValueError, match="codex.sandbox_mode|povolené"):
+        CodexAgent(make_config(sandbox_mode="danger-full-access"))
+
+
+def test_find_codex_cli_missing_explicit_path():
+    path, note = find_codex_cli("D:/definitely/not/a/real/path/codex.exe")
+    assert path is None
+    assert "neexistuje" in note
+
+
+def test_command_never_contains_forbidden_flags():
+    agent = CodexAgent(make_config())
+    cmd = agent._build_command(AgentRunRequest(project_path=Path("."), prompt="hello"))
+    joined = " ".join(cmd)
+    assert "--dangerously-bypass-approvals-and-sandbox" not in joined
+    assert "--yolo" not in joined
+
+
+def test_command_uses_exec_json_and_safe_sandbox():
+    agent = CodexAgent(make_config())
+    cmd = agent._build_command(AgentRunRequest(project_path=Path("."), prompt="hello"))
+    assert cmd[1] == "exec"
+    assert "--json" in cmd
+    assert "--sandbox" in cmd
+    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
+    assert "--ask-for-approval" in cmd
+    assert cmd[cmd.index("--ask-for-approval") + 1] == "never"
+    assert cmd[-1] == "hello"
+    assert "--cd" in cmd
+    assert cmd[cmd.index("--cd") + 1] == "."
+
+
+def test_command_uses_resume_subcommand_when_session_id_present():
+    agent = CodexAgent(make_config())
+    cmd = agent._build_command(
+        AgentRunRequest(project_path=Path("."), prompt="hello", session_id="sess-1")
+    )
+    assert cmd[1] == "exec"
+    assert cmd[2] == "resume"
+    assert cmd[3] == "sess-1"
+
+
+def test_run_success(monkeypatch):
+    agent = CodexAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = jsonl(
+        {"id": "sess-123", "msg": {"type": "task_started"}},
+        {"id": "sess-123", "msg": {"type": "agent_message", "message": "pracuji"}},
+        {
+            "id": "sess-123",
+            "msg": {
+                "type": "token_count",
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "reasoning_output_tokens": 5,
+                "total_tokens": 125,
+            },
+        },
+        {"id": "sess-123", "msg": {"type": "task_complete", "last_agent_message": "hotovo"}},
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.success is True
+    assert result.output_text == "hotovo"
+    assert result.session_id == "sess-123"
+    assert result.error is None
+    assert result.limited is False
+    assert result.input_tokens == 100
+    assert result.output_tokens == 20
+    assert result.thinking_tokens == 5
+    assert result.total_tokens == 125
+
+
+def test_run_error_event_is_a_clear_error(monkeypatch):
+    agent = CodexAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = jsonl(
+        {"id": "sess-err", "msg": {"type": "task_started"}},
+        {"id": "sess-err", "msg": {"type": "error", "message": "permission denied for command \"rm -rf /\""}},
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.success is False
+    assert result.limited is False
+    assert "permission denied" in result.error
+
+
+def test_run_invalid_output_reports_returncode_and_stderr(monkeypatch):
+    agent = CodexAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, returncode=2, stdout="not json at all", stderr="boom: something broke"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.success is False
+    assert "2" in result.error
+    assert "boom: something broke" in result.error
+
+
+def test_run_incomplete_output_without_task_complete_is_an_error(monkeypatch):
+    agent = CodexAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = jsonl(
+        {"id": "sess-inc", "msg": {"type": "task_started"}},
+        {"id": "sess-inc", "msg": {"type": "agent_message", "message": "pracuji"}},
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.success is False
+    assert "task_complete" in result.error
+
+
+def test_run_quota_error_maps_to_limited(monkeypatch):
+    agent = CodexAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = jsonl(
+        {"id": "sess-quota", "msg": {"type": "task_started"}},
+        {
+            "id": "sess-quota",
+            "msg": {
+                "type": "token_count",
+                "input_tokens": 50,
+                "output_tokens": 0,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 50,
+            },
+        },
+        {
+            "id": "sess-quota",
+            "msg": {
+                "type": "error",
+                "message": "RESOURCE_EXHAUSTED: usage limit reached. Please try again later.",
+            },
+        },
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.success is False
+    assert result.limited is True
+    assert "LIMITED" in result.error
+    assert result.total_tokens == 50
+
+
+def test_run_quota_error_extracts_retry_after_seconds(monkeypatch):
+    agent = CodexAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = jsonl(
+        {"id": "sess-quota-retry", "msg": {"type": "task_started"}},
+        {
+            "id": "sess-quota-retry",
+            "msg": {"type": "error", "message": "rate limit exceeded, please retry after 30 seconds"},
+        },
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.limited is True
+    assert result.retry_after_seconds == 30.0
+
+
+def test_run_timeout(monkeypatch):
+    agent = CodexAgent(make_config(timeout_seconds=1))
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.success is False
+    assert "timeout" in result.error.lower()
+
+
+def test_run_prompt_forbids_agent_git_commit(monkeypatch):
+    agent = CodexAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    captured_cmd = {}
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        fake_stdout = jsonl({"id": "s", "msg": {"type": "task_complete", "last_agent_message": "hotovo"}})
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+
+    sent_prompt = captured_cmd["cmd"][-1]
+    assert "git commit" in sent_prompt
+    assert "git status" in sent_prompt
+    assert "udelej neco" in sent_prompt
+
+
+@pytest.mark.skipif(
+    os.environ.get(LIVE_ENV_VAR) != "1",
+    reason=f"pouze explicitně přes {LIVE_ENV_VAR}=1 - spouští skutečné Codex CLI a spotřebovává kvótu",
+)
+def test_live_smoke_reads_project_state_without_changes(tmp_path):
+    """Optional live smoke test: real `codex` CLI, read-only prompt, no mutation.
+
+    Never runs in normal test runs (see skipif above) - only when explicitly
+    requested, and only against a throwaway tmp_path, never a real project.
+    """
+    from orchestrator.config import load_config
+
+    cfg = load_config()
+    agent = CodexAgent(cfg.codex)
+    available, note = agent.is_available()
+    assert available, note
+
+    (tmp_path / "marker.txt").write_text("hello", encoding="utf-8")
+    before = sorted(p.name for p in tmp_path.iterdir())
+
+    result = agent.run(
+        AgentRunRequest(
+            project_path=tmp_path,
+            prompt=(
+                "Do not create, modify, or delete any files. Just reply with the "
+                "single word OK to confirm you received this."
+            ),
+        )
+    )
+
+    after = sorted(p.name for p in tmp_path.iterdir())
+    assert before == after, "live smoke test must never mutate the project directory"
+    assert result.raw_response is not None
