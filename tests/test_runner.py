@@ -117,6 +117,21 @@ def test_run_task_records_permission_denial_details(tmp_path):
     assert result.permission_denial_details == denials
 
 
+def test_run_task_records_breaker_saved_attempts(tmp_path):
+    # The PreToolUse circuit breaker (orchestrator/hooks/test_command_guard.py)
+    # short-circuits repeated test-invocation attempts after the first
+    # denial and reports how many it saved via AgentRunResult - run_task
+    # must accumulate that onto the task, same as permission_denials.
+    queue = TaskQueue(tmp_path / "tasks.db")
+    task = make_task("demo", str(tmp_path), "dej mi ahoj", "fake", None, 2, False)
+    queue.add(task)
+
+    agent = FakeAgent([AgentRunResult(success=True, output_text="hotovo", breaker_saved_attempts=14)])
+    result = run_task(task, make_cfg(tmp_path), agent, queue, LOGGER)
+
+    assert result.breaker_saved_attempts == 14
+
+
 def test_run_task_commits_when_enabled_and_tests_pass(tmp_path, git_repo):
     queue = TaskQueue(tmp_path / "tasks.db")
     (git_repo / "changed.txt").write_text("nova zmena\n", encoding="utf-8")

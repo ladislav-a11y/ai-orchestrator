@@ -221,6 +221,7 @@ class OrchestratorService:
             "commit_hash": result.commit_hash,
             "error": result.error,
             "restored_from_checkpoint": result.restored_from_checkpoint,
+            "breaker_saved_attempts": result.breaker_saved_attempts,
         }
         out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 

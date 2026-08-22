@@ -65,15 +65,24 @@ def _fix_prompt(original_prompt: str, test_command: str, test_output: str) -> st
 def _record_permission_denials(task: Task, result: AgentRunResult, logger: logging.Logger) -> None:
     """Accumulate one agent.run() call's denied actions onto the task, and
     log the concrete denied commands (not just the count) so it's visible
-    without having to open the outbox JSON."""
-    if not result.permission_denials:
-        return
-    task.permission_denials += result.permission_denials
-    task.permission_denial_details.extend(result.permission_denial_details)
-    logger.warning(
-        "Task %s: agent narazil na %s zamítnutou akci(í) kvůli oprávněním: %s",
-        task.id, result.permission_denials, result.permission_denial_details,
-    )
+    without having to open the outbox JSON. Also surfaces how many repeated
+    test-invocation attempts the PreToolUse circuit breaker short-circuited
+    (see orchestrator/hooks/test_command_guard.py) - both are logged the
+    same way so neither is silently buried in a JSON file."""
+    if result.permission_denials:
+        task.permission_denials += result.permission_denials
+        task.permission_denial_details.extend(result.permission_denial_details)
+        logger.warning(
+            "Task %s: agent narazil na %s zamítnutou akci(í) kvůli oprávněním: %s",
+            task.id, result.permission_denials, result.permission_denial_details,
+        )
+    if result.breaker_saved_attempts:
+        task.breaker_saved_attempts += result.breaker_saved_attempts
+        logger.info(
+            "Task %s: circuit breaker ušetřil %s opakovaných pokusů o spuštění testů (agent je "
+            "po prvním zamítnutí nezkoušel opakovat jinou variantou příkazu).",
+            task.id, result.breaker_saved_attempts,
+        )
 
 
 def run_task(task: Task, config: Config, agent: Agent, queue: TaskQueue, logger: logging.Logger) -> Task:

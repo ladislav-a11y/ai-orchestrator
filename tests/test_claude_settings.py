@@ -77,6 +77,28 @@ def test_settings_never_reference_bypass_permissions():
     assert "--allow-dangerously-skip-permissions" not in dumped
 
 
+def test_settings_wire_up_the_test_command_guard_pretooluse_hook():
+    settings = build_settings()
+    pre_tool_use = settings["hooks"]["PreToolUse"]
+    assert len(pre_tool_use) == 1
+    matcher_entry = pre_tool_use[0]
+    assert matcher_entry["matcher"] == "Bash"
+    hooks = matcher_entry["hooks"]
+    assert len(hooks) == 1
+    assert hooks[0]["type"] == "command"
+    assert "test_command_guard.py" in hooks[0]["command"]
+
+
+def test_ensure_project_claude_settings_includes_hook_for_new_projects(tmp_path: Path):
+    project_dir = tmp_path / "myproj"
+    project_dir.mkdir()
+
+    settings_path = ensure_project_claude_settings(project_dir)
+
+    content = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert "test_command_guard.py" in content["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+
+
 def test_ensure_project_claude_settings_creates_file(tmp_path: Path):
     project_dir = tmp_path / "myproj"
     project_dir.mkdir()

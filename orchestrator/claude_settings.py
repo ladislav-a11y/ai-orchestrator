@@ -22,14 +22,23 @@ orchestrator/agents/claude_code.py for the matching prompt-level rule).
 Anything not listed simply is not auto-approved, which is the safe default
 when nobody can click "yes". No blanket "Bash" allow is granted here on
 purpose.
+
+Also wires up one `PreToolUse` hook (`orchestrator/hooks/test_command_guard.py`)
+that stops the agent from repeatedly retrying test-invocation commands after
+a permission denial - see that module's docstring for why.
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 SETTINGS_FILENAME = "settings.local.json"
+
+# Absolute path so the hook still resolves correctly once Claude Code spawns
+# it with cwd = the *project's* directory, not this repo.
+_TEST_GUARD_HOOK_PATH = Path(__file__).resolve().parent / "hooks" / "test_command_guard.py"
 
 # Read/create/edit project files, run local Python, run the non-destructive
 # half of Git. acceptEdits already auto-approves file edits; listing them
@@ -87,13 +96,37 @@ DENIED_RULES: list[str] = [
 ]
 
 
+def _test_guard_hook_command() -> str:
+    """Command string Claude Code runs for the PreToolUse hook below. Uses
+    `sys.executable` (the interpreter running the orchestrator itself, an
+    absolute path) rather than relying on a bare "python" being on the
+    hook subprocess's PATH - the hook script only needs the stdlib, so any
+    interpreter works, but this one is guaranteed to exist."""
+    return f'"{sys.executable}" "{_TEST_GUARD_HOOK_PATH}"'
+
+
 def build_settings() -> dict:
     """Return the JSON-serializable content written to settings.local.json."""
     return {
         "permissions": {
             "allow": list(ALLOWED_RULES),
             "deny": list(DENIED_RULES),
-        }
+        },
+        # Circuit breaker against repeated test-invocation attempts (pytest/
+        # python/unittest/cmd variants) after the first permission denial -
+        # see orchestrator/hooks/test_command_guard.py for the full
+        # rationale. Runs before every Bash tool call; only ever blocks
+        # calls that look like running the test suite, everything else
+        # (Read/Edit/Write/Glob/Grep, non-Bash tools, and Bash calls that
+        # are not test invocations) passes through untouched.
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": _test_guard_hook_command()}],
+                }
+            ]
+        },
     }
 
 

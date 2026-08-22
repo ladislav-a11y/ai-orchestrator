@@ -99,6 +99,41 @@ je to jen bezpečné výchozí nastavení pro projekty, které si sám založí.
 projektů (`_check_claude_settings`), takže to platí i pro projekty založené
 před zavedením tohoto mechanismu.
 
+### Circuit breaker proti opakovaným pokusům o spuštění testů (`orchestrator/hooks/test_command_guard.py`)
+
+Reálné běhy ukázaly, že Claude po prvním zamítnutí testovacího příkazu
+(nejčastěji kvůli tomu, že `Bash` nástroj na Windows příkaz obalí přes
+`cmd.exe /c "..."`, takže nesedí prefixové `Bash(python:*)`/`Bash(pytest:*)`
+allow pravidlo výše) zkoušel jinou variantu (`pytest` → `python -m pytest`
+→ `python3 -m pytest` → obalené v `cmd` → ...) klidně 10-20x v jedné session
+- zbytečně, protože orchestrátor testy stejně vždy spustí a vyhodnotí sám,
+až po skončení úkolu (`runner.py`/`run_test_command`, `autonomous.py`), a
+agentovo vlastní spuštění testů na výsledek nemá žádný vliv.
+
+Řešení je `PreToolUse` hook zapsaný do stejného `settings.local.json`
+(`build_settings()`, klíč `hooks.PreToolUse`, matcher `"Bash"`) - Claude Code
+ho spustí před každým Bash voláním a stdin dostane JSON s `tool_name`/
+`tool_input.command`/`session_id`. Hook (ne statický allow/deny seznam výše)
+je jediný, kdo rozhoduje o příkazech, které vypadají jako spuštění testů
+(`classify_test_command` - pytest/`python -m pytest`/`python -m unittest`/
+`nosetests`, hledáno obyčejným `.search()` přes celý řetězec, takže funguje
+i skrz `cmd`/`powershell` obal): první takový pokus v dané session dostane
+skutečné, vysvětlené zamítnutí (exit kód 2, stderr = důvod), každý další
+ekvivalentní pokus je od druhého výskytu okamžitě zkrácen (`MAX_ATTEMPTS_PER_CATEGORY = 1`)
+bez dalšího zdůvodňování - stav se drží v `<projekt>/.claude/.test_guard_state/<session_id>.json`.
+`ClaudeCodeAgent.run()` po skončení CLI procesu tenhle soubor přečte
+(`read_saved_attempts`) a počet uložených pokusů vrátí v
+`AgentRunResult.breaker_saved_attempts`; `runner.py`/`autonomous.py` ho
+zaloguje a přičtou na `Task.breaker_saved_attempts`/`AutonomousResult.breaker_saved_attempts`,
+stejně jako se dnes už loguje `permission_denials` výše. Prompt navíc dostává
+`TEST_EXECUTION_INSTRUCTION` (vedle `NO_COMMIT_INSTRUCTION`) - výslovně říká
+agentovi, že testy ověřuje jen orchestrátor a že po prvním zamítnutí nemá
+zkoušet jinou variantu příkazu.
+
+Selže-li čtení stdin/stavového souboru, hook vždy "fail-open" (exit 0,
+povolí) - statická allow/deny pravidla zůstávají záložní vrstvou, stejně
+jako u ostatních `permission_mode`/`FORBIDDEN_*` kontrol.
+
 ## Pracovní prostor (`workspace_root`)
 
 `ClaudeCodeAgent` dostává `cwd` = cesta projektu vrácená

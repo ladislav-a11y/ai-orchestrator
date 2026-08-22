@@ -129,6 +129,47 @@ def test_run_autonomous_completed_with_commit(git_repo):
     assert all(item.done for item in result.dod_items)
 
 
+def test_run_autonomous_accumulates_breaker_saved_attempts_across_calls(git_repo):
+    # The PreToolUse circuit breaker (orchestrator/hooks/test_command_guard.py)
+    # reports how many repeated test-invocation attempts it short-circuited
+    # via AgentRunResult.breaker_saved_attempts - run_autonomous_loop must
+    # sum this across every agent.run() call (executor + audit here) onto
+    # the final AutonomousResult, same as it does for DoD/test tracking.
+    (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
+    dod = parse_definition_of_done("- [ ] Priprav feature.txt")
+
+    def run_fn(request):
+        if AUDIT_MARKER in request.prompt:
+            return AgentRunResult(
+                success=True,
+                output_text='{"rejected_indices": [], "notes": "audit ok"}',
+                breaker_saved_attempts=5,
+            )
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+            breaker_saved_attempts=14,
+        )
+
+    cfg = Config()  # git.auto_commit defaults to False
+
+    result = run_autonomous_loop(
+        run_id="test-run",
+        project_path=git_repo,
+        goal="Priprav feature",
+        dod_items=dod,
+        config=cfg,
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=5,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert result.breaker_saved_attempts == 19
+
+
 def test_run_autonomous_completed_without_commit_when_auto_commit_disabled(git_repo):
     (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
     dod = parse_definition_of_done("- [ ] Priprav feature.txt")

@@ -156,6 +156,11 @@ class AutonomousResult:
     # a run that started clean. Set by the caller after the loop returns;
     # run_autonomous_loop itself has no knowledge of checkpoints.
     restored_from_checkpoint: int = 0
+    # How many repeated test-invocation attempts the PreToolUse circuit
+    # breaker (orchestrator/hooks/test_command_guard.py) short-circuited
+    # across every agent.run() call in this run (executor + repair + audit)
+    # - see AgentRunResult.breaker_saved_attempts.
+    breaker_saved_attempts: int = 0
 
 
 # -- Definition of Done parsing ---------------------------------------------
@@ -498,6 +503,7 @@ class AuditOutcome:
     notes: str
     protocol_error: bool
     session_id: Optional[str]
+    breaker_saved_attempts: int = 0
 
 
 def _run_audit(
@@ -527,19 +533,20 @@ def _run_audit(
     )
     result = agent.run(AgentRunRequest(project_path=project_path, prompt=prompt, session_id=session_id))
     new_session_id = result.session_id or session_id
+    saved = result.breaker_saved_attempts
     if not result.success:
-        return AuditOutcome([], "Audit selhal (chyba agenta), zkusim priste znovu.", True, new_session_id)
+        return AuditOutcome([], "Audit selhal (chyba agenta), zkusim priste znovu.", True, new_session_id, saved)
 
     parsed = _extract_json(result.output_text)
     if not parsed or not isinstance(parsed.get("rejected_indices"), list):
-        return AuditOutcome([], "Audit nevrátil platný JSON, zkusim priste znovu.", True, new_session_id)
+        return AuditOutcome([], "Audit nevrátil platný JSON, zkusim priste znovu.", True, new_session_id, saved)
 
     rejected = sorted(
         {idx for idx in parsed["rejected_indices"] if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(dod_items)}
     )
     notes = parsed.get("notes")
     notes = notes if isinstance(notes, str) else ""
-    return AuditOutcome(rejected, notes, False, new_session_id)
+    return AuditOutcome(rejected, notes, False, new_session_id, saved)
 
 
 def _iteration_signature(dod_items: list[DoDItem], tests_passed: Optional[bool], test_output: Optional[str]) -> str:
@@ -635,9 +642,28 @@ def run_autonomous_loop(
     prev_tests_passed: Optional[bool] = None
     prev_test_output: Optional[str] = None
     total_prompt_chars = 0
+    breaker_saved_total = 0
+
+    def note_breaker_savings(saved: int) -> None:
+        """Surface the PreToolUse circuit breaker's short-circuit count
+        (orchestrator/hooks/test_command_guard.py) in this run's own log,
+        the same way permission_denials is surfaced in runner.py - see
+        AgentRunResult.breaker_saved_attempts."""
+        nonlocal breaker_saved_total
+        if saved:
+            breaker_saved_total += saved
+            logger.info(
+                "Autonomní běh %s: circuit breaker ušetřil %s opakovaných pokusů o spuštění "
+                "testů (agent je po prvním zamítnutí nezkoušel opakovat jinou variantou "
+                "příkazu).",
+                run_id, saved,
+            )
 
     def snapshot(status: AutonomousStatus, **extra) -> AutonomousResult:
-        return AutonomousResult(status=status, iterations=list(iterations), dod_items=dod_items, **extra)
+        return AutonomousResult(
+            status=status, iterations=list(iterations), dod_items=dod_items,
+            breaker_saved_attempts=breaker_saved_total, **extra,
+        )
 
     logger.info(
         "Autonomní běh %s: start (projekt=%s, max_iterations=%s, DoD položek=%s, dávka=%s)",
@@ -672,6 +698,7 @@ def run_autonomous_loop(
                 AgentRunRequest(project_path=project_path, prompt=prompt, session_id=session_id)
             )
             session_id = result.session_id or session_id
+            note_breaker_savings(result.breaker_saved_attempts)
 
             if not result.success:
                 logger.error("Autonomní běh %s: agent v iteraci %s selhal: %s", run_id, i, result.error)
@@ -707,6 +734,7 @@ def run_autonomous_loop(
                     AgentRunRequest(project_path=project_path, prompt=repair_prompt, session_id=session_id)
                 )
                 session_id = repair_result.session_id or session_id
+                note_breaker_savings(repair_result.breaker_saved_attempts)
                 if repair_result.success:
                     repair_parsed = _extract_json(repair_result.output_text)
                     repair_notes, repair_protocol_error, _ = _apply_dod_updates(
@@ -755,6 +783,7 @@ def run_autonomous_loop(
                 tests_passed, test_output, session_id, run_id, i, logger,
             )
             session_id = audit.session_id or session_id
+            note_breaker_savings(audit.breaker_saved_attempts)
             audit_rejected = audit.rejected_indices
             audit_protocol_error = audit.protocol_error
 

@@ -62,6 +62,13 @@ class Task:
     permission_denials: int = 0
     permission_denial_details: list[dict[str, Any]] = field(default_factory=list)
 
+    # How many repeated test-invocation attempts (pytest/python/unittest/cmd
+    # variants after the first denial) the orchestrator's own PreToolUse
+    # hook (orchestrator/hooks/test_command_guard.py) short-circuited for
+    # this task - accumulated across every agent.run() call, same as
+    # permission_denials above.
+    breaker_saved_attempts: int = 0
+
     def to_dict(self) -> dict[str, Any]:
         d = dict(self.__dict__)
         d["status"] = self.status.value if isinstance(self.status, TaskStatus) else self.status

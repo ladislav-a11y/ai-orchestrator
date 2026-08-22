@@ -11,6 +11,13 @@ Invocation contract (do not weaken this without updating AGENTS.md too):
     run `git commit` itself (claude_settings.py denies it at the permission
     level too) - only the orchestrator's own Git layer commits, and only
     after tests are verified (see runner.py/_maybe_commit)
+  - every prompt also gets TEST_EXECUTION_INSTRUCTION appended: the
+    orchestrator always runs test_command itself after the agent finishes,
+    so the agent should not retry a test-invocation command after it's
+    denied once - claude_settings.py's PreToolUse hook
+    (orchestrator/hooks/test_command_guard.py) enforces the same rule at
+    the permission level, this is the matching prompt-level nudge so the
+    agent does not even try
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ from typing import Optional
 
 from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult
 from orchestrator.config import ClaudeCodeAgentConfig
+from orchestrator.hooks.test_command_guard import read_saved_attempts
 
 FORBIDDEN_FLAGS = (
     "--dangerously-skip-permissions",
@@ -42,6 +50,22 @@ NO_COMMIT_INSTRUCTION = (
     "Důležité pravidlo: NIKDY nespouštěj `git commit` (ani `git commit --amend`) - commit "
     "po skončení tvého běhu vytváří výhradně orchestrátor, až ověří testy. `git status` a "
     "`git diff` používat smíš a můžeš k ověření stavu, jen sám nic necommituj."
+)
+
+# Testy vždy spouští a vyhodnocuje orchestrátor sám (viz runner.py/
+# run_test_command a autonomous.py) - agentovo vlastní spuštění testů nikdy
+# nic nerozhoduje, ani kdyby prošlo. Prompt to říká výslovně navíc k hook
+# breakeru (orchestrator/hooks/test_command_guard.py), který stejně po
+# první zamítnuté dávce blokuje každý další ekvivalentní pokus - cílem je,
+# aby agent po prvním zamítnutí vůbec nezkoušel jinou variantu příkazu a
+# nemarnil tím tahy/tokeny (viz ten modul pro celé zdůvodnění).
+TEST_EXECUTION_INSTRUCTION = (
+    "Testy po dokončení úkolu vždy spouští a vyhodnocuje výhradně orchestrátor, nikdy sám "
+    "agent - i kdyby ti spuštění prošlo. Pokud ti spuštění testovacího příkazu (pytest, "
+    "`python -m pytest`, `python -m unittest`, přes `cmd` apod.) jednou zamítne systém "
+    "oprávnění, NEZKOUŠEJ to znovu jinou variantou příkazu - další pokusy se stejně "
+    "automaticky blokují a jen plýtvají časem. Pokračuj rovnou v editaci kódu podle zadání a "
+    "na úplný závěr jen konstatuj, že ověření testů necháváš na orchestrátorovi."
 )
 
 
@@ -164,7 +188,7 @@ class ClaudeCodeAgent(Agent):
         prompt = request.prompt
         if request.context:
             prompt = f"{request.prompt}\n\n---\n{request.context}"
-        prompt = f"{prompt}\n\n---\n{NO_COMMIT_INSTRUCTION}"
+        prompt = f"{prompt}\n\n---\n{NO_COMMIT_INSTRUCTION}\n\n---\n{TEST_EXECUTION_INSTRUCTION}"
         effective_request = AgentRunRequest(
             project_path=request.project_path,
             prompt=prompt,
@@ -212,6 +236,7 @@ class ClaudeCodeAgent(Agent):
             # autonomous._extract_json (now robust to trailing/leading text
             # too, as defense in depth) and AgentRunResult.permission_denials
             # (the structured, out-of-band place for this count).
+            response_session_id = raw.get("session_id") or effective_request.session_id
             return AgentRunResult(
                 success=(not is_error),
                 output_text=result_text,
@@ -221,6 +246,7 @@ class ClaudeCodeAgent(Agent):
                 error=None if not is_error else (result_text or "Claude Code vrátil chybu."),
                 permission_denials=len(denials),
                 permission_denial_details=denials,
+                breaker_saved_attempts=read_saved_attempts(request.project_path, response_session_id),
             )
 
         # Could not parse JSON - fall back to raw stdout/stderr.

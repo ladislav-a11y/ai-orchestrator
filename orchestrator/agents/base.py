@@ -41,6 +41,13 @@ class AgentRunResult:
     # *which* commands were denied, not just how many. Same rationale as
     # `permission_denials` for staying out of `output_text`.
     permission_denial_details: list[dict[str, Any]] = field(default_factory=list)
+    # How many repeated test-invocation attempts (pytest/python/unittest/cmd
+    # variants tried again after the first permission denial for that
+    # command class) the orchestrator's own PreToolUse hook
+    # (orchestrator/hooks/test_command_guard.py) short-circuited during this
+    # run, instead of letting the agent keep retrying - see
+    # ClaudeCodeAgent.run() and claude_settings.py's `hooks.PreToolUse`.
+    breaker_saved_attempts: int = 0
 
 
 class Agent(ABC):

@@ -133,6 +133,53 @@ def test_run_prompt_forbids_agent_git_commit(monkeypatch):
     assert "udelej neco" in sent_prompt
 
 
+def test_run_prompt_forbids_retrying_denied_test_commands(monkeypatch):
+    # Explicit prompt-level nudge (requirement 2/3): after a test-command
+    # permission denial, the agent must not retry another pytest/python/
+    # unittest/cmd variant - it should keep editing and leave verification
+    # to the orchestrator (see TEST_EXECUTION_INSTRUCTION).
+    agent = ClaudeCodeAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    captured_cmd = {}
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        fake_stdout = json.dumps({"is_error": False, "result": "hotovo"})
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+
+    sent_prompt = captured_cmd["cmd"][captured_cmd["cmd"].index("-p") + 1]
+    assert "NEZKOUŠEJ to znovu jinou variantou příkazu" in sent_prompt
+    assert "orchestrátor" in sent_prompt.lower()
+
+
+def test_run_reports_breaker_saved_attempts_from_hook_state(monkeypatch, tmp_path):
+    from orchestrator.hooks.test_command_guard import evaluate, save_state, _state_path
+
+    agent = ClaudeCodeAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    session_id = "sess-xyz"
+    state = {"categories": {}, "saved_attempts": 0}
+    for _ in range(15):
+        state, _, _ = evaluate(state, "test-run")
+    save_state(_state_path(tmp_path, session_id), state)
+
+    fake_stdout = json.dumps({"is_error": False, "result": "hotovo", "session_id": session_id})
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=tmp_path, prompt="udelej neco"))
+    assert result.breaker_saved_attempts == 14
+
+
 def test_run_timeout(monkeypatch):
     agent = ClaudeCodeAgent(make_config(timeout_seconds=1))
     monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
