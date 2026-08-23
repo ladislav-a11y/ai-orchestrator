@@ -137,6 +137,7 @@ class IterationLog:
     audit_performed: bool = False
     audit_rejected_indices: list[int] = field(default_factory=list)
     audit_protocol_error: bool = False
+    agent_name: Optional[str] = None
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
@@ -708,6 +709,7 @@ def run_autonomous_loop(
                         tests_passed=None, test_output=None,
                         dod_snapshot=[{"text": d.text, "done": d.done} for d in dod_items],
                         requested_indices=requested_indices, prompt_chars=prompt_chars,
+                        agent_name=getattr(agent, "active_provider_name", getattr(agent, "name", None)),
                     )
                 )
                 final = snapshot(AutonomousStatus.ERROR, error=result.error)
@@ -815,6 +817,7 @@ def run_autonomous_loop(
                 repair_attempted=repair_attempted, repair_succeeded=repair_succeeded,
                 audit_performed=audit_performed, audit_rejected_indices=audit_rejected,
                 audit_protocol_error=audit_protocol_error,
+                agent_name=getattr(agent, "active_provider_name", getattr(agent, "name", None)),
             )
         )
         logger.info(

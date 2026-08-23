@@ -137,3 +137,29 @@ def test_project_inside_workspace_root_subdir_accepted(tmp_path):
     cfg = load_config(cfg_path, create_if_missing=False)
     entry = cfg.resolve_project("myproj")
     assert Path(entry.path) == nested
+
+
+def test_default_provider_order():
+    cfg = load_config(EXAMPLE, create_if_missing=False)
+    assert cfg.provider_order == ["claude-code", "antigravity", "codex"]
+
+
+def test_custom_provider_order_parsed(tmp_path):
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "provider_order:\n  - codex\n  - claude-code\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_path, create_if_missing=False)
+    assert cfg.provider_order == ["codex", "claude-code"]
+
+
+def test_invalid_provider_in_provider_order_rejected(tmp_path):
+    bad = tmp_path / "config.yaml"
+    bad.write_text(
+        "provider_order:\n  - claude-code\n  - unknown-bot\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="neznámého providera 'unknown-bot'"):
+        load_config(bad, create_if_missing=False)
+

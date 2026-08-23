@@ -44,6 +44,13 @@ ANTIGRAVITY_ALLOWED_MODES = {"accept-edits", "plan", ""}
 # read-only/inspection run.
 CODEX_ALLOWED_SANDBOX_MODES = {"read-only", "workspace-write"}
 
+# Supported provider implementations in the orchestrator registry.
+AVAILABLE_AGENTS = ["claude-code", "antigravity", "codex"]
+
+# Default provider failover order for autonomous mode.
+DEFAULT_PROVIDER_ORDER = ["claude-code", "antigravity", "codex"]
+
+
 
 @dataclass
 class ProjectEntry:
@@ -118,6 +125,7 @@ class PathsConfig:
 @dataclass
 class Config:
     default_agent: str = "claude-code"
+    provider_order: list[str] = field(default_factory=lambda: list(DEFAULT_PROVIDER_ORDER))
     projects: dict[str, ProjectEntry] = field(default_factory=dict)
     claude_code: ClaudeCodeAgentConfig = field(default_factory=ClaudeCodeAgentConfig)
     antigravity: AntigravityAgentConfig = field(default_factory=AntigravityAgentConfig)
@@ -297,8 +305,33 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         data=paths_raw.get("data", "data"),
     )
 
+    provider_order_raw = raw.get("provider_order")
+    if provider_order_raw is None:
+        provider_order_raw = raw.get("failover_order")
+
+    if provider_order_raw is not None:
+        if isinstance(provider_order_raw, str):
+            provider_order = [s.strip() for s in provider_order_raw.split(",") if s.strip()]
+        elif isinstance(provider_order_raw, list):
+            provider_order = [str(x) for x in provider_order_raw]
+        else:
+            raise ValueError(
+                f"config.yaml nastavuje neplatný provider_order: '{provider_order_raw}' "
+                "(musí být seznam nebo řetězec oddělený čárkami)."
+            )
+    else:
+        provider_order = list(DEFAULT_PROVIDER_ORDER)
+
+    for p_name in provider_order:
+        if p_name not in AVAILABLE_AGENTS:
+            raise ValueError(
+                f"config.yaml nastavuje neznámého providera '{p_name}' v provider_order. "
+                f"Podporovaní provideři jsou: {', '.join(AVAILABLE_AGENTS)}."
+            )
+
     config = Config(
         default_agent=raw.get("default_agent", "claude-code"),
+        provider_order=provider_order,
         projects=projects,
         claude_code=claude_code,
         antigravity=antigravity,

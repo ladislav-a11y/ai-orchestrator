@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
-from orchestrator.agents.registry import build_agent
+from orchestrator.agents.registry import build_agent, build_failover_agent
 from orchestrator.autonomous import (
     AutonomousResult,
     DEFAULT_MAX_ITERATIONS,
@@ -151,7 +151,14 @@ class OrchestratorService:
         if test_command is None:
             test_command = entry.test_command or self.config.testing.test_command or None
 
-        agent = build_agent(agent_name or self.config.default_agent, self.config)
+        if agent_name:
+            agent = build_agent(agent_name, self.config)
+        else:
+            agent = build_failover_agent(
+            self.config,
+            logger=self.logger,
+            agent_builder=build_agent,
+        )
         run_id = new_task_id()
 
         # Restore already-verified DoD progress from a previous, separate

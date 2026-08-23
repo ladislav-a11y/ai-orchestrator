@@ -7,6 +7,15 @@
 # Který agent se použije, pokud úkol žádný nevybere výslovně.
 default_agent: claude-code
 
+# Pořadí providerů pro automatický režim / failover (pokud není zadán explicitní --agent).
+# Orchestrátor zkusí providery v tomto pořadí a při vyčerpání kvóty (LIMITED) nebo
+# nedostupnosti CLI automaticky přepne na dalšího.
+provider_order:
+  - claude-code
+  - antigravity
+  - codex
+
+
 # Kořen pracovního prostoru: hranice, mimo kterou orchestrátor (a jím řízený
 # ClaudeCodeAgent) nikdy nesmí pracovat - natvrdo vynuceno v config.py, ať už
 # je projekt zadaný jménem z registru níže, nebo jako syrová cesta na disku.

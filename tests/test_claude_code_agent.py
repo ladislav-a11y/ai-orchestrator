@@ -192,3 +192,54 @@ def test_run_timeout(monkeypatch):
     result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
     assert result.success is False
     assert "timeout" in result.error.lower()
+
+
+def test_run_plaintext_weekly_limit_on_stdout_maps_to_limited(monkeypatch):
+    agent = ClaudeCodeAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    message = "You've hit your weekly limit ? resets Aug 25, 10pm (Europe/Prague)"
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            returncode=1,
+            stdout=message,
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="udelej neco")
+    )
+
+    assert result.success is False
+    assert result.limited is True
+    assert "weekly limit" in result.error.lower()
+    assert "LIMITED" in result.error
+
+
+def test_run_quota_error_maps_to_limited(monkeypatch):
+    agent = ClaudeCodeAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = json.dumps(
+        {
+            "is_error": True,
+            "result": "429 Too Many Requests: usage limit reached. Please retry after 30 seconds.",
+            "retry_after_seconds": 30,
+        }
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.success is False
+    assert result.limited is True
+    assert result.retry_after_seconds == 30.0
+    assert "LIMITED" in result.error
+

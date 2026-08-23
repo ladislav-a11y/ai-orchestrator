@@ -69,6 +69,61 @@ TEST_EXECUTION_INSTRUCTION = (
 )
 
 
+# Substrings that, seen anywhere in the CLI's error or result text,
+# indicate a quota/rate/session limit rather than an ordinary failure.
+# Matched case-insensitively. Same rationale/approach as antigravity.py
+# and codex.py.
+QUOTA_LIMIT_MARKERS = (
+    "resource_exhausted",
+    "quota has been exceeded",
+    "quota exceeded",
+    "out of quota",
+    "rate limit",
+    "rate-limited",
+    "rate_limit",
+    "too many requests",
+    "429",
+    "session limit",
+    "usage limit",
+    "weekly limit",
+    "credit balance",
+    "insufficient credit",
+    "insufficient_quota",
+    "overloaded",
+)
+
+RETRY_AFTER_KEYS = ("retry_after_seconds", "retry_after", "retryAfterSeconds", "retryAfter")
+
+_RETRY_AFTER_TEXT_RE = re.compile(
+    r"retry(?:ing)?\s+(?:again\s+)?(?:in|after)\s+(\d+(?:\.\d+)?)\s*(seconds?|secs?|minutes?|mins?|s|m)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_retry_after_seconds(raw: dict, text: str) -> Optional[float]:
+    for key in RETRY_AFTER_KEYS:
+        value = raw.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    match = _RETRY_AFTER_TEXT_RE.search(text or "")
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).lower()
+    if unit.startswith("m"):
+        value *= 60
+    return value
+
+
+def _detect_quota_limit(raw: dict, error_text: str) -> tuple[bool, Optional[float]]:
+    haystack = " ".join(
+        str(part) for part in (raw.get("error"), raw.get("result"), error_text) if part
+    ).lower()
+    if not any(marker in haystack for marker in QUOTA_LIMIT_MARKERS):
+        return False, None
+    return True, _extract_retry_after_seconds(raw, error_text)
+
+
 def _version_key(folder_name: str) -> tuple:
     parts = re.split(r"[.\-]", folder_name)
     key = []
@@ -237,22 +292,46 @@ class ClaudeCodeAgent(Agent):
             # too, as defense in depth) and AgentRunResult.permission_denials
             # (the structured, out-of-band place for this count).
             response_session_id = raw.get("session_id") or effective_request.session_id
+            error_message = None if not is_error else (result_text or "Claude Code vrátil chybu.")
+            limited = False
+            retry_after_seconds = None
+            if is_error and error_message:
+                limited, retry_after_seconds = _detect_quota_limit(raw, error_message)
+                if limited:
+                    error_message = f"Claude Code hlásí vyčerpání kvóty/limitu (LIMITED): {error_message}"
+
             return AgentRunResult(
                 success=(not is_error),
                 output_text=result_text,
                 raw_response=raw,
                 session_id=raw.get("session_id"),
                 cost_usd=raw.get("total_cost_usd"),
-                error=None if not is_error else (result_text or "Claude Code vrátil chybu."),
+                error=error_message,
                 permission_denials=len(denials),
                 permission_denial_details=denials,
                 breaker_saved_attempts=read_saved_attempts(request.project_path, response_session_id),
+                limited=limited,
+                retry_after_seconds=retry_after_seconds,
             )
 
         # Could not parse JSON - fall back to raw stdout/stderr.
         success = proc.returncode == 0
+        error_message = None if success else (
+            proc.stderr.strip()
+            or proc.stdout.strip()
+            or f"exit code {proc.returncode}"
+        )
+        limited = False
+        retry_after_seconds = None
+        if not success and error_message:
+            limited, retry_after_seconds = _detect_quota_limit({}, error_message)
+            if limited:
+                error_message = f"Claude Code hlásí vyčerpání kvóty/limitu (LIMITED): {error_message}"
+
         return AgentRunResult(
             success=success,
             output_text=proc.stdout.strip(),
-            error=None if success else (proc.stderr.strip() or f"exit code {proc.returncode}"),
+            error=error_message,
+            limited=limited,
+            retry_after_seconds=retry_after_seconds,
         )
