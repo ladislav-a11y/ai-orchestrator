@@ -170,11 +170,19 @@ class FailoverAgent(Agent):
             "Všichni konfigurovaní provideři (%s) jsou nedostupní nebo LIMITED.",
             ", ".join(order_names),
         )
+        known_retries = [
+            status.retry_after_seconds
+            for status in self._provider_statuses.values()
+            if status.limited and status.retry_after_seconds is not None
+        ]
+        retry_after_seconds = min(known_retries) if known_retries else None
+
         return AgentRunResult(
             success=False,
             output_text="",
-            error=f"Všichni konfigurovaní provideři ({', '.join(order_names)}) jsou nedostupní nebo LIMITED.",
+            error="V\u0161ichni konfigurovan\u00ed provide\u0159i (" + ", ".join(order_names) + ") jsou nedostupn\u00ed nebo LIMITED.",
             limited=True,
+            retry_after_seconds=retry_after_seconds,
         )
 
 

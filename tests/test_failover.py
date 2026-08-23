@@ -374,3 +374,34 @@ def test_failover_is_available_logic():
     ok, msg = agent.is_available()
     assert ok is False
     assert "Žádný provider není k dispozici" in msg
+
+
+def test_failover_all_limited_preserves_earliest_retry():
+    def p1_run(request):
+        return AgentRunResult(
+            success=False,
+            output_text="",
+            error="Rate limit",
+            limited=True,
+            retry_after_seconds=3600,
+        )
+
+    def p2_run(request):
+        return AgentRunResult(
+            success=False,
+            output_text="",
+            error="Quota limit",
+            limited=True,
+            retry_after_seconds=900,
+        )
+
+    p1 = MockAgent("claude-code", available=True, run_fn=p1_run)
+    p2 = MockAgent("antigravity", available=True, run_fn=p2_run)
+
+    result = FailoverAgent([p1, p2]).run(
+        AgentRunRequest(project_path=Path("."), prompt="test")
+    )
+
+    assert result.success is False
+    assert result.limited is True
+    assert result.retry_after_seconds == 900
