@@ -11,3 +11,4 @@ outbox/*.json
 inbox/*.json
 inbox/processed/*.json
 .pytest_cache/
+logs/autonomous/
