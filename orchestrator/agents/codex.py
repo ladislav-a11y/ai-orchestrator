@@ -1,24 +1,45 @@
 """Agent implementation that drives the locally installed OpenAI Codex CLI (`codex`).
 
 Invocation contract (do not weaken this without updating AGENTS.md too):
+  - Verified against the real `codex exec --help` of Codex CLI 0.149.0. That
+    CLI does NOT have an `--ask-for-approval` flag - `codex exec` is already
+    the headless/scripting subcommand (there is no terminal to prompt), and
+    what a run is allowed to do is governed entirely by `--sandbox`. An
+    earlier version of this adapter passed `--ask-for-approval never`, which
+    0.149.0 rejects outright as an unknown argument (the run would fail
+    before doing anything) - do not reintroduce it.
   - always non-interactive: `codex exec --json --cd <project_dir> --sandbox
-    <mode> --ask-for-approval never "<prompt>"` (`exec` is the CLI's
-    documented headless/scripting subcommand; `--json` makes it emit one
-    JSON object per line on stdout instead of human-formatted text)
-  - NEVER passes `--dangerously-bypass-approvals-and-sandbox` or its short
-    alias `--yolo` - that flag disables both the sandbox and approval
-    prompts at once and is Codex's equivalent of Claude's
-    `--dangerously-skip-permissions` / Antigravity's
-    `--dangerously-skip-permissions`. Instead this adapter always passes an
-    explicit `--sandbox` value from CodexAgentConfig.sandbox_mode, restricted
-    to `read-only` or `workspace-write` (never `danger-full-access`) - see
+    <mode> --ignore-user-config --approve-for-me "<prompt>"`, plus
+    `--ephemeral` on a fresh run (no `session_id` to resume - see below)
+    (`--json` makes it emit one JSON object per line on stdout instead of
+    human-formatted text; `--ignore-user-config` makes the run's behavior
+    depend only on the flags this adapter passes, not on whatever a
+    machine's `~/.codex/config.toml` happens to contain; `--approve-for-me`
+    is what actually lets a headless run proceed without a human answering
+    approval prompts - it does not by itself widen what's allowed, that is
+    still `--sandbox`'s job, see below)
+  - `--ephemeral` is only passed when `request.session_id` is empty (i.e.
+    not a `resume` run): it skips writing the run's session to Codex's
+    persistent rollout history, which is incompatible with resuming that
+    same session later. The autonomous loop chains `AgentRunResult.session_id`
+    from one iteration's response into the next iteration's
+    `AgentRunRequest.session_id` to keep a single Codex conversation across
+    an entire run (see autonomous.py) - passing `--ephemeral` on a `resume`
+    run would break that.
+  - NEVER passes `--dangerously-bypass-approvals-and-sandbox` (or its short
+    alias `--yolo`) or `--dangerously-bypass-hook-trust` - those flags
+    disable the sandbox/approval/hook-trust safety net entirely and are
+    Codex's equivalent of Claude's `--dangerously-skip-permissions` /
+    Antigravity's `--dangerously-skip-permissions`. Instead this adapter
+    always passes an explicit `--sandbox` value from
+    CodexAgentConfig.sandbox_mode, restricted to `read-only` or
+    `workspace-write` (never `danger-full-access`) - see
     CODEX_ALLOWED_SANDBOX_MODES in config.py. `workspace-write` still denies
     network access and any filesystem write outside the working directory;
     it is the Codex analogue of Antigravity's `--mode accept-edits`.
-  - `--ask-for-approval never` is required for a non-interactive run (there
-    is no terminal to answer an approval prompt); this does not bypass the
-    sandbox restriction above; a command the sandbox would otherwise block
-    still fails instead of silently running unrestricted.
+    `--approve-for-me` only removes the interactive prompt for actions the
+    sandbox would already allow - a command the sandbox blocks still fails
+    instead of silently running unrestricted.
   - runs with `--cd` (and the subprocess's own `cwd`) set to the target
     project's directory, which is already validated against workspace_root
     by `Config.resolve_project` before an `AgentRunRequest` is built (see
@@ -36,11 +57,7 @@ Invocation contract (do not weaken this without updating AGENTS.md too):
     ClaudeCodeAgent's contract (see claude_code.py for the full rationale)
   - `codex exec --json` streams JSONL events, not one JSON blob. Each line
     is parsed independently; the fields below follow the CLI's publicly
-    documented event schema. This adapter could not be verified against a
-    real installed `codex` binary in this environment (not present on
-    PATH/config here) - unlike claude_code.py/antigravity.py, whose
-    contracts were confirmed against a real CLI, this one is best-effort
-    against the documented `codex exec --json` event contract:
+    documented event schema:
       {"id": "...", "msg": {"type": "task_started", ...}}
       {"id": "...", "msg": {"type": "agent_message", "message": "..."}}
       {"id": "...", "msg": {"type": "token_count", "input_tokens": N,
@@ -79,6 +96,7 @@ from orchestrator.config import CODEX_ALLOWED_SANDBOX_MODES, CodexAgentConfig
 FORBIDDEN_FLAGS = (
     "--dangerously-bypass-approvals-and-sandbox",
     "--yolo",
+    "--dangerously-bypass-hook-trust",
 )
 
 # Substrings that, seen anywhere in an "error" event's message text,
@@ -230,11 +248,23 @@ class CodexAgent(Agent):
             "--json",
             "--cd",
             str(request.project_path),
-            "--sandbox",
-            self.config.sandbox_mode,
-            "--ask-for-approval",
-            "never",
+            "--ignore-user-config",
         ]
+        if self.config.sandbox_mode == "read-only":
+            cmd += ["--sandbox", "read-only"]
+        elif self.config.sandbox_mode == "workspace-write":
+            cmd += ["--approve-for-me"]
+        else:
+            raise ValueError(f"Unsupported Codex sandbox mode: {self.config.sandbox_mode}")
+        if not request.session_id:
+            # --ephemeral skips writing this run's session to Codex's
+            # persistent rollout history - only safe for a fresh run with no
+            # session_id to resume. A `resume <id>` run must NOT pass it: the
+            # autonomous loop (autonomous.py) chains AgentRunResult.session_id
+            # from one iteration into the next iteration's request.session_id
+            # to keep the same Codex conversation across the whole run, which
+            # requires that conversation to have actually been persisted.
+            cmd.append("--ephemeral")
         if self.config.model:
             cmd += ["--model", self.config.model]
         cmd += [request.prompt]

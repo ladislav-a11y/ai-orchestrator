@@ -21,12 +21,14 @@ this file, stop and ask - do not silently override safety rules.
    allow) anything that mode doesn't cover, such as shell commands. The same
    rule applies to the `codex` (OpenAI Codex) CLI:
    `orchestrator/agents/codex.py` never passes
-   `--dangerously-bypass-approvals-and-sandbox` (or its `--yolo` alias), and
-   always runs with an explicit `--sandbox` value restricted to
-   `read-only`/`workspace-write` (never `danger-full-access`) plus
-   `--ask-for-approval never`, which is required for a non-interactive run
-   (there is no terminal to answer a prompt) but does not by itself lift the
-   sandbox restriction.
+   `--dangerously-bypass-approvals-and-sandbox` (or its `--yolo` alias) or
+   `--dangerously-bypass-hook-trust`. For Codex CLI 0.149.0 the safe
+   non-interactive contract depends on the configured mode: `read-only`
+   uses `--sandbox read-only` without `--approve-for-me`, while
+   `workspace-write` uses `--approve-for-me` without an explicit
+   `--sandbox workspace-write`. These flags must not be combined.
+   `danger-full-access` is never allowed, and Codex CLI 0.149.0 has no
+   `--ask-for-approval` flag - do not reintroduce it.
 2. **Never rewrite or delete Git history.** No `git reset --hard`, no
    `git rebase`, no `git filter-branch`, no `git push --force` /
    `--force-with-lease`, no deleting branches or tags. `orchestrator/git_utils.py`
@@ -65,7 +67,11 @@ this file, stop and ask - do not silently override safety rules.
    is the parent directory of this repo (`D:\orchestrator`). Do not remove
    or weaken this check, and do not add a code path that builds a
    `project_path`/`cwd` for an agent without going through
-   `resolve_project()`.
+   `resolve_project()`. For Antigravity (`agy`), the adapter explicitly
+   passes `--add-dir <project_path>` in addition to subprocess cwd to mount
+   the target project (empirical testing on Windows showed cwd alone defaults
+   to scratch workspace), while `--sandbox` is omitted because it causes
+   'context canceled' errors in Antigravity CLI on Windows.
 9. **The autonomous loop (`orchestrator/autonomous.py`) must never run
    forever.** `run_autonomous_loop` hard-clamps `max_iterations` to
    `ABSOLUTE_MAX_ITERATIONS` regardless of what a caller/CLI flag requests,

@@ -9,10 +9,15 @@ Invocation contract (do not weaken this without updating AGENTS.md too):
     (e.g. shell commands) in non-interactive mode - verified against the real
     CLI: a denied command comes back as a normal JSON status=ERROR with an
     "error" message, never a hang and never an implicit approval
-  - runs with cwd = the target project's directory (already validated against
-    workspace_root by Config.resolve_project before AgentRunRequest is built -
-    see config.py's `_ensure_within_workspace`), so Antigravity only ever
-    operates inside the one project directory it was invoked for
+  - explicitly adds the target project workspace via `--add-dir <project_path>`
+    and runs subprocess with cwd = the target project's directory (already
+    validated against workspace_root by Config.resolve_project before
+    AgentRunRequest is built - see config.py's `_ensure_within_workspace`).
+    Empirical testing of Antigravity CLI on Windows proved that subprocess cwd
+    alone is not sufficient (without `--add-dir`, the CLI operates in a scratch
+    workspace under ~/.gemini/antigravity-cli/scratch). Passing `--add-dir`
+    explicitly mounts the target project. `--sandbox` is intentionally omitted
+    because real Antigravity CLI runs on Windows fail with error 'context canceled'.
   - every prompt gets NO_COMMIT_INSTRUCTION appended: the agent must never
     run `git commit` itself - only the orchestrator's own Git layer commits,
     and only after tests are verified (see runner.py/_maybe_commit). Unlike
@@ -188,7 +193,15 @@ class AntigravityAgent(Agent):
 
     def _build_command(self, request: AgentRunRequest) -> list[str]:
         assert self._cli_path
-        cmd = [self._cli_path, "--print", request.prompt, "--output-format", "json"]
+        cmd = [
+            self._cli_path,
+            "--add-dir",
+            str(request.project_path),
+            "--print",
+            request.prompt,
+            "--output-format",
+            "json",
+        ]
 
         if request.session_id:
             cmd += ["--conversation", request.session_id]

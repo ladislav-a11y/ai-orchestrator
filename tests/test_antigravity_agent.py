@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.agents.antigravity import AntigravityAgent, find_antigravity_cli
+from orchestrator.agents.antigravity import (
+    NO_COMMIT_INSTRUCTION,
+    TEST_EXECUTION_INSTRUCTION,
+    AntigravityAgent,
+    _detect_quota_limit,
+    _extract_retry_after_seconds,
+    find_antigravity_cli,
+)
 from orchestrator.agents.base import AgentRunRequest
 from orchestrator.config import AntigravityAgentConfig
 
@@ -30,23 +37,100 @@ def test_find_antigravity_cli_missing_explicit_path():
     assert "neexistuje" in note
 
 
-def test_command_never_contains_forbidden_flags():
+def test_find_antigravity_cli_existing_explicit_path():
+    path, note = find_antigravity_cli(sys.executable)
+    assert path == str(Path(sys.executable))
+    assert "použita ručně nastavená cesta" in note
+
+
+def test_find_antigravity_cli_from_path(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/agy" if cmd == "agy" else None)
+    path, note = find_antigravity_cli("")
+    assert path == "/usr/bin/agy"
+    assert "nalezeno v PATH" in note
+
+
+def test_find_antigravity_cli_not_found(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda cmd: None)
+    path, note = find_antigravity_cli("")
+    assert path is None
+    assert "nenalezeno v PATH" in note
+
+
+def test_is_available(monkeypatch):
     agent = AntigravityAgent(make_config())
-    cmd = agent._build_command(AgentRunRequest(project_path=Path("."), prompt="hello"))
+
+    def fake_run_ok(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="agy 1.1.19", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run_ok)
+    ok, msg = agent.is_available()
+    assert ok is True
+    assert "agy 1.1.19" in msg
+
+    def fake_run_fail(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="command failed")
+
+    monkeypatch.setattr(subprocess, "run", fake_run_fail)
+    ok, msg = agent.is_available()
+    assert ok is False
+    assert "selhalo" in msg
+
+    agent._cli_path = None
+    ok, msg = agent.is_available()
+    assert ok is False
+
+
+def test_command_never_contains_forbidden_flags_or_sandbox():
+    agent = AntigravityAgent(make_config())
+    project_path = Path("D:/test/project/path")
+    cmd = agent._build_command(AgentRunRequest(project_path=project_path, prompt="hello"))
     joined = " ".join(cmd)
     assert "--dangerously-skip-permissions" not in joined
     assert "--allow-dangerously-skip-permissions" not in joined
+    assert "--sandbox" not in joined
 
 
-def test_command_uses_print_and_json_output_format():
+def test_command_explicitly_adds_project_dir_and_flags():
     agent = AntigravityAgent(make_config())
-    cmd = agent._build_command(AgentRunRequest(project_path=Path("."), prompt="hello"))
+    project_path = Path("D:/projects/custom-repo")
+    cmd = agent._build_command(AgentRunRequest(project_path=project_path, prompt="hello world"))
+
+    # Explicitly verifies --add-dir and project_path
+    assert "--add-dir" in cmd
+    assert cmd[cmd.index("--add-dir") + 1] == str(project_path)
+
+    # Verifies --print and prompt
     assert "--print" in cmd
-    assert cmd[cmd.index("--print") + 1] == "hello"
+    assert cmd[cmd.index("--print") + 1] == "hello world"
+
+    # Verifies --output-format json
     assert "--output-format" in cmd
     assert cmd[cmd.index("--output-format") + 1] == "json"
+
+    # Verifies --mode accept-edits
     assert "--mode" in cmd
     assert cmd[cmd.index("--mode") + 1] == "accept-edits"
+
+    # No sandbox flag
+    assert "--sandbox" not in cmd
+
+
+def test_command_optional_session_and_model():
+    agent = AntigravityAgent(make_config(model="gemini-2.5-pro"))
+    project_path = Path("D:/projects/test")
+    cmd = agent._build_command(
+        AgentRunRequest(
+            project_path=project_path,
+            prompt="do something",
+            session_id="conv-xyz-789",
+        )
+    )
+
+    assert "--conversation" in cmd
+    assert cmd[cmd.index("--conversation") + 1] == "conv-xyz-789"
+    assert "--model" in cmd
+    assert cmd[cmd.index("--model") + 1] == "gemini-2.5-pro"
 
 
 def test_run_success(monkeypatch):
@@ -68,12 +152,18 @@ def test_run_success(monkeypatch):
         }
     )
 
+    captured_call = {}
+
     def fake_run(cmd, **kwargs):
+        captured_call["cmd"] = cmd
+        captured_call["kwargs"] = kwargs
         return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    project_dir = Path("D:/orchestrator/target-app")
+    result = agent.run(AgentRunRequest(project_path=project_dir, prompt="udelej neco"))
+
     assert result.success is True
     assert result.output_text == "hotovo"
     assert result.session_id == "conv-123"
@@ -83,6 +173,11 @@ def test_run_success(monkeypatch):
     assert result.output_tokens == 20
     assert result.thinking_tokens == 5
     assert result.total_tokens == 125
+
+    # Explicitly verifies --add-dir in cmd and cwd passed to subprocess.run
+    assert "--add-dir" in captured_call["cmd"]
+    assert captured_call["cmd"][captured_call["cmd"].index("--add-dir") + 1] == str(project_dir)
+    assert captured_call["kwargs"]["cwd"] == str(project_dir)
 
 
 def test_run_non_success_status_is_a_clear_error(monkeypatch):
@@ -94,7 +189,7 @@ def test_run_non_success_status_is_a_clear_error(monkeypatch):
             "conversation_id": "conv-err",
             "status": "ERROR",
             "response": "",
-            "error": "permission check failed for command \"rm -rf /\"",
+            "error": 'permission check failed for command "rm -rf /"',
         }
     )
 
@@ -176,6 +271,22 @@ def test_run_quota_error_extracts_retry_after_seconds(monkeypatch):
     assert result.retry_after_seconds == 30.0
 
 
+def test_extract_retry_after_from_dict_and_regex():
+    assert _extract_retry_after_seconds({"retry_after_seconds": 45}, "") == 45.0
+    assert _extract_retry_after_seconds({"retryAfter": 12.5}, "") == 12.5
+    assert _extract_retry_after_seconds({}, "retry in 2 minutes") == 120.0
+    assert _extract_retry_after_seconds({}, "retrying again after 15 secs") == 15.0
+    assert _extract_retry_after_seconds({}, "no retry info here") is None
+
+
+def test_detect_quota_limit_patterns():
+    for marker in ("rate limit", "RESOURCE_EXHAUSTED", "Too Many Requests", "session limit"):
+        is_lim, _ = _detect_quota_limit({}, f"Error: {marker}")
+        assert is_lim is True
+    is_lim, _ = _detect_quota_limit({}, "Ordinary compilation error")
+    assert is_lim is False
+
+
 def test_run_timeout(monkeypatch):
     agent = AntigravityAgent(make_config(timeout_seconds=1))
     monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
@@ -190,7 +301,30 @@ def test_run_timeout(monkeypatch):
     assert "timeout" in result.error.lower()
 
 
-def test_run_prompt_forbids_agent_git_commit(monkeypatch):
+def test_run_file_not_found(monkeypatch):
+    agent = AntigravityAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError("agy not found")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.success is False
+    assert "Nelze spustit CLI" in result.error
+
+
+def test_run_cli_unavailable(monkeypatch):
+    agent = AntigravityAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (False, "CLI nenalezeno"))
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.success is False
+    assert result.error == "CLI nenalezeno"
+
+
+def test_run_prompt_forbids_agent_git_commit_and_includes_context(monkeypatch):
     agent = AntigravityAgent(make_config())
     monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
 
@@ -203,12 +337,21 @@ def test_run_prompt_forbids_agent_git_commit(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    agent.run(
+        AgentRunRequest(
+            project_path=Path("."),
+            prompt="udelej neco",
+            context="dodatecny kontext ukolu",
+        )
+    )
 
     sent_prompt = captured_cmd["cmd"][captured_cmd["cmd"].index("--print") + 1]
     assert "git commit" in sent_prompt
     assert "git status" in sent_prompt
     assert "udelej neco" in sent_prompt
+    assert "dodatecny kontext ukolu" in sent_prompt
+    assert NO_COMMIT_INSTRUCTION in sent_prompt
+    assert TEST_EXECUTION_INSTRUCTION in sent_prompt
 
 
 @pytest.mark.skipif(

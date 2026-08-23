@@ -40,6 +40,7 @@ def test_command_never_contains_forbidden_flags():
     joined = " ".join(cmd)
     assert "--dangerously-bypass-approvals-and-sandbox" not in joined
     assert "--yolo" not in joined
+    assert "--dangerously-bypass-hook-trust" not in joined
 
 
 def test_command_uses_exec_json_and_safe_sandbox():
@@ -47,13 +48,25 @@ def test_command_uses_exec_json_and_safe_sandbox():
     cmd = agent._build_command(AgentRunRequest(project_path=Path("."), prompt="hello"))
     assert cmd[1] == "exec"
     assert "--json" in cmd
-    assert "--sandbox" in cmd
-    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
-    assert "--ask-for-approval" in cmd
-    assert cmd[cmd.index("--ask-for-approval") + 1] == "never"
+    assert "--sandbox" not in cmd
+    assert "--ask-for-approval" not in cmd
+    assert "--ephemeral" in cmd
+    assert "--ignore-user-config" in cmd
+    assert "--approve-for-me" in cmd
     assert cmd[-1] == "hello"
     assert "--cd" in cmd
     assert cmd[cmd.index("--cd") + 1] == "."
+
+
+def test_command_uses_read_only_sandbox_without_approve_for_me():
+    agent = CodexAgent(make_config(sandbox_mode="read-only"))
+    cmd = agent._build_command(
+        AgentRunRequest(project_path=Path("."), prompt="hello")
+    )
+    assert "--sandbox" in cmd
+    assert cmd[cmd.index("--sandbox") + 1] == "read-only"
+    assert "--approve-for-me" not in cmd
+    assert "--ask-for-approval" not in cmd
 
 
 def test_command_uses_resume_subcommand_when_session_id_present():
@@ -64,6 +77,10 @@ def test_command_uses_resume_subcommand_when_session_id_present():
     assert cmd[1] == "exec"
     assert cmd[2] == "resume"
     assert cmd[3] == "sess-1"
+    # --ephemeral would skip persisting session state, which would make a
+    # later `resume` of this same session impossible - must not be used here.
+    assert "--ephemeral" not in cmd
+    assert "--approve-for-me" in cmd
 
 
 def test_run_success(monkeypatch):
@@ -266,6 +283,7 @@ def test_live_smoke_reads_project_state_without_changes(tmp_path):
     from orchestrator.config import load_config
 
     cfg = load_config()
+    cfg.codex.sandbox_mode = "read-only"
     agent = CodexAgent(cfg.codex)
     available, note = agent.is_available()
     assert available, note
