@@ -1,4 +1,4 @@
-import json
+﻿import json
 from pathlib import Path
 
 from orchestrator import service as service_module
@@ -169,3 +169,60 @@ def test_run_autonomous_requires_goal_or_spec(tmp_path):
         assert False, "expected ValueError"
     except ValueError as e:
         assert "goal" in str(e) or "spec" in str(e)
+
+
+def test_waiting_worker_finds_due_provider_task(tmp_path):
+    cfg = make_cfg(tmp_path)
+    service = OrchestratorService(cfg)
+
+    task = service.submit(
+        project_ref="station-agent",
+        prompt="pokracuj po limite",
+    )
+
+    task.status = service_module.TaskStatus.WAITING_FOR_PROVIDER
+    task.is_autonomous = True
+    task.retry_at = "2000-01-01T00:00:00+00:00"
+    service.queue.update(task)
+
+    found = service.queue.next_due_waiting()
+
+    assert found is not None
+    assert found.id == task.id
+
+
+
+def test_waiting_worker_submits_due_task(tmp_path):
+    cfg = make_cfg(tmp_path)
+    service = OrchestratorService(cfg)
+
+    submitted = []
+
+    original_submit = service._executor.submit
+
+    def fake_submit(fn, task):
+        submitted.append(task)
+        return None
+
+    service._executor.submit = fake_submit
+
+    task = service.submit(
+        project_ref="station-agent",
+        prompt="obnov po limite",
+    )
+
+    task.status = service_module.TaskStatus.WAITING_FOR_PROVIDER
+    task.is_autonomous = True
+    task.retry_at = "2000-01-01T00:00:00+00:00"
+    service.queue.update(task)
+
+    service._waiting_worker_stop = True
+    service._waiting_worker_interval = 0
+
+    service._waiting_worker_loop()
+
+    assert len(submitted) == 1
+    assert submitted[0].id == task.id
+
+    service._executor.submit = original_submit
+

@@ -120,6 +120,23 @@ class TaskQueue:
         return Task.from_dict(json.loads(row["data"]))
 
 
+    def next_due_waiting(self, now: Optional[str] = None) -> Optional[Task]:
+        """Return the oldest autonomous provider-waiting task whose retry time is due."""
+        now = now or now_iso()
+        waiting = self.list(status=TaskStatus.WAITING_FOR_PROVIDER, limit=1000)
+        due = [
+            task
+            for task in waiting
+            if task.is_autonomous
+            and task.retry_at is not None
+            and task.retry_at <= now
+        ]
+        if not due:
+            return None
+        due.sort(key=lambda task: (task.retry_at or "", task.created_at))
+        return due[0]
+
+
 def make_task(
     project: str,
     project_path: str,

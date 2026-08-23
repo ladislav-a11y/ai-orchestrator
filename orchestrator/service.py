@@ -1,4 +1,4 @@
-"""Wires config + queue + agent + runner together.
+﻿"""Wires config + queue + agent + runner together.
 
 One OrchestratorService instance is shared by the CLI and the local API.
 Tasks are processed one at a time by a single background worker thread, so
@@ -8,6 +8,8 @@ two tasks never run against the same project concurrently.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
@@ -15,6 +17,7 @@ from typing import Optional
 from orchestrator.agents.registry import build_agent, build_failover_agent
 from orchestrator.autonomous import (
     AutonomousResult,
+    AutonomousStatus,
     DEFAULT_MAX_ITERATIONS,
     DOD_BATCH_SIZE,
     parse_definition_of_done,
@@ -39,7 +42,43 @@ class OrchestratorService:
         self.logger = setup_logging(self.config.logs_dir)
         self.queue = TaskQueue(self.config.data_dir / "tasks.db")
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="orchestrator-worker")
+        self._waiting_worker_stop = False
+        self._waiting_worker_interval = 30
+        self._waiting_worker = threading.Thread(target=self._waiting_worker_loop, daemon=True)
+        self._waiting_worker.start()
+        self._resume_waiting_tasks()
 
+    def _resume_waiting_tasks(self) -> None:
+        """Resume autonomous tasks that were waiting for provider quota."""
+        task = self.queue.next_due_waiting()
+        if task is None:
+            return
+
+        self.logger.info(
+            "Obnovuji čekající task %s po čekání na providera",
+            task.id,
+        )
+        self._executor.submit(self._execute, task)
+    def _waiting_worker_loop(self) -> None:
+        """Periodically resume autonomous tasks after provider wait."""
+        first_pass = True
+        while not self._waiting_worker_stop or first_pass:
+            first_pass = False
+            try:
+                task = self.queue.next_due_waiting()
+                if task is not None:
+                    self.logger.info(
+                        "Worker obnovuje čekající task %s po vypršení čekání",
+                        task.id,
+                    )
+                    self._executor.submit(self._execute, task)
+            except Exception as exc:
+                self.logger.error(
+                    "Chyba waiting workeru: %s",
+                    exc,
+                )
+
+            time.sleep(self._waiting_worker_interval)
     # -- task submission -------------------------------------------------
 
     def submit(
@@ -207,6 +246,40 @@ class OrchestratorService:
             auto_commit_requested=(self.config.git.auto_commit if auto_commit is None else auto_commit),
             on_iteration=on_iteration,
         )
+        if result.status == AutonomousStatus.WAITING_FOR_PROVIDER:
+            waiting_task = make_task(
+                project=entry.name,
+                project_path=str(project_dir),
+                prompt=goal_text,
+                agent=agent_name or self.config.default_agent,
+                test_command=test_command,
+                max_fix_attempts=0,
+                auto_commit_requested=False,
+                source="autonomous",
+            )
+
+            waiting_task.status = TaskStatus.WAITING_FOR_PROVIDER
+            waiting_task.error = result.error
+            waiting_task.retry_after_seconds = result.retry_after_seconds
+            if result.retry_after_seconds:
+                from datetime import datetime, timedelta, timezone
+                waiting_task.retry_at = (
+                    datetime.now(timezone.utc)
+                    + timedelta(seconds=result.retry_after_seconds)
+                ).isoformat()
+            waiting_task.goal = goal_text
+            waiting_task.spec_text = dod_source
+            waiting_task.is_autonomous = True
+            waiting_task.max_iterations = max_iterations or DEFAULT_MAX_ITERATIONS
+
+            self.queue.add(waiting_task)
+
+            self.logger.info(
+                "Autonomn? b?h %s ?ek? na provider limit, ulo?en do fronty jako %s",
+                run_id,
+                waiting_task.id,
+            )
+
         result.restored_from_checkpoint = restored
 
         write_autonomous_log(self.config.logs_dir, run_id, entry.name, goal_text, result)
@@ -271,3 +344,9 @@ class OrchestratorService:
 
     def list_tasks(self, status: Optional[TaskStatus] = None, limit: int = 50) -> list[Task]:
         return self.queue.list(status=status, limit=limit)
+
+
+
+
+
+
