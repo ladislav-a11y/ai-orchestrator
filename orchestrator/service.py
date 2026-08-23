@@ -43,6 +43,7 @@ class OrchestratorService:
         self.queue = TaskQueue(self.config.data_dir / "tasks.db")
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="orchestrator-worker")
         self._waiting_worker_stop = False
+        self._waiting_worker_event = threading.Event()
         self._waiting_worker_interval = 30
         self._waiting_worker = threading.Thread(target=self._waiting_worker_loop, daemon=True)
         self._waiting_worker.start()
@@ -78,7 +79,17 @@ class OrchestratorService:
                     exc,
                 )
 
-            time.sleep(self._waiting_worker_interval)
+            self._waiting_worker_event.wait(self._waiting_worker_interval)
+
+    def shutdown(self, wait: bool = True) -> None:
+        """Stop background workers and release resources."""
+        self._waiting_worker_stop = True
+        self._waiting_worker_event.set()
+
+        if self._waiting_worker.is_alive():
+            self._waiting_worker.join(timeout=5)
+
+        self._executor.shutdown(wait=wait)
     # -- task submission -------------------------------------------------
 
     def submit(
@@ -344,6 +355,8 @@ class OrchestratorService:
 
     def list_tasks(self, status: Optional[TaskStatus] = None, limit: int = 50) -> list[Task]:
         return self.queue.list(status=status, limit=limit)
+
+
 
 
 

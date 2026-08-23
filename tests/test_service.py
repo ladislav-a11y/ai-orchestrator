@@ -226,3 +226,15 @@ def test_waiting_worker_submits_due_task(tmp_path):
 
     service._executor.submit = original_submit
 
+
+def test_shutdown_stops_workers(tmp_path):
+    cfg = make_cfg(tmp_path)
+    service = OrchestratorService(cfg)
+
+    assert service._waiting_worker.is_alive()
+
+    service.shutdown()
+
+    assert service._waiting_worker_stop is True
+    assert not service._waiting_worker.is_alive()
+
