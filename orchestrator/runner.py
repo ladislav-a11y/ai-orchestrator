@@ -87,6 +87,13 @@ def _record_permission_denials(task: Task, result: AgentRunResult, logger: loggi
 
 def run_task(task: Task, config: Config, agent: Agent, queue: TaskQueue, logger: logging.Logger) -> Task:
     project_path = Path(task.project_path)
+    preexisting_dirty = is_git_repo(project_path) and has_uncommitted_changes(project_path)
+    if preexisting_dirty:
+        logger.warning(
+            "Task %s: projekt byl dirty u? p?ed startem; auto-commit je pro tento b?h zak?z?n, "
+            "aby orchestr?tor nep?ibral ciz? rozpracovan? zm?ny.",
+            task.id,
+        )
     task.status = TaskStatus.RUNNING
     queue.update(task)
     logger.info("Task %s: spouštím agenta '%s' na projektu %s", task.id, task.agent, project_path)
@@ -151,7 +158,7 @@ def run_task(task: Task, config: Config, agent: Agent, queue: TaskQueue, logger:
     else:
         task.tests_passed = None  # no test command configured -> tests skipped, not failed
 
-    _maybe_commit(task, project_path, config, logger)
+    _maybe_commit(task, project_path, config, logger, preexisting_dirty=preexisting_dirty)
 
     task.status = TaskStatus.DONE
     queue.update(task)
@@ -159,8 +166,20 @@ def run_task(task: Task, config: Config, agent: Agent, queue: TaskQueue, logger:
     return task
 
 
-def _maybe_commit(task: Task, project_path: Path, config: Config, logger: logging.Logger) -> None:
+def _maybe_commit(
+    task: Task,
+    project_path: Path,
+    config: Config,
+    logger: logging.Logger,
+    preexisting_dirty: bool = False,
+) -> None:
     if not (task.auto_commit_requested and config.git.auto_commit):
+        return
+    if preexisting_dirty:
+        logger.info(
+            "Task %s: commit se p?eskakuje, proto?e pracovn? strom obsahoval zm?ny u? p?ed startem b?hu.",
+            task.id,
+        )
         return
     if task.tests_passed is False:
         return  # never commit on failing tests - enforced regardless of caller intent

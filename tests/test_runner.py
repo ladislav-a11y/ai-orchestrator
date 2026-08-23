@@ -134,17 +134,51 @@ def test_run_task_records_breaker_saved_attempts(tmp_path):
 
 def test_run_task_commits_when_enabled_and_tests_pass(tmp_path, git_repo):
     queue = TaskQueue(tmp_path / "tasks.db")
-    (git_repo / "changed.txt").write_text("nova zmena\n", encoding="utf-8")
 
     task = make_task("demo", str(git_repo), "uprav soubor", "fake", None, 2, True)
     queue.add(task)
 
-    agent = FakeAgent([AgentRunResult(success=True, output_text="hotovo")])
-    result = run_task(task, make_cfg(tmp_path, auto_commit=True), agent, queue, LOGGER)
+    class WritingAgent:
+        def run(self, request):
+            (git_repo / "changed.txt").write_text("nova zmena\n", encoding="utf-8")
+            return AgentRunResult(success=True, output_text="hotovo")
+
+    result = run_task(
+        task,
+        make_cfg(tmp_path, auto_commit=True),
+        WritingAgent(),
+        queue,
+        LOGGER,
+    )
 
     assert result.status == TaskStatus.DONE
     assert result.committed is True
     assert result.commit_hash
+
+
+def test_run_task_does_not_commit_preexisting_dirty_tree(tmp_path, git_repo):
+    queue = TaskQueue(tmp_path / "tasks.db")
+
+    # Tato zm?na existuje u? P?ED startem ?kolu a orchestr?tor ji nesm?
+    # p?ivlastnit sv?mu commitu.
+    (git_repo / "preexisting.txt").write_text("rozpracovana prace\n", encoding="utf-8")
+
+    task = make_task("demo", str(git_repo), "nic nemen", "fake", None, 2, True)
+    queue.add(task)
+
+    agent = FakeAgent([AgentRunResult(success=True, output_text="hotovo")])
+    result = run_task(
+        task,
+        make_cfg(tmp_path, auto_commit=True),
+        agent,
+        queue,
+        LOGGER,
+    )
+
+    assert result.status == TaskStatus.DONE
+    assert result.committed is False
+    assert result.commit_hash is None
+    assert (git_repo / "preexisting.txt").exists()
 
 
 def test_run_task_never_commits_when_tests_fail(tmp_path, git_repo):

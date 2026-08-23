@@ -96,10 +96,12 @@ def test_parse_definition_of_done_ignores_headings_and_prose():
 
 
 def test_run_autonomous_completed_with_commit(git_repo):
-    (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
     dod = parse_definition_of_done("- [ ] Priprav feature.txt")
 
     def executor(request):
+        # Zm?na vznik? a? B?HEM autonomous b?hu, tak?e ji auto-commit
+        # sm? bezpe?n? zahrnout.
+        (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
         return AgentRunResult(
             success=True,
             output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
@@ -127,6 +129,38 @@ def test_run_autonomous_completed_with_commit(git_repo):
     assert len(result.iterations) == 1
     assert result.iterations[0].audit_performed is True
     assert all(item.done for item in result.dod_items)
+
+
+def test_run_autonomous_does_not_commit_preexisting_dirty_tree(git_repo):
+    (git_repo / "preexisting.txt").write_text("rozpracovana prace\n", encoding="utf-8")
+    dod = parse_definition_of_done("- [ ] Over stav")
+
+    def executor(request):
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+        )
+
+    cfg = Config()
+    cfg.git = GitConfig(auto_commit=True)
+
+    result = run_autonomous_loop(
+        run_id="dirty-tree-test",
+        project_path=git_repo,
+        goal="Over stav",
+        dod_items=dod,
+        config=cfg,
+        agent=FakeAgent(_confirming_audit_or(executor)),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=2,
+        auto_commit_requested=True,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert result.committed is False
+    assert result.commit_hash is None
+    assert (git_repo / "preexisting.txt").exists()
 
 
 def test_run_autonomous_accumulates_breaker_saved_attempts_across_calls(git_repo):

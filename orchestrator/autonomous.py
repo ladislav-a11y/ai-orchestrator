@@ -563,11 +563,18 @@ def _commit_if_ready(
     run_id: str,
     goal: str,
     logger,
+    preexisting_dirty: bool = False,
 ) -> tuple[bool, Optional[str], Optional[str]]:
     """Mirrors runner.py's `maybe_commit` guard rules for the autonomous run:
     only commit when auto_commit is requested AND enabled in config, tests did
     not fail, the target is a Git repo, and there is something to commit."""
     if not (auto_commit_requested and config.git.auto_commit):
+        return False, None, None
+    if preexisting_dirty:
+        logger.info(
+            "Autonomn? b?h %s: commit se p?eskakuje, proto?e pracovn? strom obsahoval zm?ny u? p?ed startem b?hu.",
+            run_id,
+        )
         return False, None, None
     if tests_passed is False:
         return False, None, None
@@ -627,6 +634,13 @@ def run_autonomous_loop(
     on_iteration: Optional[Callable[[AutonomousResult], None]] = None,
 ) -> AutonomousResult:
     max_iterations = max(1, min(max_iterations, ABSOLUTE_MAX_ITERATIONS))
+    preexisting_dirty = is_git_repo(project_path) and has_uncommitted_changes(project_path)
+    if preexisting_dirty:
+        logger.warning(
+            "Autonomn? b?h %s: projekt byl dirty u? p?ed startem; auto-commit je pro tento b?h zak?z?n, "
+            "aby orchestr?tor nep?ibral ciz? rozpracovan? zm?ny.",
+            run_id,
+        )
     if not test_command:
         detected = _detect_test_command(project_path)
         if detected:
@@ -804,6 +818,7 @@ def run_autonomous_loop(
             else:
                 committed, commit_hash, commit_error = _commit_if_ready(
                     project_path, config, auto_commit_requested, tests_passed, run_id, goal, logger,
+                    preexisting_dirty=preexisting_dirty,
                 )
                 completed = True
 
