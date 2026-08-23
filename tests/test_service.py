@@ -158,6 +158,7 @@ def test_run_autonomous_completed_writes_log_and_outbox(tmp_path, monkeypatch):
     payload = json.loads(outbox_path.read_text(encoding="utf-8"))
     assert payload["status"] == "completed"
     assert payload["run_id"] == run_id
+    assert payload["retry_after_seconds"] is None
 
 
 def test_run_autonomous_requires_goal_or_spec(tmp_path):

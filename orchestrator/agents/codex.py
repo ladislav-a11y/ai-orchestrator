@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 import shutil
 import subprocess
 from pathlib import Path
@@ -127,6 +128,11 @@ _RETRY_AFTER_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_RETRY_AT_TEXT_RE = re.compile(
+    r"try\s+again\s+at\s+([A-Za-z]{3})\s+(\d{1,2})(?:st|nd|rd|th)?,\s+(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)",
+    re.IGNORECASE,
+)
+
 
 def _extract_retry_after_seconds(raw: dict, text: str) -> Optional[float]:
     for key in RETRY_AFTER_KEYS:
@@ -134,13 +140,24 @@ def _extract_retry_after_seconds(raw: dict, text: str) -> Optional[float]:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
     match = _RETRY_AFTER_TEXT_RE.search(text or "")
-    if not match:
-        return None
-    value = float(match.group(1))
-    unit = match.group(2).lower()
-    if unit.startswith("m"):
-        value *= 60
-    return value
+    if match:
+        value = float(match.group(1))
+        unit = match.group(2).lower()
+        if unit.startswith("m"):
+            value *= 60
+        return value
+
+    match = _RETRY_AT_TEXT_RE.search(text or "")
+    if match:
+        month, day, year, hour, minute, ampm = match.groups()
+        reset = datetime.strptime(
+            f"{month} {day} {year} {hour}:{minute} {ampm}",
+            "%b %d %Y %I:%M %p",
+        ).astimezone()
+        now = datetime.now().astimezone()
+        return max(0.0, (reset - now).total_seconds())
+
+    return None
 
 
 def _detect_quota_limit(raw: dict, error_text: str) -> tuple[bool, Optional[float]]:

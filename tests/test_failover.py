@@ -247,8 +247,9 @@ def test_explicit_agent_does_not_perform_failover(tmp_path, monkeypatch):
         max_iterations=2,
     )
 
-    # Ended with ERROR on the first iteration without failing over
-    assert result.status == AutonomousStatus.ERROR
+    # Explicit provider still must not fail over, but a real quota limit
+    # is now represented as WAITING_FOR_PROVIDER rather than a hard ERROR.
+    assert result.status == AutonomousStatus.WAITING_FOR_PROVIDER
     assert len(p1_calls) == 1
     assert result.error == "Quota exceeded"
 

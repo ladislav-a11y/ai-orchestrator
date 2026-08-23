@@ -134,7 +134,12 @@ def _print_autonomous_result(run_id: str, result) -> int:
         mark = "[x]" if item.done else "[ ]"
         print(f"{mark} {i}. {item.text}")
 
-    if result.status == AutonomousStatus.BLOCKED:
+    if result.status == AutonomousStatus.WAITING_FOR_PROVIDER:
+        if result.retry_after_seconds is not None:
+            print(f"\n?ek?n? na dostupn?ho providera; dal?? pokus nejd??ve za {result.retry_after_seconds:.0f} s.")
+        else:
+            print("\n?ek?n? na dostupn?ho providera; ?as dal??ho pokusu nen? zn?m.")
+    elif result.status == AutonomousStatus.BLOCKED:
         print("\nZastaveno: stejný stav/chyba se opakuje bez pokroku (blocked).")
     elif result.status == AutonomousStatus.MAX_ITERATIONS:
         print("\nZastaveno: dosažen maximální počet iterací, Definition of Done ještě není splněná.")

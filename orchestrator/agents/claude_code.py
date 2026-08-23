@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime
 import shutil
 import subprocess
 from pathlib import Path
@@ -99,6 +100,11 @@ _RETRY_AFTER_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_RESET_AT_TEXT_RE = re.compile(
+    r"resets?\s+([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)",
+    re.IGNORECASE,
+)
+
 
 def _extract_retry_after_seconds(raw: dict, text: str) -> Optional[float]:
     for key in RETRY_AFTER_KEYS:
@@ -106,13 +112,27 @@ def _extract_retry_after_seconds(raw: dict, text: str) -> Optional[float]:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
     match = _RETRY_AFTER_TEXT_RE.search(text or "")
-    if not match:
-        return None
-    value = float(match.group(1))
-    unit = match.group(2).lower()
-    if unit.startswith("m"):
-        value *= 60
-    return value
+    if match:
+        value = float(match.group(1))
+        unit = match.group(2).lower()
+        if unit.startswith("m"):
+            value *= 60
+        return value
+
+    match = _RESET_AT_TEXT_RE.search(text or "")
+    if match:
+        month, day, hour, minute, ampm = match.groups()
+        now = datetime.now().astimezone()
+        minute = minute or "00"
+        reset = datetime.strptime(
+            f"{month} {day} {now.year} {hour}:{minute} {ampm}",
+            "%b %d %Y %I:%M %p",
+        ).replace(tzinfo=now.tzinfo)
+        if reset <= now:
+            reset = reset.replace(year=now.year + 1)
+        return max(0.0, (reset - now).total_seconds())
+
+    return None
 
 
 def _detect_quota_limit(raw: dict, error_text: str) -> tuple[bool, Optional[float]]:

@@ -97,6 +97,7 @@ AUDIT_MARKER = "AUDITORSKÁ KONTROLA"
 
 class AutonomousStatus(str, Enum):
     RUNNING = "running"
+    WAITING_FOR_PROVIDER = "waiting_for_provider"
     COMPLETED = "completed"
     BLOCKED = "blocked"
     MAX_ITERATIONS = "max_iterations"
@@ -151,6 +152,7 @@ class AutonomousResult:
     committed: bool = False
     commit_hash: Optional[str] = None
     error: Optional[str] = None
+    retry_after_seconds: Optional[float] = None
     # How many DoD items were already done() at the very start of this run
     # because a checkpoint from an earlier, separate run was restored (see
     # autonomous_checkpoint.py / OrchestratorService.run_autonomous) - 0 for
@@ -726,7 +728,11 @@ def run_autonomous_loop(
                         agent_name=getattr(agent, "active_provider_name", getattr(agent, "name", None)),
                     )
                 )
-                final = snapshot(AutonomousStatus.ERROR, error=result.error)
+                if result.limited:
+                    final = snapshot(AutonomousStatus.WAITING_FOR_PROVIDER, error=result.error)
+                    final.retry_after_seconds = result.retry_after_seconds
+                else:
+                    final = snapshot(AutonomousStatus.ERROR, error=result.error)
                 if on_iteration:
                     on_iteration(final)
                 return final

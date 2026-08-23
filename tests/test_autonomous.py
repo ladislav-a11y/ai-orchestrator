@@ -776,3 +776,36 @@ def test_run_autonomous_audit_reopens_falsely_claimed_done_item(tmp_path):
     # not completed on the first iteration - the audit reopened it
     assert len(result.iterations) == 2
     assert result.dod_items[0].done is True
+
+
+def test_run_autonomous_waits_when_provider_is_limited(tmp_path):
+    dod = parse_definition_of_done("- [ ] bod A")
+
+    def run_fn(request):
+        return AgentRunResult(
+            success=False,
+            output_text="",
+            error="All providers LIMITED",
+            limited=True,
+            retry_after_seconds=600,
+        )
+
+    cfg = Config()
+
+    result = run_autonomous_loop(
+        run_id="wait-test",
+        project_path=tmp_path,
+        goal="cekani na providera",
+        dod_items=dod,
+        config=cfg,
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=3,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.WAITING_FOR_PROVIDER
+    assert result.retry_after_seconds == 600
+    assert result.error == "All providers LIMITED"
+    assert result.dod_items[0].done is False

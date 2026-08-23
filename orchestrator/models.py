@@ -13,6 +13,7 @@ class TaskStatus(str, Enum):
     TESTING = "testing"
     FIXING = "fixing"
     COMMITTING = "committing"
+    WAITING_FOR_PROVIDER = "waiting_for_provider"
     DONE = "done"
     FAILED = "failed"
     ERROR = "error"
@@ -68,6 +69,14 @@ class Task:
     # this task - accumulated across every agent.run() call, same as
     # permission_denials above.
     breaker_saved_attempts: int = 0
+
+    # Fields for persistent waiting and autonomous retry/resume
+    retry_at: Optional[str] = None
+    retry_after_seconds: Optional[float] = None
+    goal: Optional[str] = None
+    spec_text: Optional[str] = None
+    is_autonomous: bool = False
+    max_iterations: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
         d = dict(self.__dict__)

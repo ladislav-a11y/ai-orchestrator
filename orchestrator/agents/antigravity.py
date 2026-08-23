@@ -74,6 +74,7 @@ QUOTA_LIMIT_MARKERS = (
     "resource_exhausted",
     "quota has been exceeded",
     "quota exceeded",
+    "quota reached",
     "out of quota",
     "rate limit",
     "rate-limited",
@@ -95,20 +96,34 @@ _RETRY_AFTER_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_RESET_IN_TEXT_RE = re.compile(
+    r"resets?\s+in\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?\b",
+    re.IGNORECASE,
+)
+
 
 def _extract_retry_after_seconds(raw: dict, text: str) -> Optional[float]:
     for key in RETRY_AFTER_KEYS:
         value = raw.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
+
     match = _RETRY_AFTER_TEXT_RE.search(text or "")
-    if not match:
-        return None
-    value = float(match.group(1))
-    unit = match.group(2).lower()
-    if unit.startswith("m"):
-        value *= 60
-    return value
+    if match:
+        value = float(match.group(1))
+        unit = match.group(2).lower()
+        if unit.startswith("m"):
+            value *= 60
+        return value
+
+    reset_match = _RESET_IN_TEXT_RE.search(text or "")
+    if reset_match:
+        hours = int(reset_match.group(1) or 0)
+        minutes = int(reset_match.group(2) or 0)
+        seconds = int(reset_match.group(3) or 0)
+        return float(hours * 3600 + minutes * 60 + seconds)
+
+    return None
 
 
 def _detect_quota_limit(raw: dict, error_text: str) -> tuple[bool, Optional[float]]:

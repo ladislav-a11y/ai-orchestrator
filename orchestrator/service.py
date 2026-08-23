@@ -227,6 +227,7 @@ class OrchestratorService:
             "committed": result.committed,
             "commit_hash": result.commit_hash,
             "error": result.error,
+            "retry_after_seconds": result.retry_after_seconds,
             "restored_from_checkpoint": result.restored_from_checkpoint,
             "breaker_saved_attempts": result.breaker_saved_attempts,
         }
