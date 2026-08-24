@@ -174,6 +174,7 @@ class OrchestratorService:
         test_command_override: Optional[str] = None,
         max_iterations: Optional[int] = None,
         auto_commit: Optional[bool] = None,
+        run_id: Optional[str] = None,
     ) -> tuple[str, AutonomousResult]:
         """Run the autonomous implement -> test -> evaluate -> fix loop until
         the Definition of Done is met or a safe iteration/no-progress limit is
@@ -209,7 +210,7 @@ class OrchestratorService:
             logger=self.logger,
             agent_builder=build_agent,
         )
-        run_id = new_task_id()
+        run_id = run_id or new_task_id()
 
         # Restore already-verified DoD progress from a previous, separate
         # run of this exact project+spec (see autonomous_checkpoint.py) -

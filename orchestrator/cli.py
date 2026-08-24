@@ -113,6 +113,7 @@ def cmd_autonomous(args: argparse.Namespace) -> int:
             test_command_override=args.test_command,
             max_iterations=args.max_iterations,
             auto_commit=(False if args.no_commit else None),
+            run_id=args.run_id,
         )
     except ValueError as e:
         print(f"Chyba: {e}")
@@ -247,6 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Bezpečný maximální počet iterací (výchozí {DEFAULT_MAX_ITERATIONS}, "
         f"strop {ABSOLUTE_MAX_ITERATIONS})",
     )
+    p_auto.add_argument("--run-id", help="Externí ID běhu předané nadřazeným orchestrátorem")
     p_auto.add_argument("--agent", help="Který agent se má použít (výchozí: default_agent z config.yaml)")
     p_auto.add_argument("--test-command", help="Přepíše testovací příkaz pro tento běh")
     p_auto.add_argument("--no-commit", action="store_true", help="Nikdy nevytvářet commit, i kdyby auto_commit bylo zapnuté")
