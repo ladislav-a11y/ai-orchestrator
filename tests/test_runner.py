@@ -181,6 +181,63 @@ def test_run_task_does_not_commit_preexisting_dirty_tree(tmp_path, git_repo):
     assert (git_repo / "preexisting.txt").exists()
 
 
+def test_run_task_commits_when_task_explicitly_requests_it_even_if_config_default_is_off(tmp_path, git_repo):
+    # Regression: task.auto_commit_requested (an explicit per-task approval,
+    # e.g. via the CLI --commit flag or the API auto_commit param) used to be
+    # ANDed with config.git.auto_commit in _maybe_commit, so an explicit
+    # approval silently did nothing whenever the global config default was
+    # False - the only way to ever get a commit was to flip the global
+    # switch for every future task. auto_commit_requested=True must be
+    # sufficient on its own once tests pass.
+    queue = TaskQueue(tmp_path / "tasks.db")
+    task = make_task("demo", str(git_repo), "uprav soubor", "fake", None, 2, True)
+    queue.add(task)
+
+    class WritingAgent:
+        def run(self, request):
+            (git_repo / "changed.txt").write_text("nova zmena\n", encoding="utf-8")
+            return AgentRunResult(success=True, output_text="hotovo")
+
+    result = run_task(
+        task,
+        make_cfg(tmp_path, auto_commit=False),
+        WritingAgent(),
+        queue,
+        LOGGER,
+    )
+
+    assert result.status == TaskStatus.DONE
+    assert result.committed is True
+    assert result.commit_hash
+
+
+def test_run_task_does_not_commit_when_task_did_not_request_it_even_if_config_default_is_on(tmp_path, git_repo):
+    # Mirror case: an explicit per-task opt-out (auto_commit_requested=False,
+    # e.g. CLI --no-commit) must still be honored even when the global
+    # config default is True - the ban on unsolicited commits is per-task,
+    # not overridable by the ambient default in the other direction either.
+    queue = TaskQueue(tmp_path / "tasks.db")
+    task = make_task("demo", str(git_repo), "uprav soubor", "fake", None, 2, False)
+    queue.add(task)
+
+    class WritingAgent:
+        def run(self, request):
+            (git_repo / "changed.txt").write_text("nova zmena\n", encoding="utf-8")
+            return AgentRunResult(success=True, output_text="hotovo")
+
+    result = run_task(
+        task,
+        make_cfg(tmp_path, auto_commit=True),
+        WritingAgent(),
+        queue,
+        LOGGER,
+    )
+
+    assert result.status == TaskStatus.DONE
+    assert result.committed is False
+    assert result.commit_hash is None
+
+
 def test_run_task_never_commits_when_tests_fail(tmp_path, git_repo):
     queue = TaskQueue(tmp_path / "tasks.db")
     (git_repo / "changed.txt").write_text("nova zmena\n", encoding="utf-8")

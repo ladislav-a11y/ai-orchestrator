@@ -2,10 +2,12 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+from orchestrator.agents import codex as codex_module
 from orchestrator.agents.codex import CodexAgent, find_codex_cli
 from orchestrator.agents.base import AgentRunRequest
 from orchestrator.config import CodexAgentConfig
@@ -17,6 +19,22 @@ def make_config(**overrides) -> CodexAgentConfig:
     base = dict(cli_path=sys.executable, sandbox_mode="workspace-write")
     base.update(overrides)
     return CodexAgentConfig(**base)
+
+
+def test_extract_retry_after_from_usage_limit_time(monkeypatch):
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = cls(2026, 8, 26, 0, 0, tzinfo=timezone(timedelta(hours=2)))
+            return value if tz is None else value.astimezone(tz)
+
+    monkeypatch.setattr(codex_module, "datetime", FixedDateTime)
+
+    seconds = codex_module._extract_retry_after_seconds(
+        {}, "You've hit your usage limit. Please try again at 4:14 AM."
+    )
+
+    assert seconds == (4 * 60 + 14) * 60
 
 
 def jsonl(*events) -> str:
@@ -50,7 +68,7 @@ def test_command_uses_exec_json_and_safe_sandbox():
     assert "--json" in cmd
     assert "--sandbox" not in cmd
     assert "--ask-for-approval" not in cmd
-    assert "--ephemeral" in cmd
+    assert "--ephemeral" not in cmd
     assert "--ignore-user-config" in cmd
     assert "--approve-for-me" in cmd
     assert cmd[-1] == "hello"
@@ -76,11 +94,14 @@ def test_command_uses_resume_subcommand_when_session_id_present():
     )
     assert cmd[1] == "exec"
     assert cmd[2] == "resume"
-    assert cmd[3] == "sess-1"
+    assert cmd[3] == "--json"
+    assert "--cd" not in cmd
+    assert "--ignore-user-config" in cmd
+    assert cmd[cmd.index("--json") + 2] == "sess-1"
     # --ephemeral would skip persisting session state, which would make a
     # later `resume` of this same session impossible - must not be used here.
     assert "--ephemeral" not in cmd
-    assert "--approve-for-me" in cmd
+    assert "--approve-for-me" not in cmd
 
 
 def test_run_success(monkeypatch):
@@ -104,6 +125,7 @@ def test_run_success(monkeypatch):
     )
 
     def fake_run(cmd, **kwargs):
+        assert kwargs["stdin"] is subprocess.DEVNULL
         return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -118,6 +140,75 @@ def test_run_success(monkeypatch):
     assert result.output_tokens == 20
     assert result.thinking_tokens == 5
     assert result.total_tokens == 125
+
+
+def test_run_success_parses_current_codex_jsonl_schema(monkeypatch):
+    agent = CodexAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = jsonl(
+        {"type": "thread.started", "thread_id": "thread-123"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {"id": "item-0", "type": "agent_message", "text": "OK"},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "reasoning_output_tokens": 5,
+            },
+        },
+    )
+
+    def fake_run(cmd, **kwargs):
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.success is True
+    assert result.output_text == "OK"
+    assert result.session_id == "thread-123"
+    assert result.error is None
+    assert result.input_tokens == 100
+    assert result.output_tokens == 20
+    assert result.thinking_tokens == 5
+
+
+def test_run_incomplete_current_schema_output_is_an_error(monkeypatch):
+    """Same failure mode as test_run_incomplete_output_without_task_complete_is_an_error
+    (see PROJECT_HANDOVER_2026-08-25.md #3 'Codex ... při interní chybě
+    patchování vrací neúplný výstup'), but for the current (0.149.x)
+    thread/item/turn event schema instead of the older nested-msg schema -
+    a run that streams progress but never reaches 'turn.completed' or an
+    error event must still be reported as a clear failure, not silently
+    treated as success with whatever partial text arrived.
+    """
+    agent = CodexAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = jsonl(
+        {"type": "thread.started", "thread_id": "thread-inc"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {"id": "item-0", "type": "agent_message", "text": "pracuji"},
+        },
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.success is False
+    assert "neúplný výstup" in result.error
+    assert result.session_id == "thread-inc"
 
 
 def test_run_error_event_is_a_clear_error(monkeypatch):

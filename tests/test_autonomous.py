@@ -204,7 +204,10 @@ def test_run_autonomous_accumulates_breaker_saved_attempts_across_calls(git_repo
     assert result.breaker_saved_attempts == 19
 
 
-def test_run_autonomous_completed_without_commit_when_auto_commit_disabled(git_repo):
+def test_run_autonomous_completed_without_commit_when_run_did_not_request_it(git_repo):
+    # The run itself did not request a commit (auto_commit_requested=False,
+    # e.g. no --commit flag / auto_commit param passed) and the global config
+    # default is also off - the ban on unsolicited commits must hold.
     (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
     dod = parse_definition_of_done("- [ ] Priprav feature.txt")
 
@@ -226,12 +229,57 @@ def test_run_autonomous_completed_without_commit_when_auto_commit_disabled(git_r
         logger=LOGGER,
         test_command=None,
         max_iterations=5,
-        auto_commit_requested=True,
+        auto_commit_requested=False,
     )
 
     assert result.status == AutonomousStatus.COMPLETED
     assert result.committed is False
     assert result.commit_hash is None
+
+
+def test_run_autonomous_commits_when_run_explicitly_requests_it_even_if_config_default_is_off(git_repo):
+    # Regression: auto_commit_requested (an explicit per-run approval, e.g.
+    # via the CLI --commit flag or the API auto_commit param) used to be
+    # ANDed with config.git.auto_commit in _commit_if_ready, so an explicitly
+    # approved run could never actually commit unless the global config
+    # default was ALSO flipped on (which would blanket-approve every future
+    # run, not just this explicitly approved one). An explicit per-run
+    # approval must be sufficient on its own once the Definition of Done is
+    # met, tests pass, and the audit does not reject anything.
+    #
+    # The change must happen INSIDE the executor callback, not before
+    # run_autonomous_loop() is called - preexisting_dirty is computed from
+    # the actual working tree at the very start of the loop (see
+    # run_autonomous_loop), so writing the file any earlier would make the
+    # tree dirty before the run even starts and _commit_if_ready would
+    # (correctly) refuse to commit, defeating the point of this test.
+    dod = parse_definition_of_done("- [ ] Priprav feature.txt")
+
+    def executor(request):
+        (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}]}',
+        )
+
+    cfg = Config()  # git.auto_commit defaults to False
+
+    result = run_autonomous_loop(
+        run_id="test-run",
+        project_path=git_repo,
+        goal="Priprav feature",
+        dod_items=dod,
+        config=cfg,
+        agent=FakeAgent(_confirming_audit_or(executor)),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=5,
+        auto_commit_requested=True,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert result.committed is True
+    assert result.commit_hash
 
 
 # -- failed tests: never commits, keeps trying until max_iterations ----------
@@ -495,6 +543,41 @@ def test_run_autonomous_incomplete_json_is_protocol_error_not_no_progress(tmp_pa
 
     assert result.status == AutonomousStatus.MAX_ITERATIONS
     assert all(it.protocol_error for it in result.iterations)
+
+
+def test_protocol_error_does_not_apply_partial_dod_updates(tmp_path):
+    """A protocol-invalid response must not mutate any DoD item."""
+    dod = parse_definition_of_done("- [ ] bod A\n- [ ] bod B")
+
+    def run_fn(request):
+        return AgentRunResult(
+            success=True,
+            output_text=json.dumps({
+                "items": [
+                    {"index": 0, "done": True},
+                    {"index": 1, "done": True},
+                    {"index": 2, "done": True},
+                ],
+                "notes": "obsahuje neplatny index",
+            }),
+        )
+
+    result = run_autonomous_loop(
+        run_id="test-run",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=dod,
+        config=Config(),
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=1,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.MAX_ITERATIONS
+    assert result.iterations[0].protocol_error is True
+    assert all(item.done is False for item in result.dod_items)
 
 
 # -- test command auto-detection: autonomous mode must not silently skip ----

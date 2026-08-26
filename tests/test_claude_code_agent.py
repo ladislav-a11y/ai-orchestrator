@@ -1,11 +1,13 @@
 import json
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from orchestrator.agents.base import AgentRunRequest
+from orchestrator.agents import claude_code as claude_code_module
 from orchestrator.agents.claude_code import ClaudeCodeAgent, find_claude_cli
 from orchestrator.config import ClaudeCodeAgentConfig
 
@@ -14,6 +16,22 @@ def make_config(**overrides) -> ClaudeCodeAgentConfig:
     base = dict(cli_path=sys.executable, permission_mode="acceptEdits")
     base.update(overrides)
     return ClaudeCodeAgentConfig(**base)
+
+
+def test_extract_retry_after_from_session_limit_time(monkeypatch):
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = cls(2026, 8, 26, 0, 0, tzinfo=timezone(timedelta(hours=2)))
+            return value if tz is None else value.astimezone(tz)
+
+    monkeypatch.setattr(claude_code_module, "datetime", FixedDateTime)
+
+    seconds = claude_code_module._extract_retry_after_seconds(
+        {}, "You've hit your session limit · resets 3am (Europe/Prague)"
+    )
+
+    assert seconds == 3 * 60 * 60
 
 
 def test_rejects_bypass_permissions_at_construction():
@@ -242,4 +260,3 @@ def test_run_quota_error_maps_to_limited(monkeypatch):
     assert result.limited is True
     assert result.retry_after_seconds == 30.0
     assert "LIMITED" in result.error
-

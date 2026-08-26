@@ -77,6 +77,24 @@ class Task:
     spec_text: Optional[str] = None
     is_autonomous: bool = False
     max_iterations: Optional[int] = None
+    # External run identifier (e.g. the Trello card id AI Project Manager
+    # passed via `--run-id`). Preserved across a WAITING_FOR_PROVIDER ->
+    # resume cycle so the resumed run's outbox/autonomous-<run_id>.json
+    # overwrites the SAME file the external caller is watching, instead of
+    # a fresh random id it would never see.
+    run_id: Optional[str] = None
+
+    # Snapshot of "did this project's Git tree already have uncommitted
+    # changes before the orchestrator touched it at all", taken by
+    # OrchestratorService.submit()/run_autonomous() BEFORE they call
+    # ensure_project_claude_settings() - see runner.py's run_task() and
+    # autonomous.py's run_autonomous_loop(), which use this instead of
+    # recomputing it later (recomputing after that call would always see the
+    # settings file the orchestrator itself just wrote and misreport "dirty"
+    # on every first-ever run against a project). None means "not captured
+    # by the caller" - run_task()/run_autonomous_loop() fall back to
+    # computing it themselves.
+    preexisting_dirty: Optional[bool] = None
 
     def to_dict(self) -> dict[str, Any]:
         d = dict(self.__dict__)

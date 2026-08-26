@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import shutil
 import subprocess
 from pathlib import Path
@@ -105,6 +105,11 @@ _RESET_AT_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_RESET_TODAY_TEXT_RE = re.compile(
+    r"resets?\s+(?:today\s+|at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
+    re.IGNORECASE,
+)
+
 
 def _extract_retry_after_seconds(raw: dict, text: str) -> Optional[float]:
     for key in RETRY_AFTER_KEYS:
@@ -130,6 +135,18 @@ def _extract_retry_after_seconds(raw: dict, text: str) -> Optional[float]:
         ).replace(tzinfo=now.tzinfo)
         if reset <= now:
             reset = reset.replace(year=now.year + 1)
+        return max(0.0, (reset - now).total_seconds())
+
+    match = _RESET_TODAY_TEXT_RE.search(text or "")
+    if match:
+        hour, minute, ampm = match.groups()
+        now = datetime.now().astimezone()
+        reset_time = datetime.strptime(
+            f"{hour}:{minute or '00'} {ampm}", "%I:%M %p"
+        ).time()
+        reset = datetime.combine(now.date(), reset_time, tzinfo=now.tzinfo)
+        if reset <= now:
+            reset += timedelta(days=1)
         return max(0.0, (reset - now).total_seconds())
 
     return None

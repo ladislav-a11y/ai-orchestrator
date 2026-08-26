@@ -77,8 +77,11 @@ Jediné omezení: cesta musí ležet uvnitř pracovního prostoru nastaveného v
 `D:\orchestrator`) - mimo něj orchestrátor a Claude Code nikdy nesmí
 pracovat, a to i kdyby ses překlepl v `config.yaml`.
 
-`auto_commit: false` je výchozí nastavení - orchestrátor tedy zatím NIKDY
-sám necommituje, dokud to v `config.yaml` (sekce `git`) ručně nezapneš.
+`auto_commit: false` je výchozí nastavení - orchestrátor tedy sám necommituje,
+dokud to buď v `config.yaml` (sekce `git`) ručně nezapneš pro všechny budoucí
+běhy, nebo dokud to výslovně nepovolíš jen pro jeden konkrétní běh přepínačem
+`--commit` (viz níže) - obě cesty stále platí jen společně s pravidlem "nikdy
+necommitovat, když testy selžou".
 
 ## 5. Spuštění úkolu
 
@@ -129,8 +132,9 @@ Běh skončí jedním ze čtyř stavů:
 
 - **completed** - všechny body Definition of Done splněné A testy prošly (nebo
   žádné testy nejsou nastavené). Pokud je navíc zapnutý `git.auto_commit` v
-  `config.yaml`, vytvoří se Git commit. Pokud testy neprošly, commit se
-  **nikdy** nevytvoří.
+  `config.yaml`, nebo byl pro tento konkrétní běh výslovně předán `--commit`,
+  vytvoří se Git commit. Pokud testy neprošly, commit se **nikdy** nevytvoří -
+  ani s `--commit`.
 - **blocked** - stejný stav (stejné nesplněné body + stejný výsledek testů)
   se opakuje 3x po sobě bez posunu - orchestrátor to nezkouší dál dokola.
 - **max_iterations** - vyčerpán limit iterací, Definition of Done pořád není
@@ -165,9 +169,17 @@ z ChatGPT - zatím to nikam nepřipojujeme.
 
 ## 9. Adresáře inbox/outbox
 
-`inbox/` a `outbox/` jsou připravené pro budoucí automatické předávání
-úkolů/výsledků mezi orchestrátorem a jiným nástrojem, viz README v každém
-z nich. Zatím to lze použít i ručně: `python orchestrator.py import-inbox`.
+`inbox/` a `outbox/` slouží pro automatické předávání úkolů/výsledků mezi
+orchestrátorem a jiným nástrojem, viz README v každém z nich. Běžné úkoly
+(`run`) lze do fronty dostat i ručně přes `inbox/*.json` a
+`python orchestrator.py import-inbox`.
+
+Autonomní běhy (`autonomous`) tudy neprochází - AI Project Manager je spouští
+přímo přes CLI (`orchestrator.py autonomous --project <p> --spec <soubor>
+--run-id <id-trello-karty>`) a výsledek čte zpět z
+`outbox/autonomous-<run-id>.json`. Přesný, stabilní tvar tohoto JSON
+kontraktu (co znamená `done`, `stop_reason`, `limit_hit`,
+`provider_sequence`, `checkpoint`, ...) je popsaný v `outbox/README.md`.
 
 ## Bezpečnostní pravidla (proč se to takhle chová)
 
@@ -179,8 +191,12 @@ z nich. Zatím to lze použít i ručně: `python orchestrator.py import-inbox`.
   i v `--project`) orchestrátor natvrdo odmítne.
 - **Nikdy nesmaže Git historii** ani nepoužije force push. Push na internet
   v této fázi vůbec neexistuje.
-- Commit vznikne jen tehdy, když to povolíš (`git.auto_commit: true`) A
-  zároveň testy prošly (nebo pro daný projekt žádné testy nejsou nastavené).
+- Commit vznikne jen tehdy, když to explicitně povolíš - buď natrvalo v
+  konfiguraci (`git.auto_commit: true`), nebo jen pro jeden konkrétní běh
+  přepínačem `--commit` - A zároveň testy prošly (nebo pro daný
+  projekt žádné testy nejsou nastavené). Bez jednoho z těch dvou výslovných
+  povolení orchestrátor necommituje nikdy, i kdyby úkol i testy dopadly
+  bezvadně.
 - API poslouchá jen na `127.0.0.1` - z internetu se k němu nedostaneš.
 
 Další podrobnosti architektury jsou v [ARCHITECTURE.md](ARCHITECTURE.md),

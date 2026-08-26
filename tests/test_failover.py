@@ -267,7 +267,7 @@ def test_failover_preserves_autonomous_checkpoint_and_dod_across_iterations(tmp_
             # Iteration 1: p1 marks bod 0 done
             return AgentRunResult(
                 success=True,
-                output_text='{"items": [{"index": 0, "done": true}], "notes": "bod 0 hotov"}',
+                output_text='{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], "notes": "bod 0 hotov"}',
                 session_id="p1-sess-1",
             )
         # Iteration 2: p1 hits rate limit

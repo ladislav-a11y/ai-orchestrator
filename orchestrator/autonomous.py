@@ -326,19 +326,30 @@ def _apply_dod_updates(
     entries = parsed["items"]
     seen: set[int] = set()
     malformed_entry = False
+    valid_updates: list[tuple[int, bool]] = []
     for entry in entries:
         if not isinstance(entry, dict):
             malformed_entry = True
             continue
         idx = entry.get("index")
-        if not (isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(dod_items)):
+        done = entry.get("done")
+        if not (
+            isinstance(idx, int)
+            and not isinstance(idx, bool)
+            and 0 <= idx < len(dod_items)
+            and isinstance(done, bool)
+        ):
             malformed_entry = True
             continue
         seen.add(idx)
-        dod_items[idx].done = dod_items[idx].done or bool(entry.get("done"))
+        valid_updates.append((idx, done))
 
     missing = [idx for idx in requested_indices if idx not in seen]
     protocol_error = malformed_entry or bool(missing)
+
+    if not protocol_error:
+        for idx, done in valid_updates:
+            dod_items[idx].done = dod_items[idx].done or done
 
     notes = parsed.get("notes")
     notes = notes if isinstance(notes, str) else ""
@@ -567,10 +578,17 @@ def _commit_if_ready(
     logger,
     preexisting_dirty: bool = False,
 ) -> tuple[bool, Optional[str], Optional[str]]:
-    """Mirrors runner.py's `maybe_commit` guard rules for the autonomous run:
-    only commit when auto_commit is requested AND enabled in config, tests did
-    not fail, the target is a Git repo, and there is something to commit."""
-    if not (auto_commit_requested and config.git.auto_commit):
+    """Mirrors runner.py's `_maybe_commit` guard rules for the autonomous run:
+    only commit when auto_commit was explicitly requested for this run, tests
+    did not fail, the target is a Git repo, and there is something to commit.
+
+    `auto_commit_requested` is already the fully-resolved per-run decision
+    (OrchestratorService.run_autonomous() falls back to `config.git.auto_commit`
+    only when the caller did not explicitly pass `auto_commit=...`) - it must
+    not be ANDed with `config.git.auto_commit` again here, or an explicit
+    per-run approval (e.g. via the CLI --commit flag) would silently no-op
+    whenever the global config default happened to be False."""
+    if not auto_commit_requested:
         return False, None, None
     if preexisting_dirty:
         logger.info(
@@ -634,9 +652,19 @@ def run_autonomous_loop(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     auto_commit_requested: bool = True,
     on_iteration: Optional[Callable[[AutonomousResult], None]] = None,
+    preexisting_dirty: Optional[bool] = None,
 ) -> AutonomousResult:
     max_iterations = max(1, min(max_iterations, ABSOLUTE_MAX_ITERATIONS))
-    preexisting_dirty = is_git_repo(project_path) and has_uncommitted_changes(project_path)
+    # preexisting_dirty, when passed by OrchestratorService.run_autonomous(),
+    # is a snapshot taken BEFORE it calls ensure_project_claude_settings() -
+    # that call writes .claude/settings.local.json into a project that
+    # doesn't have one yet, which would itself make the tree look "dirty"
+    # here and make every first-ever autonomous run against a project
+    # silently lose its commit. Falls back to computing it directly for
+    # callers that invoke this loop without going through the service (e.g.
+    # tests).
+    if preexisting_dirty is None:
+        preexisting_dirty = is_git_repo(project_path) and has_uncommitted_changes(project_path)
     if preexisting_dirty:
         logger.warning(
             "Autonomn? b?h %s: projekt byl dirty u? p?ed startem; auto-commit je pro tento b?h zak?z?n, "

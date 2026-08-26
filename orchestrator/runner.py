@@ -87,7 +87,18 @@ def _record_permission_denials(task: Task, result: AgentRunResult, logger: loggi
 
 def run_task(task: Task, config: Config, agent: Agent, queue: TaskQueue, logger: logging.Logger) -> Task:
     project_path = Path(task.project_path)
-    preexisting_dirty = is_git_repo(project_path) and has_uncommitted_changes(project_path)
+    # task.preexisting_dirty is set by OrchestratorService.submit() from a
+    # snapshot taken BEFORE it calls ensure_project_claude_settings() - that
+    # call writes .claude/settings.local.json into a project that doesn't
+    # have one yet, which would itself make the tree look "dirty" here and
+    # make every first-ever task against a project silently lose its commit.
+    # Falls back to computing it directly for callers that build a Task
+    # without going through submit() (e.g. tests).
+    preexisting_dirty = (
+        task.preexisting_dirty
+        if task.preexisting_dirty is not None
+        else is_git_repo(project_path) and has_uncommitted_changes(project_path)
+    )
     if preexisting_dirty:
         logger.warning(
             "Task %s: projekt byl dirty u? p?ed startem; auto-commit je pro tento b?h zak?z?n, "
@@ -173,7 +184,15 @@ def _maybe_commit(
     logger: logging.Logger,
     preexisting_dirty: bool = False,
 ) -> None:
-    if not (task.auto_commit_requested and config.git.auto_commit):
+    # `task.auto_commit_requested` is already the fully-resolved per-task
+    # decision (OrchestratorService.submit() falls back to
+    # `config.git.auto_commit` only when the caller did not explicitly pass
+    # `auto_commit=...` - see submit()). ANDing with `config.git.auto_commit`
+    # again here used to make an explicit per-task approval (auto_commit=True
+    # passed by a caller, e.g. via the API or the CLI --commit flag) silently
+    # no-op whenever the global config default was False - the ambient
+    # default and the deliberate override must never fight each other.
+    if not task.auto_commit_requested:
         return
     if preexisting_dirty:
         logger.info(

@@ -16,6 +16,7 @@ from typing import Optional
 
 from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult
 from orchestrator.config import Config
+from orchestrator.slack_notify import notify
 
 
 @dataclass
@@ -43,6 +44,7 @@ class FailoverAgent(Agent):
         self._provider_statuses: dict[str, ProviderStatus] = {}
         self._sessions: dict[str, str] = {}
         self._active_provider_index: int = 0
+        self._last_notified_provider: Optional[str] = None
 
     @property
     def active_agent(self) -> Agent:
@@ -112,6 +114,12 @@ class FailoverAgent(Agent):
                 provider_name,
                 order_names,
             )
+            if provider_name != self._last_notified_provider:
+                notify(
+                    f"[AI Orchestrator] Aktivní provider: {provider_name} | pořadí: "
+                    + " → ".join(order_names)
+                )
+                self._last_notified_provider = provider_name
 
             provider_session = self._sessions.get(provider_name)
             effective_request = AgentRunRequest(
@@ -152,6 +160,10 @@ class FailoverAgent(Agent):
                         result.error or "limit vyčerpán",
                         next_name,
                     )
+                    notify(
+                        f"[AI Orchestrator] Provider {provider_name} vyčerpal limit; "
+                        f"přepínám na {next_name}."
+                    )
                 else:
                     self.logger.warning(
                         "Provider '%s' vrátil LIMITED (vyčerpána kvóta/limit%s): %s. Žádný další provider v pořadí nezbývá.",
@@ -169,6 +181,10 @@ class FailoverAgent(Agent):
         self.logger.error(
             "Všichni konfigurovaní provideři (%s) jsou nedostupní nebo LIMITED.",
             ", ".join(order_names),
+        )
+        notify(
+            "[AI Orchestrator] Všichni provideři jsou nedostupní nebo mají vyčerpaný limit: "
+            + " → ".join(order_names)
         )
         known_retries = [
             status.retry_after_seconds

@@ -132,6 +132,45 @@ def test_checkpoint_invalidated_when_spec_content_changes(tmp_path):
     assert all(not i.done for i in fresh_v2)
 
 
+def test_checkpoint_survives_pm_checkpoint_run_id_churn(tmp_path):
+    """Regression for a real bug found in the live queue: AI Project Manager
+    appends a trailing "<!-- PM-CHECKPOINT {"run_id": ...} -->" comment to
+    the spec text and mints a NEW random run_id in it on every scheduler
+    tick that resubmits the same card - so two spec_text values for "the
+    same" card differ only inside that block. Hashing the raw text (as
+    checkpoint_path/load_checkpoint/save_checkpoint used to) would silently
+    discard verified DoD progress on every single tick instead of resuming
+    it.
+    """
+    project_path = tmp_path / "proj"
+    project_path.mkdir()
+    data_dir = tmp_path / "data"
+
+    tick_1 = (
+        _spec_text(4)
+        + '\n\n<!-- PM-CHECKPOINT\n{\n  "run_id": "aaaaaaaaaaaa"\n}\n-->\n'
+    )
+    tick_2 = (
+        _spec_text(4)
+        + '\n\n<!-- PM-CHECKPOINT\n{\n  "run_id": "bbbbbbbbbbbb"\n}\n-->\n'
+    )
+    assert tick_1 != tick_2
+
+    items = parse_definition_of_done(tick_1)
+    items[0].done = True
+    save_checkpoint(data_dir, project_path, tick_1, "cil", items, "run-1")
+
+    assert checkpoint_path(data_dir, project_path, tick_1) == checkpoint_path(data_dir, project_path, tick_2)
+
+    checkpoint = load_checkpoint(data_dir, project_path, tick_2)
+    assert checkpoint is not None
+
+    fresh = parse_definition_of_done(tick_2)
+    restored = apply_checkpoint(fresh, checkpoint)
+    assert restored == 1
+    assert fresh[0].done is True
+
+
 def test_checkpoint_scoped_per_project_not_shared(tmp_path):
     data_dir = tmp_path / "data"
     project_a = tmp_path / "a"

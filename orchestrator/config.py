@@ -98,6 +98,12 @@ class CodexAgentConfig:
 
 @dataclass
 class GitConfig:
+    # Default for every task/run that does not explicitly override
+    # `auto_commit=...` itself (CLI `--commit`/`--no-commit`, or the API/
+    # service `auto_commit` param) - see OrchestratorService.submit()/
+    # run_autonomous(). An explicit per-call override always wins over this
+    # default in either direction; it is never additionally ANDed with it
+    # (see runner.py `_maybe_commit` / autonomous.py `_commit_if_ready`).
     auto_commit: bool = False
     commit_message_prefix: str = "[ai-orchestrator] "
 

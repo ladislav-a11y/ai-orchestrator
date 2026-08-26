@@ -9,8 +9,7 @@ Invocation contract (do not weaken this without updating AGENTS.md too):
     0.149.0 rejects outright as an unknown argument (the run would fail
     before doing anything) - do not reintroduce it.
   - always non-interactive: `codex exec --json --cd <project_dir> --sandbox
-    <mode> --ignore-user-config --approve-for-me "<prompt>"`, plus
-    `--ephemeral` on a fresh run (no `session_id` to resume - see below)
+    <mode> --ignore-user-config --approve-for-me "<prompt>"`
     (`--json` makes it emit one JSON object per line on stdout instead of
     human-formatted text; `--ignore-user-config` makes the run's behavior
     depend only on the flags this adapter passes, not on whatever a
@@ -18,14 +17,12 @@ Invocation contract (do not weaken this without updating AGENTS.md too):
     is what actually lets a headless run proceed without a human answering
     approval prompts - it does not by itself widen what's allowed, that is
     still `--sandbox`'s job, see below)
-  - `--ephemeral` is only passed when `request.session_id` is empty (i.e.
-    not a `resume` run): it skips writing the run's session to Codex's
-    persistent rollout history, which is incompatible with resuming that
-    same session later. The autonomous loop chains `AgentRunResult.session_id`
-    from one iteration's response into the next iteration's
-    `AgentRunRequest.session_id` to keep a single Codex conversation across
-    an entire run (see autonomous.py) - passing `--ephemeral` on a `resume`
-    run would break that.
+  - Codex sessions are persisted so the autonomous loop can chain
+    `AgentRunResult.session_id` from one iteration's response into the next
+    iteration's `AgentRunRequest.session_id` and resume the same Codex
+    conversation across an entire run (see autonomous.py). Do not use
+    `--ephemeral`: it disables that persistence and makes the next
+    iteration's `resume` unreliable.
   - NEVER passes `--dangerously-bypass-approvals-and-sandbox` (or its short
     alias `--yolo`) or `--dangerously-bypass-hook-trust` - those flags
     disable the sandbox/approval/hook-trust safety net entirely and are
@@ -56,18 +53,12 @@ Invocation contract (do not weaken this without updating AGENTS.md too):
   - every prompt also gets TEST_EXECUTION_INSTRUCTION appended, matching
     ClaudeCodeAgent's contract (see claude_code.py for the full rationale)
   - `codex exec --json` streams JSONL events, not one JSON blob. Each line
-    is parsed independently; the fields below follow the CLI's publicly
-    documented event schema:
-      {"id": "...", "msg": {"type": "task_started", ...}}
-      {"id": "...", "msg": {"type": "agent_message", "message": "..."}}
-      {"id": "...", "msg": {"type": "token_count", "input_tokens": N,
-                             "output_tokens": N, "reasoning_output_tokens": N,
-                             "total_tokens": N}}
-      {"id": "...", "msg": {"type": "task_complete", "last_agent_message": "..."}}
-      {"id": "...", "msg": {"type": "error", "message": "..."}}
-    A `task_complete` event (and no `error` event) counts as SUCCESS; an
-    `error` event, a non-zero exit with no `task_complete`, or output with
-    no recognizable event at all are all converted into
+    is parsed independently. Current Codex 0.149.x emits events such as
+    `thread.started`, `item.completed` with an `agent_message` item, and
+    `turn.completed` with usage; older builds used a nested `msg` object.
+    Both shapes are accepted. A completed turn (and no error event) counts
+    as SUCCESS; an error event, a non-zero exit with no completed turn, or
+    output with no recognizable event at all are converted into
     AgentRunResult(success=False, error=...) - never silently treated as ok.
   - the CLI has no dedicated JSON status for quota/rate/session limits, so
     _detect_quota_limit() recognizes common substrings (rate limit, quota,
@@ -85,7 +76,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import shutil
 import subprocess
 from pathlib import Path
@@ -133,6 +124,11 @@ _RETRY_AT_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_RETRY_TODAY_TEXT_RE = re.compile(
+    r"try\s+again\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b",
+    re.IGNORECASE,
+)
+
 
 def _extract_retry_after_seconds(raw: dict, text: str) -> Optional[float]:
     for key in RETRY_AFTER_KEYS:
@@ -156,6 +152,18 @@ def _extract_retry_after_seconds(raw: dict, text: str) -> Optional[float]:
         ).astimezone()
         now = datetime.now().astimezone()
         return max(0.0, (reset - now).total_seconds())
+
+    match = _RETRY_TODAY_TEXT_RE.search(text or "")
+    if match:
+        hour, minute, ampm = match.groups()
+        now = datetime.now().astimezone()
+        retry_time = datetime.strptime(
+            f"{hour}:{minute or '00'} {ampm}", "%I:%M %p"
+        ).time()
+        retry_at = datetime.combine(now.date(), retry_time, tzinfo=now.tzinfo)
+        if retry_at <= now:
+            retry_at += timedelta(days=1)
+        return max(0.0, (retry_at - now).total_seconds())
 
     return None
 
@@ -260,30 +268,28 @@ class CodexAgent(Agent):
         assert self._cli_path
         cmd = [self._cli_path, "exec"]
         if request.session_id:
-            cmd += ["resume", request.session_id]
-        cmd += [
-            "--json",
-            "--cd",
-            str(request.project_path),
-            "--ignore-user-config",
-        ]
-        if self.config.sandbox_mode == "read-only":
-            cmd += ["--sandbox", "read-only"]
-        elif self.config.sandbox_mode == "workspace-write":
-            cmd += ["--approve-for-me"]
+            # `codex exec resume` has a separate CLI grammar: its options
+            # must precede the session id, and it does not accept --cd or
+            # --sandbox/--approve-for-me. The resumed session retains the
+            # original working directory and permission context.
+            cmd += ["resume", "--json", "--ignore-user-config"]
         else:
-            raise ValueError(f"Unsupported Codex sandbox mode: {self.config.sandbox_mode}")
-        if not request.session_id:
-            # --ephemeral skips writing this run's session to Codex's
-            # persistent rollout history - only safe for a fresh run with no
-            # session_id to resume. A `resume <id>` run must NOT pass it: the
-            # autonomous loop (autonomous.py) chains AgentRunResult.session_id
-            # from one iteration into the next iteration's request.session_id
-            # to keep the same Codex conversation across the whole run, which
-            # requires that conversation to have actually been persisted.
-            cmd.append("--ephemeral")
+            cmd += [
+                "--json",
+                "--cd",
+                str(request.project_path),
+                "--ignore-user-config",
+            ]
+            if self.config.sandbox_mode == "read-only":
+                cmd += ["--sandbox", "read-only"]
+            elif self.config.sandbox_mode == "workspace-write":
+                cmd += ["--approve-for-me"]
+            else:
+                raise ValueError(f"Unsupported Codex sandbox mode: {self.config.sandbox_mode}")
         if self.config.model:
             cmd += ["--model", self.config.model]
+        if request.session_id:
+            cmd += [request.session_id]
         cmd += [request.prompt]
 
         for forbidden in FORBIDDEN_FLAGS:
@@ -311,6 +317,7 @@ class CodexAgent(Agent):
             proc = subprocess.run(
                 cmd,
                 cwd=str(request.project_path),
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -348,6 +355,22 @@ class CodexAgent(Agent):
         usage = {}
         session_id = effective_request.session_id
         for event in events:
+            event_type = str(event.get("type") or "").lower()
+            if event_type == "thread.started" and event.get("thread_id"):
+                session_id = event["thread_id"]
+            elif event_type == "turn.completed":
+                complete_event = event
+                usage = event.get("usage") or {}
+            elif event_type in {"error", "turn.failed"}:
+                error_event = event.get("error") if isinstance(event.get("error"), dict) else event
+            elif event_type == "item.completed":
+                item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                item_type = str(item.get("type") or "").lower()
+                if item_type == "agent_message":
+                    last_agent_message = item.get("text") or last_agent_message
+                elif item_type in {"error", "turn_failed"}:
+                    error_event = item
+
             msg = event.get("msg") if isinstance(event.get("msg"), dict) else event
             msg_type = str(msg.get("type") or "").lower()
             if event.get("id"):

@@ -1,4 +1,4 @@
-﻿"""Wires config + queue + agent + runner together.
+"""Wires config + queue + agent + runner together.
 
 One OrchestratorService instance is shared by the CLI and the local API.
 Tasks are processed one at a time by a single background worker thread, so
@@ -8,6 +8,7 @@ two tasks never run against the same project concurrently.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +31,7 @@ from orchestrator.autonomous_checkpoint import (
 )
 from orchestrator.claude_settings import ensure_project_claude_settings
 from orchestrator.config import Config, load_config
+from orchestrator.git_utils import has_uncommitted_changes, is_git_repo
 from orchestrator.logging_config import setup_logging, write_autonomous_log, write_task_log
 from orchestrator.models import Task, TaskStatus
 from orchestrator.queue import TaskQueue, make_task, new_task_id
@@ -41,6 +43,9 @@ class OrchestratorService:
         self.config = config or load_config()
         self.logger = setup_logging(self.config.logs_dir)
         self.queue = TaskQueue(self.config.data_dir / "tasks.db")
+        self._instance_lock_file = None
+        self._acquire_instance_lock()
+        self._recover_on_startup()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="orchestrator-worker")
         self._waiting_worker_stop = False
         self._waiting_worker_event = threading.Event()
@@ -49,9 +54,73 @@ class OrchestratorService:
         self._waiting_worker.start()
         self._resume_waiting_tasks()
 
+    def _acquire_instance_lock(self) -> None:
+        """Ensure only one service process uses this queue database at a time."""
+        lock_path = self.config.data_dir / "orchestrator.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+b")
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            raise RuntimeError(
+                f"Jiná instance ai-orchestrator již používá frontu {self.queue.db_path}."
+            ) from exc
+        self._instance_lock_file = handle
+
+    def _release_instance_lock(self) -> None:
+        handle = self._instance_lock_file
+        if handle is None:
+            return
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+            self._instance_lock_file = None
+
+    def _recover_on_startup(self) -> None:
+        """Reconcile queue state left over from a previous process before
+        anything in this process starts claiming work - see
+        TaskQueue.recover_orphaned_active_tasks/dedupe_waiting_tasks."""
+        recovered = self.queue.recover_orphaned_active_tasks(
+            "Přerušeno restartem orchestrátoru: předchozí proces skončil "
+            "uprostřed běhu (RUNNING/TESTING/FIXING/COMMITTING) a nikdy "
+            "nedoběhl do koncového stavu."
+        )
+        if recovered:
+            self.logger.warning(
+                "Obnova po startu: %d osiřelých úloh z předchozího běhu označeno jako error.",
+                recovered,
+            )
+        superseded = self.queue.dedupe_waiting_tasks()
+        if superseded:
+            self.logger.warning(
+                "Obnova po startu: %d duplicitních čekajících běhů ve frontě sloučeno do jednoho.",
+                superseded,
+            )
+
     def _resume_waiting_tasks(self) -> None:
         """Resume autonomous tasks that were waiting for provider quota."""
-        task = self.queue.next_due_waiting()
+        task = self.queue.claim_next_due_waiting()
         if task is None:
             return
 
@@ -59,20 +128,22 @@ class OrchestratorService:
             "Obnovuji čekající task %s po čekání na providera",
             task.id,
         )
-        self._executor.submit(self._execute, task)
+        self._executor.submit(self._resume_autonomous_task, task)
+
     def _waiting_worker_loop(self) -> None:
         """Periodically resume autonomous tasks after provider wait."""
         first_pass = True
         while not self._waiting_worker_stop or first_pass:
             first_pass = False
             try:
-                task = self.queue.next_due_waiting()
+                self.queue.dedupe_waiting_tasks()
+                task = self.queue.claim_next_due_waiting()
                 if task is not None:
                     self.logger.info(
                         "Worker obnovuje čekající task %s po vypršení čekání",
                         task.id,
                     )
-                    self._executor.submit(self._execute, task)
+                    self._executor.submit(self._resume_autonomous_task, task)
             except Exception as exc:
                 self.logger.error(
                     "Chyba waiting workeru: %s",
@@ -89,7 +160,10 @@ class OrchestratorService:
         if self._waiting_worker.is_alive():
             self._waiting_worker.join(timeout=5)
 
-        self._executor.shutdown(wait=wait)
+        try:
+            self._executor.shutdown(wait=wait)
+        finally:
+            self._release_instance_lock()
     # -- task submission -------------------------------------------------
 
     def submit(
@@ -156,6 +230,26 @@ class OrchestratorService:
         self._write_outbox(result_task)
         return result_task
 
+    def _resume_autonomous_task(self, task: Task) -> None:
+        """Resume a claimed autonomous retry through the autonomous loop."""
+        try:
+            self.run_autonomous(
+                project_ref=task.project,
+                goal=task.goal or task.prompt,
+                spec_text=task.spec_text,
+                agent_name=task.agent,
+                test_command_override=task.test_command,
+                max_iterations=task.max_iterations,
+                auto_commit=False,
+                run_id=task.run_id,
+                _waiting_task=task,
+            )
+        except Exception as exc:  # noqa: BLE001 - persist worker failure
+            task.status = TaskStatus.ERROR
+            task.error = str(exc)
+            self.queue.update(task)
+            self.logger.error("Obnova čekající autonomní úlohy %s selhala: %s", task.id, exc)
+
     def _write_outbox(self, task: Task) -> None:
         self.config.outbox_dir.mkdir(parents=True, exist_ok=True)
         out_path = self.config.outbox_dir / f"{task.id}.json"
@@ -175,6 +269,7 @@ class OrchestratorService:
         max_iterations: Optional[int] = None,
         auto_commit: Optional[bool] = None,
         run_id: Optional[str] = None,
+        _waiting_task: Optional[Task] = None,
     ) -> tuple[str, AutonomousResult]:
         """Run the autonomous implement -> test -> evaluate -> fix loop until
         the Definition of Done is met or a safe iteration/no-progress limit is
@@ -192,6 +287,7 @@ class OrchestratorService:
             project_dir.mkdir(parents=True, exist_ok=True)
             self.logger.info("Vytvořen nový adresář projektu '%s': %s", entry.name, project_dir)
 
+        preexisting_dirty = is_git_repo(project_dir) and has_uncommitted_changes(project_dir)
         ensure_project_claude_settings(project_dir)
 
         dod_source = spec_text if spec_text else goal
@@ -257,40 +353,78 @@ class OrchestratorService:
             max_iterations=max_iterations or DEFAULT_MAX_ITERATIONS,
             auto_commit_requested=(self.config.git.auto_commit if auto_commit is None else auto_commit),
             on_iteration=on_iteration,
+            preexisting_dirty=preexisting_dirty,
         )
         if result.status == AutonomousStatus.WAITING_FOR_PROVIDER:
-            waiting_task = make_task(
-                project=entry.name,
-                project_path=str(project_dir),
-                prompt=goal_text,
-                agent=agent_name or self.config.default_agent,
-                test_command=test_command,
-                max_fix_attempts=0,
-                auto_commit_requested=False,
-                source="autonomous",
+            waiting_task = _waiting_task or self.queue.find_active_autonomous(
+                entry.name, dod_source
             )
+            is_new_waiting_task = waiting_task is None
+            if waiting_task is None:
+                waiting_task = make_task(
+                    project=entry.name,
+                    project_path=str(project_dir),
+                    prompt=goal_text,
+                    # The autonomous run used failover when no explicit agent was
+                    # supplied.  Persist that strategy, not default_agent
+                    # (claude-code), so a later resume cannot silently lose the
+                    # antigravity/codex fallback.
+                    agent=agent_name or "auto",
+                    test_command=test_command,
+                    max_fix_attempts=0,
+                    auto_commit_requested=False,
+                    source="autonomous",
+                )
 
             waiting_task.status = TaskStatus.WAITING_FOR_PROVIDER
             waiting_task.error = result.error
             waiting_task.retry_after_seconds = result.retry_after_seconds
-            if result.retry_after_seconds:
+            if result.retry_after_seconds is not None:
                 from datetime import datetime, timedelta, timezone
+                # timespec="seconds" matches queue.now_iso() exactly - the two
+                # strings are compared lexicographically in
+                # claim_next_due_waiting()/next_due_waiting(). Without it,
+                # this value carries microseconds ("...57.123456+00:00")
+                # while now_iso() does not ("...57+00:00"); '.' (0x2E) sorts
+                # after '+' (0x2B), so retry_at would compare as LATER than
+                # an equal or later now_iso() whenever both fall in the same
+                # second - a task due "now" (e.g. retry_after_seconds=0)
+                # would never be claimable.
                 waiting_task.retry_at = (
                     datetime.now(timezone.utc)
                     + timedelta(seconds=result.retry_after_seconds)
-                ).isoformat()
+                ).isoformat(timespec="seconds")
             waiting_task.goal = goal_text
             waiting_task.spec_text = dod_source
             waiting_task.is_autonomous = True
             waiting_task.max_iterations = max_iterations or DEFAULT_MAX_ITERATIONS
+            waiting_task.run_id = run_id
 
-            self.queue.add(waiting_task)
+            if is_new_waiting_task:
+                self.queue.add(waiting_task)
+            else:
+                self.queue.update(waiting_task)
 
             self.logger.info(
-                "Autonomn? b?h %s ?ek? na provider limit, ulo?en do fronty jako %s",
+                "Autonomní běh %s čeká na provider limit, uložen do fronty jako %s",
                 run_id,
                 waiting_task.id,
             )
+        elif _waiting_task is not None:
+            _waiting_task.status = (
+                TaskStatus.DONE
+                if result.status == AutonomousStatus.COMPLETED
+                else TaskStatus.FAILED
+                if result.status in (AutonomousStatus.BLOCKED, AutonomousStatus.MAX_ITERATIONS)
+                else TaskStatus.ERROR
+            )
+            _waiting_task.result = (
+                result.iterations[-1].agent_output if result.iterations else ""
+            )
+            _waiting_task.error = result.error
+            _waiting_task.retry_at = None
+            _waiting_task.retry_after_seconds = None
+            self.queue.update(_waiting_task)
 
         result.restored_from_checkpoint = restored
 
@@ -302,6 +436,16 @@ class OrchestratorService:
     def _write_autonomous_outbox(self, run_id: str, project: str, goal: str, result: AutonomousResult) -> None:
         self.config.outbox_dir.mkdir(parents=True, exist_ok=True)
         out_path = self.config.outbox_dir / f"autonomous-{run_id}.json"
+        completed_indices = [index for index, item in enumerate(result.dod_items) if item.done]
+        next_item = next((item.text for item in result.dod_items if not item.done), "")
+        last_output = result.iterations[-1].agent_output if result.iterations else ""
+        provider_sequence = []
+        for iteration in result.iterations:
+            if iteration.agent_name and iteration.agent_name not in provider_sequence:
+                provider_sequence.append(iteration.agent_name)
+        stop_reason = result.error
+        if not stop_reason and result.status != AutonomousStatus.COMPLETED:
+            stop_reason = result.status.value
         payload = {
             "run_id": run_id,
             "project": project,
@@ -315,6 +459,22 @@ class OrchestratorService:
             "retry_after_seconds": result.retry_after_seconds,
             "restored_from_checkpoint": result.restored_from_checkpoint,
             "breaker_saved_attempts": result.breaker_saved_attempts,
+            # Stable handoff contract consumed by AI Project Manager.
+            "done": result.status == AutonomousStatus.COMPLETED,
+            "checkpoint": {
+                "run_id": run_id,
+                "completed_dod_indices": completed_indices,
+            },
+            "last_output": last_output,
+            "next_step": next_item,
+            "stop_reason": stop_reason,
+            "limit_hit": (
+                result.error or "all configured providers are limited"
+                if result.status == AutonomousStatus.WAITING_FOR_PROVIDER
+                else None
+            ),
+            "provider_sequence": provider_sequence,
+            "active_provider": provider_sequence[-1] if provider_sequence else None,
         }
         out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -356,8 +516,6 @@ class OrchestratorService:
 
     def list_tasks(self, status: Optional[TaskStatus] = None, limit: int = 50) -> list[Task]:
         return self.queue.list(status=status, limit=limit)
-
-
 
 
 

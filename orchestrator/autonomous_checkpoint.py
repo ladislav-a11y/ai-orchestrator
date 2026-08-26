@@ -41,6 +41,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from orchestrator.spec_text import normalize_spec_text
+
 CHECKPOINT_SUBDIR = "autonomous_checkpoints"
 
 
@@ -64,9 +66,18 @@ def checkpoint_path(data_dir: Path, project_path: Path, dod_source: str) -> Path
     the hash/path stored inside the file - but keying the name on the same
     fingerprint means a changed spec simply never resolves to the old file,
     which is what gives "safe invalidation on spec change" for free instead
-    of relying on cache-style logic."""
+    of relying on cache-style logic.
+
+    Fingerprints `normalize_spec_text(dod_source)`, not the raw text: AI
+    Project Manager embeds a fresh random run_id in a trailing
+    "<!-- PM-CHECKPOINT {...} -->" comment on every scheduler tick that
+    resubmits the same card, so hashing the raw text would mint a brand new
+    (and never-reused) checkpoint file on every tick - silently discarding
+    verified DoD progress each time instead of resuming it (see
+    orchestrator/spec_text.py and queue.py's identical problem with
+    find_active_autonomous/dedupe_waiting_tasks)."""
     project_fp = _fingerprint(str(Path(project_path).resolve()))[:16]
-    spec_fp = _fingerprint(dod_source)[:16]
+    spec_fp = _fingerprint(normalize_spec_text(dod_source) or "")[:16]
     return data_dir / CHECKPOINT_SUBDIR / f"{project_fp}-{spec_fp}.json"
 
 
@@ -87,7 +98,7 @@ def load_checkpoint(data_dir: Path, project_path: Path, dod_source: str) -> Opti
     if not isinstance(raw, dict):
         return None
 
-    spec_hash = _fingerprint(dod_source)
+    spec_hash = _fingerprint(normalize_spec_text(dod_source) or "")
     if raw.get("spec_hash") != spec_hash:
         return None
     if raw.get("project_path") != str(Path(project_path).resolve()):
@@ -152,7 +163,7 @@ def save_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "project_path": str(Path(project_path).resolve()),
-        "spec_hash": _fingerprint(dod_source),
+        "spec_hash": _fingerprint(normalize_spec_text(dod_source) or ""),
         "goal": goal,
         "items": [{"text": item.text, "done": item.done} for item in dod_items],
         "run_id": run_id,

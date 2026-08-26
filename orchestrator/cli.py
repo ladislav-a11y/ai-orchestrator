@@ -38,7 +38,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             prompt=args.prompt,
             agent_name=args.agent,
             test_command_override=args.test_command,
-            auto_commit=(False if args.no_commit else None),
+            auto_commit=_resolve_auto_commit(args),
             source="cli",
         )
     except ValueError as e:
@@ -48,6 +48,21 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"Task {task.id} spuštěn na projektu '{task.project}' ({task.project_path})...")
     result_task = service.run_sync(task)
     return _print_task(result_task)
+
+
+def _resolve_auto_commit(args: argparse.Namespace) -> "bool | None":
+    """Resolve --commit/--no-commit into the `auto_commit` override passed to
+    the service. argparse's mutually-exclusive group already refuses both
+    flags at once, so at most one of `args.commit`/`args.no_commit` is ever
+    True here. Neither flag given -> None, so the service falls back to
+    `config.git.auto_commit` exactly as before - this only adds a way to
+    explicitly opt a single invocation IN, without touching global config.yaml
+    (see runner.py `_maybe_commit` / autonomous.py `_commit_if_ready`)."""
+    if args.no_commit:
+        return False
+    if args.commit:
+        return True
+    return None
 
 
 def _format_denial(denial) -> str:
@@ -112,7 +127,7 @@ def cmd_autonomous(args: argparse.Namespace) -> int:
             agent_name=args.agent,
             test_command_override=args.test_command,
             max_iterations=args.max_iterations,
-            auto_commit=(False if args.no_commit else None),
+            auto_commit=_resolve_auto_commit(args),
             run_id=args.run_id,
         )
     except ValueError as e:
@@ -227,7 +242,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--project", required=True, help="Jméno projektu z config.yaml, nebo cesta na disku")
     p_run.add_argument("--agent", help="Který agent se má použít (výchozí: default_agent z config.yaml)")
     p_run.add_argument("--test-command", help="Přepíše testovací příkaz pro tento běh")
-    p_run.add_argument("--no-commit", action="store_true", help="Nikdy nevytvářet commit, i kdyby auto_commit bylo zapnuté")
+    p_run_commit = p_run.add_mutually_exclusive_group()
+    p_run_commit.add_argument(
+        "--commit", action="store_true",
+        help="Explicitně povolí commit pro tento běh (po úspěšných testech), i kdyby "
+        "auto_commit v config.yaml bylo vypnuté",
+    )
+    p_run_commit.add_argument("--no-commit", action="store_true", help="Nikdy nevytvářet commit, i kdyby auto_commit bylo zapnuté")
     p_run.set_defaults(func=cmd_run)
 
     p_auto = sub.add_parser(
@@ -251,7 +272,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto.add_argument("--run-id", help="Externí ID běhu předané nadřazeným orchestrátorem")
     p_auto.add_argument("--agent", help="Který agent se má použít (výchozí: default_agent z config.yaml)")
     p_auto.add_argument("--test-command", help="Přepíše testovací příkaz pro tento běh")
-    p_auto.add_argument("--no-commit", action="store_true", help="Nikdy nevytvářet commit, i kdyby auto_commit bylo zapnuté")
+    p_auto_commit = p_auto.add_mutually_exclusive_group()
+    p_auto_commit.add_argument(
+        "--commit", action="store_true",
+        help="Explicitně povolí commit pro tento běh (po splnění Definition of Done a "
+        "úspěšných testech), i kdyby auto_commit v config.yaml bylo vypnuté",
+    )
+    p_auto_commit.add_argument("--no-commit", action="store_true", help="Nikdy nevytvářet commit, i kdyby auto_commit bylo zapnuté")
     p_auto.set_defaults(func=cmd_autonomous)
 
     p_status = sub.add_parser("status", help="Zobrazí stav úkolu/úkolů")
