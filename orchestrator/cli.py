@@ -128,6 +128,7 @@ def cmd_autonomous(args: argparse.Namespace) -> int:
             test_command_override=args.test_command,
             max_iterations=args.max_iterations,
             auto_commit=_resolve_auto_commit(args),
+            implementation_only=args.implementation_only,
             run_id=args.run_id,
         )
     except ValueError as e:
@@ -138,6 +139,9 @@ def cmd_autonomous(args: argparse.Namespace) -> int:
 
 
 def _print_autonomous_result(run_id: str, result) -> int:
+    # ``autonomous`` is a one-shot CLI command; its service does not keep a
+    # persistent waiting worker alive after this function returns.
+    auto_resume_active = False
     print(f"\n== Autonomní běh {run_id} - {result.status.value} ==")
     print(f"Iterací provedeno: {len(result.iterations)}")
     if result.restored_from_checkpoint:
@@ -149,14 +153,52 @@ def _print_autonomous_result(run_id: str, result) -> int:
     for i, item in enumerate(result.dod_items):
         mark = "[x]" if item.done else "[ ]"
         print(f"{mark} {i}. {item.text}")
+        live_command = getattr(item, "live_command", None)
+        if live_command is not None:
+            evidence = getattr(item, "live_evidence", None)
+            if isinstance(evidence, dict) and evidence.get("passed") is True:
+                live_state = "OK (ověřeno živým důkazem)"
+            elif isinstance(evidence, dict):
+                live_state = "SELHALO - živý důkaz neodpovídá očekávanému výstupu"
+            else:
+                live_state = "CHYBÍ - čeká se na LIVE-RESULT z reálné integrace/produkce"
+            print(f"    živý důkaz vyžadován: {live_command!r} -> {item.live_expected!r}; stav: {live_state}")
 
     if result.status == AutonomousStatus.WAITING_FOR_PROVIDER:
         if result.retry_after_seconds is not None:
-            print(f"\n?ek?n? na dostupn?ho providera; dal?? pokus nejd??ve za {result.retry_after_seconds:.0f} s.")
+            print(
+                f"\nZastaveno: čekání na dostupného providera; další pokus nejdříve za "
+                f"{result.retry_after_seconds:.0f} s."
+            )
         else:
-            print("\n?ek?n? na dostupn?ho providera; ?as dal??ho pokusu nen? zn?m.")
+            print("\nZastaveno: čekání na dostupného providera; čas dalšího pokusu není znám.")
+        # DoD (produkční incident cb501524e47e, 26.8.2026): výstup musí
+        # jednoznačně říct, jestli se běh sám obnoví, nebo je nutný další
+        # zásah - viz OrchestratorService.auto_resume_active.
+        if auto_resume_active:
+            print(
+                "Automatické pokračování JE aktivní (trvalý worker tohoto procesu) - "
+                "běh sám naváže z checkpointu, jakmile limit vyprší."
+            )
+        else:
+            print(
+                "Automatické pokračování NENÍ aktivní (jednorázový běh bez trvalého "
+                "workeru/scheduleru) - je nutné po resetu spustit stejný příkaz znovu "
+                f"(`orchestrator.py autonomous ... --run-id {run_id}`); naváže z uloženého "
+                "checkpointu, ne od začátku."
+            )
     elif result.status == AutonomousStatus.BLOCKED:
         print("\nZastaveno: stejný stav/chyba se opakuje bez pokroku (blocked).")
+    elif result.status == AutonomousStatus.PROTOCOL_ERROR:
+        print(
+            "\nZastaveno: agent opakovaně nevrátil platný JSON kontrakt (protokolová chyba), "
+            "i po repair pokusu a bez dalšího providera k dispozici."
+        )
+    elif result.status == AutonomousStatus.BUDGET_EXCEEDED:
+        print(
+            "\nZastaveno: aktivní provider překročil svůj nakonfigurovaný finanční limit pro "
+            "tuto úlohu a žádný další provider nebyl k dispozici."
+        )
     elif result.status == AutonomousStatus.MAX_ITERATIONS:
         print("\nZastaveno: dosažen maximální počet iterací, Definition of Done ještě není splněná.")
     elif result.status == AutonomousStatus.ERROR:
@@ -272,6 +314,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto.add_argument("--run-id", help="Externí ID běhu předané nadřazeným orchestrátorem")
     p_auto.add_argument("--agent", help="Který agent se má použít (výchozí: default_agent z config.yaml)")
     p_auto.add_argument("--test-command", help="Přepíše testovací příkaz pro tento běh")
+    p_auto.add_argument(
+        "--implementation-only",
+        action="store_true",
+        help="Po ověřené implementaci a testech skončit před auditem; audit proběhne v samostatném workflow ticku",
+    )
     p_auto_commit = p_auto.add_mutually_exclusive_group()
     p_auto_commit.add_argument(
         "--commit", action="store_true",

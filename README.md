@@ -44,6 +44,37 @@ nebo, pokud `claude` není v PATH, cestu k `claude.exe`, kterou ti vypíše
 pak zkus `doctor --live` znovu. Toto je jediný krok, který musíš provést
 ručně - orchestrátor za tebe nikdy nezadává hesla ani se sám nepřihlašuje.
 
+### Ověření reálného Codex CLI kontraktu (volitelný živý test)
+
+Stejně jako u Claude Code (viz výše), `doctor --live` teď ověří i reálný
+Codex CLI kontrakt - žádný zvláštní příkaz navíc není potřeba:
+
+```bash
+.venv\Scripts\python orchestrator.py doctor --live
+```
+
+Pokud je `codex` nalezen (řádek "Codex CLI" v základním, ne-live výpisu
+`doctor`), `doctor --live` navíc spustí řádek "Codex CLI (živý test)": pošle
+Codexu jeden read-only dotaz s vynuceným `--sandbox read-only` (bez ohledu na
+nakonfigurovaný `codex.sandbox_mode`) a požadovaným `--output-schema`
+kontraktem, a ověří, že (a) odpověď odpovídá schématu a (b) se v adresáři,
+proti kterému `doctor --live` běží, nic nezměnilo. Vyžaduje lokálně
+nainstalovaný a přihlášený Codex CLI - spuštění stojí malé množství skutečné
+Codex kvóty, proto to `doctor` bez `--live` nikdy nedělá sám od sebe.
+
+Stejnou kontrolu lze spustit i přímo jako pytest test (např. v CI, kde
+`orchestrator.py doctor` není zvykem volat):
+
+```bash
+.venv\Scripts\python -m pytest tests/test_codex_agent.py::test_live_smoke_reads_project_state_without_changes -q
+```
+
+Před spuštěním nastav `AI_ORCHESTRATOR_RUN_LIVE_CODEX_TEST=1` (jinak se test
+přeskočí, viz `AGENTS.md` - testy nesmí v základní sadě volat placené API).
+Autonomní vývojová iterace ani `doctor --live` sama o sobě nikdy nespouští -
+nemá k tomu oprávnění ani přístup k živému `codex` CLI - tento krok musí
+provést člověk (nebo CI) s přístupem k reálnému, přihlášenému Codex CLI.
+
 ## 3. Kontrola prostředí (doctor)
 
 ```bash
@@ -116,6 +147,21 @@ jeden bod na řádek, klidně jako checklist:
 - [ ] README popisuje, jak endpoint spustit a otestovat
 ```
 
+Produkční nebo integrační bod lze označit jako vyžadující živý důkaz. Deklarace
+je Markdown komentář na konci bodu; AI Project Manager po provedení bezpečné
+read-only kontroly přidá `LIVE-RESULT` (index je nulový index bodu v DoD):
+
+```markdown
+- [ ] Trello obsahuje projektový label <!-- LIVE-EVIDENCE: {"command":"načti labely karty","expect":"project_key"} -->
+<!-- LIVE-RESULT: {"index":0,"exit_code":0,"output":"label project_key nalezen"} -->
+```
+
+Orchestrátor příkaz z textu specifikace z bezpečnostních důvodů nespouští.
+Výsledek vyhodnotí sám: musí mít `exit_code` 0 a `output` musí obsahovat
+deklarované `expect`. Bez důkazu nebo při neshodě zůstane bod nesplněný, i
+když jej agent označí hotový a všechny lokální testy projdou. Deklarace i
+výsledek se ukládají do checkpointu, logu a outboxu pro zápis zpět do Trella.
+
 Bez `--spec` stačí i jen `--goal` - použije se jako jediný bod Definition of
 Done. Co se děje v každé iteraci:
 
@@ -128,17 +174,34 @@ Done. Co se děje v každé iteraci:
 5. Každá iterace se zaloguje do `logs/autonomous/<id>.log` (a do
    `logs/orchestrator.log`).
 
-Běh skončí jedním ze čtyř stavů:
+Běh skončí jedním z těchto stavů:
 
 - **completed** - všechny body Definition of Done splněné A testy prošly (nebo
   žádné testy nejsou nastavené). Pokud je navíc zapnutý `git.auto_commit` v
   `config.yaml`, nebo byl pro tento konkrétní běh výslovně předán `--commit`,
   vytvoří se Git commit. Pokud testy neprošly, commit se **nikdy** nevytvoří -
   ani s `--commit`.
+- **waiting_for_provider** - všichni nakonfigurovaní provideři (viz
+  `provider_order`, výchozí claude-code → antigravity → codex) jsou LIMITED
+  nebo lokálně nedostupní. Běh se **neukončí jako chyba** - uloží se do fronty
+  jako čekající task s `retry_after_seconds` a Definition of Done checkpointem
+  (viz `data/autonomous_checkpoints/`), pošle se Slack notifikace s stavem
+  KAŽDÉHO providera a nejbližším známým resetem, a výstup i
+  `outbox/autonomous-<run_id>.json` řeknou přes `auto_resume_active`, jestli
+  tento proces sám čekání dokončí (jen `orchestrator.py api`, viz kapitola 8),
+  nebo je nutné po `retry_after_seconds` spustit **stejný příkaz znovu**
+  (běžný případ pro `orchestrator.py autonomous`, které je jednorázový
+  proces) - naváže z checkpointu, ne od bodu 0.
 - **blocked** - stejný stav (stejné nesplněné body + stejný výsledek testů)
   se opakuje 3x po sobě bez posunu - orchestrátor to nezkouší dál dokola.
 - **max_iterations** - vyčerpán limit iterací, Definition of Done pořád není
   splněná celá.
+- **budget_exceeded** - aktivní provider překročil svůj nakonfigurovaný
+  `max_budget_usd` (viz `claude_code`/`antigravity`/`codex` v
+  `config.yaml`) pro TENTO běh a žádný další nakonfigurovaný provider
+  nebyl k dispozici k failoveru. Provider-specific hard cap na útratu za
+  jeden běh, nezávislý na `max_iterations`/`ABSOLUTE_MAX_ITERATIONS` (hard
+  cap na počet iterací) - viz ARCHITECTURE.md "Per-job finanční limit".
 - **error** - samotné volání agenta selhalo (např. timeout) - loop se hned
   zastaví.
 

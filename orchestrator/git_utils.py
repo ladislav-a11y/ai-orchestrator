@@ -53,8 +53,14 @@ def _run(args: list[str], cwd: Path, timeout: int = 60) -> GitResult:
 def is_git_repo(project_path: Path) -> bool:
     if not project_path.exists():
         return False
-    result = _run(["rev-parse", "--is-inside-work-tree"], cwd=project_path)
-    return result.ok and result.stdout.strip() == "true"
+    result = _run(["rev-parse", "--show-toplevel"], cwd=project_path)
+    if not result.ok or not result.stdout.strip():
+        return False
+    # ``--is-inside-work-tree`` also returns true for any ordinary
+    # subdirectory of a parent repository.  A registered project must be the
+    # worktree root itself; otherwise Git operations could accidentally act
+    # on the enclosing project instead of the requested directory.
+    return Path(result.stdout).resolve() == project_path.resolve()
 
 
 def has_uncommitted_changes(project_path: Path) -> bool:
@@ -81,6 +87,27 @@ def diff_stat(project_path: Path) -> str:
 def current_branch(project_path: Path) -> Optional[str]:
     result = _run(["rev-parse", "--abbrev-ref", "HEAD"], cwd=project_path)
     return result.stdout.strip() if result.ok else None
+
+
+def current_head(project_path: Path) -> Optional[str]:
+    result = _run(["rev-parse", "HEAD"], cwd=project_path)
+    return result.stdout.strip() if result.ok else None
+
+
+def origin_url(project_path: Path) -> Optional[str]:
+    result = _run(["remote", "get-url", "origin"], cwd=project_path)
+    return result.stdout.strip() if result.ok else None
+
+
+def remote_branch_head(project_path: Path, branch: str) -> Optional[str]:
+    result = _run(
+        ["ls-remote", "origin", f"refs/heads/{branch}"],
+        cwd=project_path,
+        timeout=120,
+    )
+    if not result.ok or not result.stdout:
+        return None
+    return result.stdout.split()[0]
 
 
 def commit(project_path: Path, message: str) -> str:

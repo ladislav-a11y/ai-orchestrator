@@ -21,11 +21,13 @@ from orchestrator.autonomous import (
     AutonomousStatus,
     DEFAULT_MAX_ITERATIONS,
     DOD_BATCH_SIZE,
+    controller_finalization_from_spec,
     parse_definition_of_done,
     run_autonomous_loop,
 )
 from orchestrator.autonomous_checkpoint import (
     apply_checkpoint,
+    apply_pm_checkpoint,
     load_checkpoint,
     save_checkpoint,
 )
@@ -36,13 +38,26 @@ from orchestrator.logging_config import setup_logging, write_autonomous_log, wri
 from orchestrator.models import Task, TaskStatus
 from orchestrator.queue import TaskQueue, make_task, new_task_id
 from orchestrator.runner import run_task
+from orchestrator.slack_notify import notify
 
 
 class OrchestratorService:
-    def __init__(self, config: Optional[Config] = None):
+    def __init__(self, config: Optional[Config] = None, persistent: bool = False):
         self.config = config or load_config()
         self.logger = setup_logging(self.config.logs_dir)
         self.queue = TaskQueue(self.config.data_dir / "tasks.db")
+        # Whether THIS process is expected to stay alive long enough for the
+        # waiting worker started below to actually resume a WAITING_FOR_PROVIDER
+        # task on its own (e.g. `orchestrator.py api`, which blocks in
+        # uvicorn.run() until killed). `orchestrator.py autonomous`/`run`
+        # build a plain OrchestratorService(), run one task synchronously, and
+        # exit - the waiting worker thread is a daemon thread that dies with
+        # the process before its next poll, so it can never actually resume
+        # anything there. See DoD (produkční incident cb501524e47e,
+        # 26.8.2026): a WAITING_FOR_PROVIDER outcome must say plainly whether
+        # automatic continuation is active, instead of leaving the caller to
+        # assume the background worker will eventually run.
+        self.auto_resume_active = persistent
         self._instance_lock_file = None
         self._acquire_instance_lock()
         self._recover_on_startup()
@@ -50,9 +65,11 @@ class OrchestratorService:
         self._waiting_worker_stop = False
         self._waiting_worker_event = threading.Event()
         self._waiting_worker_interval = 30
-        self._waiting_worker = threading.Thread(target=self._waiting_worker_loop, daemon=True)
-        self._waiting_worker.start()
-        self._resume_waiting_tasks()
+        self._waiting_worker: Optional[threading.Thread] = None
+        if self.auto_resume_active:
+            self._waiting_worker = threading.Thread(target=self._waiting_worker_loop, daemon=True)
+            self._waiting_worker.start()
+            self._resume_waiting_tasks()
 
     def _acquire_instance_lock(self) -> None:
         """Ensure only one service process uses this queue database at a time."""
@@ -157,7 +174,7 @@ class OrchestratorService:
         self._waiting_worker_stop = True
         self._waiting_worker_event.set()
 
-        if self._waiting_worker.is_alive():
+        if self._waiting_worker is not None and self._waiting_worker.is_alive():
             self._waiting_worker.join(timeout=5)
 
         try:
@@ -268,6 +285,7 @@ class OrchestratorService:
         test_command_override: Optional[str] = None,
         max_iterations: Optional[int] = None,
         auto_commit: Optional[bool] = None,
+        implementation_only: bool = False,
         run_id: Optional[str] = None,
         _waiting_task: Optional[Task] = None,
     ) -> tuple[str, AutonomousResult]:
@@ -292,6 +310,7 @@ class OrchestratorService:
 
         dod_source = spec_text if spec_text else goal
         dod_items = parse_definition_of_done(dod_source)
+        controller_finalization = controller_finalization_from_spec(dod_source)
         goal_text = goal or dod_source.strip().splitlines()[0]
 
         test_command = test_command_override
@@ -312,15 +331,29 @@ class OrchestratorService:
         # run of this exact project+spec (see autonomous_checkpoint.py) -
         # never trusts an agent claim, only what an earlier run's own
         # orchestrator-verified merge already persisted.
-        checkpoint = load_checkpoint(self.config.data_dir, project_dir, dod_source)
-        restored = apply_checkpoint(dod_items, checkpoint) if checkpoint else 0
+        pm_restored = apply_pm_checkpoint(dod_items, dod_source)
+        checkpoint = None
+        if pm_restored is None:
+            checkpoint = load_checkpoint(self.config.data_dir, project_dir, dod_source)
+            restored = apply_checkpoint(dod_items, checkpoint) if checkpoint else 0
+        else:
+            # PM/Trello explicitly supplied checkpoint state. Even an empty
+            # checkpoint is authoritative and suppresses stale local state.
+            restored = pm_restored
         if restored:
             resume_batch = [idx for idx, item in enumerate(dod_items) if not item.done][:DOD_BATCH_SIZE]
-            self.logger.info(
-                "Autonomní běh %s: obnoveno %s/%s bodů Definition of Done z checkpointu projektu "
-                "'%s' (z běhu %s) - pokračuji dávkou bodů %s, ne od bodu 0",
-                run_id, restored, len(dod_items), entry.name, checkpoint.run_id, resume_batch,
-            )
+            if pm_restored is not None:
+                self.logger.info(
+                    "Autonomní běh %s: převzato %s/%s bodů Definition of Done z autoritativního "
+                    "PM/Trello checkpointu projektu '%s' - pokračuji dávkou bodů %s",
+                    run_id, restored, len(dod_items), entry.name, resume_batch,
+                )
+            else:
+                self.logger.info(
+                    "Autonomní běh %s: obnoveno %s/%s bodů Definition of Done z checkpointu projektu "
+                    "'%s' (z běhu %s) - pokračuji dávkou bodů %s, ne od bodu 0",
+                    run_id, restored, len(dod_items), entry.name, checkpoint.run_id, resume_batch,
+                )
         elif checkpoint is not None:
             # A checkpoint file exists but apply_checkpoint() refused it
             # (item count/text mismatch despite a matching spec hash) -
@@ -339,6 +372,8 @@ class OrchestratorService:
             save_checkpoint(
                 self.config.data_dir, project_dir, dod_source, goal_text,
                 partial_result.dod_items, run_id,
+                partial_result.usage_events, partial_result.usage_by_provider,
+                partial_result.usage_total,
             )
 
         result = run_autonomous_loop(
@@ -354,11 +389,25 @@ class OrchestratorService:
             auto_commit_requested=(self.config.git.auto_commit if auto_commit is None else auto_commit),
             on_iteration=on_iteration,
             preexisting_dirty=preexisting_dirty,
+            controller_finalization=controller_finalization,
+            implementation_only=implementation_only,
+        )
+        # Looked up once and reused by BOTH branches below: the internal
+        # waiting worker always passes `_waiting_task` explicitly, but a
+        # fresh, independent invocation (a brand-new process/service
+        # instance - the actual way AI Project Manager drives this: see
+        # README ch.9, "AI Project Manager je spouští přímo přes CLI") has
+        # no `_waiting_task` at all and must still find and reconcile any
+        # WAITING_FOR_PROVIDER row a PREVIOUS invocation for this exact
+        # project+spec left in the queue - otherwise that row is orphaned at
+        # WAITING_FOR_PROVIDER forever even after this invocation finishes
+        # the run, which is exactly the kind of stale/false status the DoD
+        # (produkční incident cb501524e47e, 26.8.2026) forbids.
+        existing_waiting_task = _waiting_task or self.queue.find_active_autonomous(
+            entry.name, dod_source
         )
         if result.status == AutonomousStatus.WAITING_FOR_PROVIDER:
-            waiting_task = _waiting_task or self.queue.find_active_autonomous(
-                entry.name, dod_source
-            )
+            waiting_task = existing_waiting_task
             is_new_waiting_task = waiting_task is None
             if waiting_task is None:
                 waiting_task = make_task(
@@ -410,26 +459,63 @@ class OrchestratorService:
                 run_id,
                 waiting_task.id,
             )
-        elif _waiting_task is not None:
-            _waiting_task.status = (
+
+            # DoD (produkční incident cb501524e47e, 26.8.2026): AI Project
+            # Manager v produkci viděl jen status=in_progress a chyběla
+            # Slack zpráva o tom, proč běh stojí a kdy může pokračovat -
+            # tohle je ta run-úrovňová zpráva (na rozdíl od
+            # FailoverAgent._describe_status_for_notify(), která hlásí stav
+            # jednotlivých providerů). Musí jasně říct i to, jestli tento
+            # proces sám čekání dokončí (trvalý worker), nebo je nutný další
+            # ruční/naplánovaný běh stejného příkazu.
+            if result.retry_after_seconds is not None:
+                retry_note = f"nejbližší známý retry za {result.retry_after_seconds:.0f} s"
+            else:
+                retry_note = "čas dalšího pokusu není znám"
+            if self.auto_resume_active:
+                resume_note = (
+                    "Automatické pokračování JE aktivní (trvalý worker tohoto procesu) - "
+                    "běh sám naváže z checkpointu, jakmile limit vyprší."
+                )
+            else:
+                resume_note = (
+                    "Automatické pokračování NENÍ aktivní (jednorázový běh bez trvalého "
+                    "workeru/scheduleru) - je nutné po resetu spustit stejný příkaz "
+                    f"(`orchestrator.py autonomous ... --run-id {run_id}`) znovu; naváže "
+                    "z uloženého checkpointu, ne od začátku."
+                )
+            notify(
+                f"[AI Orchestrator] Autonomní běh {run_id} (projekt {entry.name}) čeká na "
+                f"providera (WAITING_FOR_PROVIDER): {retry_note}. {resume_note}"
+            )
+        elif existing_waiting_task is not None:
+            existing_waiting_task.status = (
                 TaskStatus.DONE
                 if result.status == AutonomousStatus.COMPLETED
                 else TaskStatus.FAILED
-                if result.status in (AutonomousStatus.BLOCKED, AutonomousStatus.MAX_ITERATIONS)
+                if result.status in (
+                    AutonomousStatus.BLOCKED,
+                    AutonomousStatus.MAX_ITERATIONS,
+                    AutonomousStatus.PROTOCOL_ERROR,
+                    AutonomousStatus.BUDGET_EXCEEDED,
+                )
                 else TaskStatus.ERROR
             )
-            _waiting_task.result = (
+            existing_waiting_task.result = (
                 result.iterations[-1].agent_output if result.iterations else ""
             )
-            _waiting_task.error = result.error
-            _waiting_task.retry_at = None
-            _waiting_task.retry_after_seconds = None
-            self.queue.update(_waiting_task)
+            existing_waiting_task.error = result.error
+            existing_waiting_task.retry_at = None
+            existing_waiting_task.retry_after_seconds = None
+            self.queue.update(existing_waiting_task)
 
         result.restored_from_checkpoint = restored
 
         write_autonomous_log(self.config.logs_dir, run_id, entry.name, goal_text, result)
-        save_checkpoint(self.config.data_dir, project_dir, dod_source, goal_text, result.dod_items, run_id)
+        save_checkpoint(
+            self.config.data_dir, project_dir, dod_source, goal_text, result.dod_items, run_id,
+            result.usage_events, result.usage_by_provider, result.usage_total,
+        )
         self._write_autonomous_outbox(run_id, entry.name, goal_text, result)
         return run_id, result
 
@@ -451,7 +537,18 @@ class OrchestratorService:
             "project": project,
             "goal": goal,
             "status": result.status.value,
-            "dod_items": [{"text": i.text, "done": i.done} for i in result.dod_items],
+            "dod_items": [
+                {
+                    "text": i.text,
+                    "done": i.done,
+                    "live_verification": (
+                        {"command": i.live_command, "expect": i.live_expected}
+                        if i.live_command is not None else None
+                    ),
+                    "live_evidence": i.live_evidence,
+                }
+                for i in result.dod_items
+            ],
             "iterations": [it.to_dict() for it in result.iterations],
             "committed": result.committed,
             "commit_hash": result.commit_hash,
@@ -459,6 +556,19 @@ class OrchestratorService:
             "retry_after_seconds": result.retry_after_seconds,
             "restored_from_checkpoint": result.restored_from_checkpoint,
             "breaker_saved_attempts": result.breaker_saved_attempts,
+            # How much of this run's iteration/token budget was spent on
+            # unresolved protocol errors (invalid/incomplete agent JSON,
+            # even after the one cheap repair reprompt) rather than real
+            # work - see autonomous.py's PROTOCOL_ERROR_STREAK_LIMIT and
+            # incident run 7fffd21835174d9fb9a29237c897f6d2.
+            "protocol_error_total": result.protocol_error_total,
+            "protocol_error_wasted_prompt_tokens_estimate": result.protocol_error_wasted_prompt_chars // 4,
+            "usage": {
+                "events": result.usage_events,
+                "by_provider": result.usage_by_provider,
+                "total": result.usage_total,
+                "note": "Hodnoty se source=reported pocházejí z metadata provideru; null znamená, že údaj nebyl dostupný.",
+            },
             # Stable handoff contract consumed by AI Project Manager.
             "done": result.status == AutonomousStatus.COMPLETED,
             "checkpoint": {
@@ -475,6 +585,17 @@ class OrchestratorService:
             ),
             "provider_sequence": provider_sequence,
             "active_provider": provider_sequence[-1] if provider_sequence else None,
+            # DoD (produkční incident cb501524e47e, 26.8.2026): jen na
+            # WAITING_FOR_PROVIDER - jestli tento proces sám (trvalý worker)
+            # čekající běh po resetu obnoví (True), nebo je nutné po
+            # `retry_after_seconds` spustit stejný `orchestrator.py
+            # autonomous ... --run-id <run_id>` znovu ručně/ze scheduleru
+            # (False). Viz OrchestratorService.__init__ `persistent`.
+            "auto_resume_active": (
+                self.auto_resume_active
+                if result.status == AutonomousStatus.WAITING_FOR_PROVIDER
+                else None
+            ),
         }
         out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -516,9 +637,3 @@ class OrchestratorService:
 
     def list_tasks(self, status: Optional[TaskStatus] = None, limit: int = 50) -> list[Task]:
         return self.queue.list(status=status, limit=limit)
-
-
-
-
-
-

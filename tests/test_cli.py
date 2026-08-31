@@ -12,6 +12,7 @@ the way a real subprocess invocation would.
 """
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,14 @@ from orchestrator.config import ApiConfig, Config, GitConfig, PathsConfig, Proje
 from orchestrator.service import OrchestratorService
 
 
+def _audit_response(request):
+    indices = [int(value) for value in re.findall(r"(?m)^(\d+)\. ", request.prompt)]
+    return json.dumps({
+        "items": [{"index": value, "accepted": True, "evidence": "audit evidence"} for value in indices],
+        "notes": "audit ok",
+    })
+
+
 class FakeAgent(Agent):
     name = "fake"
 
@@ -32,7 +41,7 @@ class FakeAgent(Agent):
 
     def run(self, request):
         if AUDIT_MARKER in request.prompt:
-            return AgentRunResult(success=True, output_text='{"rejected_indices": [], "notes": "audit ok"}')
+            return AgentRunResult(success=True, output_text=_audit_response(request))
         return AgentRunResult(
             success=True,
             output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
@@ -87,7 +96,52 @@ def test_autonomous_cli_passes_run_id_and_writes_outbox(tmp_path, monkeypatch):
         assert payload["run_id"] == "trello-card-42"
         assert payload["status"] == "completed"
         assert payload["done"] is True
-        assert payload["dod_items"] == [{"text": "Over health endpoint", "done": True}]
+        assert payload["dod_items"] == [{
+            "text": "Over health endpoint",
+            "done": True,
+            "live_verification": None,
+            "live_evidence": None,
+        }]
+    finally:
+        service.shutdown()
+
+
+def test_autonomous_cli_reports_missing_live_evidence(tmp_path, monkeypatch, capsys):
+    """A DoD item declaring LIVE-EVIDENCE without a matching LIVE-RESULT must
+    stay open (see orchestrator.autonomous._enforce_live_evidence) and the
+    CLI output must say so explicitly - not just print the same bare "[ ]"
+    as an ordinary unmet item - so an operator/AI Project Manager reading
+    the run output knows a real integration check is still owed, not more
+    local implementation work."""
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: FakeAgent())
+
+    cfg = make_cfg(tmp_path)
+    service = OrchestratorService(cfg)
+    monkeypatch.setattr(cli, "OrchestratorService", lambda: service)
+
+    spec_path = tmp_path / "dod.md"
+    spec_path.write_text(
+        '- [x] Trello obsahuje projektovy label '
+        '<!-- LIVE-EVIDENCE: {"command":"nacti labely karty","expect":"project_key"} -->\n',
+        encoding="utf-8",
+    )
+
+    try:
+        exit_code = cli.main(
+            [
+                "autonomous",
+                "--project", "station-agent",
+                "--spec", str(spec_path),
+                "--run-id", "trello-card-live-missing",
+                "--max-iterations", "1",
+                "--no-commit",
+            ]
+        )
+        assert exit_code != 0
+        out = capsys.readouterr().out
+        assert "[ ] 0. Trello obsahuje projektovy label" in out
+        assert "živý důkaz vyžadován: 'nacti labely karty' -> 'project_key'" in out
+        assert "CHYBÍ" in out
     finally:
         service.shutdown()
 
@@ -107,7 +161,7 @@ def test_autonomous_cli_commit_flag_commits_even_when_config_default_is_off(tmp_
 
         def run(self, request):
             if AUDIT_MARKER in request.prompt:
-                return AgentRunResult(success=True, output_text='{"rejected_indices": [], "notes": "audit ok"}')
+                return AgentRunResult(success=True, output_text=_audit_response(request))
             (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
             return AgentRunResult(
                 success=True,
@@ -180,7 +234,7 @@ def test_autonomous_cli_nonzero_exit_when_not_completed(tmp_path, monkeypatch):
 
         def run(self, request):
             if AUDIT_MARKER in request.prompt:
-                return AgentRunResult(success=True, output_text='{"rejected_indices": [], "notes": "audit ok"}')
+                return AgentRunResult(success=True, output_text=_audit_response(request))
             # Never marks the DoD item done - loop exhausts max_iterations.
             return AgentRunResult(success=True, output_text='{"items": [], "notes": "pracuji"}')
 
@@ -212,5 +266,60 @@ def test_autonomous_cli_nonzero_exit_when_not_completed(tmp_path, monkeypatch):
         assert payload["run_id"] == "trello-card-99"
         assert payload["done"] is False
         assert payload["status"] != "completed"
+    finally:
+        service.shutdown()
+
+
+def test_autonomous_cli_waiting_for_provider_prints_auto_resume_inactive(tmp_path, monkeypatch, capsys):
+    """DoD (produkční incident cb501524e47e, 26.8.2026): the CLI output for
+    a WAITING_FOR_PROVIDER outcome must explicitly say that no persistent
+    worker/scheduler is behind THIS invocation (the real `orchestrator.py
+    autonomous` usage - a one-shot process, see README ch.9) - never leave
+    the caller to assume it will resume on its own."""
+
+    class AlwaysLimitedAgent(Agent):
+        name = "fake"
+
+        def is_available(self):
+            return True, "fake agent always available"
+
+        def run(self, request):
+            return AgentRunResult(
+                success=False, output_text="", error="rate limit reached",
+                limited=True, retry_after_seconds=120.0,
+            )
+
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: AlwaysLimitedAgent())
+
+    cfg = make_cfg(tmp_path)
+    service = OrchestratorService(cfg)
+    monkeypatch.setattr(cli, "OrchestratorService", lambda: service)
+
+    spec_path = tmp_path / "dod.md"
+    spec_path.write_text("- [ ] Over health endpoint\n", encoding="utf-8")
+
+    try:
+        exit_code = cli.main(
+            [
+                "autonomous",
+                "--project", "station-agent",
+                "--spec", str(spec_path),
+                "--run-id", "trello-card-waiting",
+                "--max-iterations", "3",
+                "--no-commit",
+            ]
+        )
+
+        assert exit_code == 1
+        out = capsys.readouterr().out
+        assert "120" in out
+        assert "NENÍ aktivní" in out
+        assert "trello-card-waiting" in out
+
+        outbox_path = cfg.outbox_dir / "autonomous-trello-card-waiting.json"
+        payload = json.loads(outbox_path.read_text(encoding="utf-8"))
+        assert payload["status"] == "waiting_for_provider"
+        assert payload["auto_resume_active"] is False
+        assert payload["done"] is False
     finally:
         service.shutdown()

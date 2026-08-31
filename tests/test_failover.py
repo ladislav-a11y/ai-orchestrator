@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,14 @@ from orchestrator.config import (
     TestingConfig,
 )
 from orchestrator.service import OrchestratorService
+
+
+def _audit_response(request):
+    indices = [int(value) for value in re.findall(r"(?m)^(\d+)\. ", request.prompt)]
+    return json.dumps({
+        "items": [{"index": value, "accepted": True, "evidence": "audit evidence"} for value in indices],
+        "notes": "audit passed",
+    })
 
 
 class MockAgent(Agent):
@@ -47,7 +56,7 @@ def _audit_confirming_run_fn(executor_fn):
         if AUDIT_MARKER in request.prompt:
             return AgentRunResult(
                 success=True,
-                output_text='{"rejected_indices": [], "notes": "audit passed"}',
+                output_text=_audit_response(request),
                 session_id="audit-sess",
             )
         return executor_fn(request)
@@ -73,6 +82,24 @@ def test_failover_first_provider_succeeds(caplog):
     assert len(p2.run_calls) == 0
     assert len(p3.run_calls) == 0
     assert "Vybrán provider 'claude-code'" in caplog.text
+
+
+def test_failover_preserves_output_contract_for_selected_provider():
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+    }
+    p1 = MockAgent("claude-code", available=False)
+    p2 = MockAgent("codex", available=True)
+    agent = FailoverAgent([p1, p2])
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="audit", output_schema=schema)
+    )
+
+    assert result.success is True
+    assert p2.run_calls[0].output_schema == schema
 
 
 # -- 2. First provider is LIMITED, second succeeds ---------------------------
@@ -167,6 +194,144 @@ def test_failover_all_limited_or_unavailable(caplog):
     assert "Všichni konfigurovaní provideři" in caplog.text
 
 
+def test_failover_all_exhausted_sends_detailed_slack_notification(monkeypatch):
+    """DoD (produkční incident cb501524e47e, 26.8.2026 - Claude LIMITED
+    reset 22:10, Antigravity LIMITED reset +70h36m, Codex LIMITED reset
+    22:05): the Slack message sent when every provider is exhausted must
+    say the status of EACH provider individually (not just their names, as
+    the old message did) and the nearest known reset/retry."""
+    sent = []
+    monkeypatch.setattr("orchestrator.agents.failover.notify", lambda msg: sent.append(msg))
+
+    def p1_run(request):
+        return AgentRunResult(
+            success=False, output_text="", error="Rate limit reached",
+            limited=True, retry_after_seconds=3600,
+        )
+
+    def p3_run(request):
+        return AgentRunResult(
+            success=False, output_text="", error="RESOURCE_EXHAUSTED",
+            limited=True, retry_after_seconds=254160,
+        )
+
+    p1 = MockAgent("claude-code", available=True, run_fn=p1_run)
+    p2 = MockAgent("antigravity", available=False, avail_msg="agy not found")
+    p3 = MockAgent("codex", available=True, run_fn=p3_run)
+
+    agent = FailoverAgent([p1, p2, p3])
+    agent.run(AgentRunRequest(project_path=Path("."), prompt="vytvor feature"))
+
+    # Other notify() calls fire along the way (active-provider announcement,
+    # per-switch "provider X vyčerpal limit" - see run()'s existing
+    # per-switch notifications) - the detailed exhaustion summary this test
+    # cares about is always the LAST one sent, once every provider has been
+    # tried and none is left.
+    assert len(sent) >= 1
+    message = sent[-1]
+    assert "WAITING_FOR_PROVIDER" in message
+    assert "claude-code: LIMITED (Rate limit reached, reset za 1h0m)" in message
+    assert "antigravity: nedostupný (agy not found)" in message
+    assert "codex: LIMITED (RESOURCE_EXHAUSTED, reset za 70h36m)" in message
+    assert "Nejbližší známý reset/retry: za 1h0m" in message
+
+
+def test_failover_all_exhausted_notification_handles_unknown_retry(monkeypatch):
+    """When no provider reports a retry_after_seconds at all, the message
+    must say so plainly instead of omitting the nearest-reset line."""
+    sent = []
+    monkeypatch.setattr("orchestrator.agents.failover.notify", lambda msg: sent.append(msg))
+
+    p1 = MockAgent("claude-code", available=False, avail_msg="not logged in")
+
+    agent = FailoverAgent([p1])
+    agent.run(AgentRunRequest(project_path=Path("."), prompt="vytvor feature"))
+
+    assert len(sent) == 1
+    assert "claude-code: nedostupný (not logged in)" in sent[0]
+    assert "Čas žádného resetu/retry není u žádného providera znám." in sent[0]
+
+
+# -- 4b. force_failover_on_protocol_error() advances past the active provider
+
+def test_force_failover_on_protocol_error_advances_and_skips_next_run(caplog):
+    caplog.set_level(logging.INFO)
+    p1 = MockAgent("claude-code", available=True)
+    p2 = MockAgent("antigravity", available=True)
+
+    agent = FailoverAgent([p1, p2])
+    assert agent.active_provider_name == "claude-code"
+
+    advanced = agent.force_failover_on_protocol_error("nevraci platny JSON kontrakt")
+
+    assert advanced is True
+    assert agent.active_provider_name == "antigravity"
+    assert "Přepínám na" in caplog.text
+
+    # A subsequent run() call must skip the now protocol-incompatible
+    # provider entirely, not just start from wherever the index was left.
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="vytvor feature"))
+    assert result.output_text == "result from antigravity"
+    assert len(p1.run_calls) == 0
+    assert len(p2.run_calls) == 1
+
+
+def test_force_failover_on_protocol_error_returns_false_on_last_provider():
+    """When the currently active provider is the last one configured,
+    force_failover_on_protocol_error() must report there is nowhere left to
+    go (False) so the caller (autonomous.py) stops the whole run instead of
+    silently retrying the same protocol-incompatible provider again."""
+    p1 = MockAgent("claude-code", available=True)
+    agent = FailoverAgent([p1])
+
+    assert agent.force_failover_on_protocol_error("nevraci platny JSON kontrakt") is False
+
+
+# -- 4c. force_failover_on_budget_exceeded() advances past the active provider
+# (per-job provider-specific financial cap, see autonomous.py's
+# _provider_budget_usd - mirrors force_failover_on_protocol_error above).
+
+def test_force_failover_on_budget_exceeded_advances_and_skips_next_run(caplog):
+    caplog.set_level(logging.INFO)
+    p1 = MockAgent("claude-code", available=True)
+    p2 = MockAgent("antigravity", available=True)
+
+    agent = FailoverAgent([p1, p2])
+    assert agent.active_provider_name == "claude-code"
+
+    advanced = agent.force_failover_on_budget_exceeded("prekrocen max_budget_usd")
+
+    assert advanced is True
+    assert agent.active_provider_name == "antigravity"
+    assert "Přepínám na" in caplog.text
+
+    # A subsequent run() call must skip the now budget-exceeded provider
+    # entirely, not just start from wherever the index was left.
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="vytvor feature"))
+    assert result.output_text == "result from antigravity"
+    assert len(p1.run_calls) == 0
+    assert len(p2.run_calls) == 1
+
+
+def test_force_failover_on_budget_exceeded_returns_false_on_last_provider():
+    """When the currently active provider is the last one configured,
+    force_failover_on_budget_exceeded() must report there is nowhere left to
+    go (False) so the caller (autonomous.py) stops the whole run instead of
+    silently continuing to spend past the configured cap."""
+    p1 = MockAgent("claude-code", available=True)
+    agent = FailoverAgent([p1])
+
+    assert agent.force_failover_on_budget_exceeded("prekrocen max_budget_usd") is False
+
+
+def test_describe_status_for_notify_reports_budget_exceeded():
+    p1 = MockAgent("claude-code", available=True)
+    agent = FailoverAgent([p1])
+    agent.force_failover_on_budget_exceeded("utraceno $12.50 > limit $10.00")
+
+    assert "claude-code: BUDGET_EXCEEDED" in agent._describe_status_for_notify("claude-code")
+
+
 # -- 5. Normal error does NOT trigger failover -------------------------------
 
 
@@ -195,6 +360,51 @@ def test_failover_normal_error_does_not_trigger_failover(caplog):
     assert len(p2.run_calls) == 0
     assert len(p3.run_calls) == 0
     assert "Přepínám na providera" not in caplog.text
+
+
+def test_failover_timeout_switches_provider(caplog):
+    caplog.set_level(logging.INFO)
+
+    def p1_run(request):
+        return AgentRunResult(
+            success=False,
+            output_text="",
+            error="Claude Code neodpověděl do 600s (timeout).",
+            timed_out=True,
+        )
+
+    p1 = MockAgent("claude-code", run_fn=p1_run)
+    p2 = MockAgent("antigravity")
+    agent = FailoverAgent([p1, p2])
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="vytvor feature"))
+
+    assert result.success is True
+    assert len(p1.run_calls) == 1
+    assert len(p2.run_calls) == 1
+    assert "překročil timeout" in caplog.text
+
+
+def test_failover_all_timeouts_returns_timeout_not_limited():
+    def timeout(name):
+        return lambda request: AgentRunResult(
+            success=False,
+            output_text="",
+            error=f"{name} timeout",
+            timed_out=True,
+        )
+
+    agent = FailoverAgent([
+        MockAgent("claude-code", run_fn=timeout("claude")),
+        MockAgent("antigravity", run_fn=timeout("antigravity")),
+    ])
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="vytvor feature"))
+
+    assert result.success is False
+    assert result.timed_out is True
+    assert result.limited is False
+    assert result.error == "antigravity timeout"
 
 
 # -- 6. Explicit --agent does NOT perform failover ---------------------------
@@ -282,7 +492,7 @@ def test_failover_preserves_autonomous_checkpoint_and_dod_across_iterations(tmp_
         if AUDIT_MARKER in request.prompt:
             return AgentRunResult(
                 success=True,
-                output_text='{"rejected_indices": [], "notes": "audit potvrzen"}',
+                output_text=_audit_response(request),
                 session_id="p2-audit-sess",
             )
         # p2 receives request with prompt containing bod 1 and marks it done
@@ -406,3 +616,20 @@ def test_failover_all_limited_preserves_earliest_retry():
     assert result.success is False
     assert result.limited is True
     assert result.retry_after_seconds == 900
+
+
+def test_failover_preserves_usage_from_limited_provider_before_fallback():
+    limited = MockAgent("p1", available=True, run_fn=lambda request: AgentRunResult(
+        success=False, output_text="", error="429", limited=True,
+        input_tokens=40, output_tokens=2, total_tokens=42,
+    ))
+    success = MockAgent("p2", available=True, run_fn=lambda request: AgentRunResult(
+        success=True, output_text="ok", input_tokens=10, output_tokens=3, total_tokens=13,
+    ))
+
+    result = FailoverAgent([limited, success]).run(
+        AgentRunRequest(project_path=Path("."), prompt="test")
+    )
+
+    assert [event["provider"] for event in result.usage_events] == ["p1", "p2"]
+    assert sum(event["total_tokens"] for event in result.usage_events) == 55

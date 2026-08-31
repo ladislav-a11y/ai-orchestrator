@@ -210,9 +210,39 @@ projekt + cíl + Definition of Done
     |                 pokusu) nebo s neparsovatelnou audit odpovědí se do
     |                 této detekce nezapočítávají
     +--> max_iterations: vyčerpán limit iterací, DoD stále nesplněná
+    +--> budget_exceeded: aktivní provider překročil svůj nakonfigurovaný
+    |                 `max_budget_usd` PRO TENTO BĚH a žádný další
+    |                 nakonfigurovaný provider nebyl k dispozici (viz
+    |                 "Per-job finanční limit" níže)
     +--> error:       samotné volání agenta selhalo (chyba/timeout) - loop
                       se hned zastaví, nezkouší to slepě znovu
 ```
+
+### Per-job finanční limit (`max_budget_usd`, provider-specific)
+
+Doplněk k `max_iterations`/`ABSOLUTE_MAX_ITERATIONS` (hard cap na *počet*
+iterací): `ClaudeCodeAgentConfig`/`AntigravityAgentConfig`/
+`CodexAgentConfig.max_budget_usd` (viz `config.example.yaml`) je hard cap na
+*útratu* jednoho providera během jednoho autonomního běhu, v USD. `None`
+(výchozí) = bez limitu.
+
+- Kontroluje se jednou po každé iteraci (`_provider_budget_usd` v
+  `autonomous.py`), proti kumulativnímu `cost_usd` reportovanému tímto
+  providerem NAPŘÍČ celým tímto během (`AutonomousResult.usage_by_provider`)
+  - ne proti nákladu jediného volání. Chybějící/nereportovaný `cost_usd`
+  (usage tracking je best-effort) tento limit nikdy nespustí - kontrola
+  reaguje jen na pozitivně potvrzenou útratu.
+- Když je limit překročen: pokud agent podporuje failover
+  (`FailoverAgent.force_failover_on_budget_exceeded()`, stejný mechanismus
+  jako u `force_failover_on_protocol_error()`), běh přepne na dalšího
+  nakonfigurovaného providera a pokračuje. Pokud žádný další provider
+  nezbývá (nebo je agent jednoduchý, bez failoveru), běh se zastaví se
+  stavem `AutonomousStatus.BUDGET_EXCEEDED` a pošle se Slack notifikace -
+  nikdy nepokračuje "naslepo" za nakonfigurovaný strop.
+- Odlišeno od `WAITING_FOR_PROVIDER` (`ProviderStatus.limited` - kvóta/rate
+  limit reportovaný providerem samotným): `ProviderStatus.budget_exceeded`
+  je vlastní finanční strop, který si nastavuje a hlídá orchestrátor, ne
+  signál od providera.
 
 ### Root cause: run `11b4aaae08b4` (66 bodů DoD, 8 ztracených iterací)
 
@@ -323,6 +353,42 @@ jako "stejná chyba pořád dokola", i když orchestrátor ve skutečnosti žád
 srovnatelný signál nezískal - přesně tato záměna byla druhou příčinou toho,
 že běh `9cd54b5bf219` skončil jako `blocked` misto pokračování/max_iterations.
 
+### Opakovaná protokolová chyba nesmí běžet donekonečna (incident 7fffd21835174d9fb9a29237c897f6d2)
+
+Vyloučení protokolové chyby z detekce "bez pokroku" (výše) je záměrné, ale
+nesmí se stát dírou, kterou lze utéct do nekonečného opakování. V produkčním
+běhu `7fffd21835174d9fb9a29237c897f6d2` (26. 8. 2026) Codex v iteracích 1-7
+vždy provedl reálné změny a testy prošly, ale ani jednou nevrátil platný
+finální DoD JSON; jediný levný repair pokus selhal také 7x za sebou.
+Protokolová chyba se do `NO_PROGRESS_LIMIT` nepočítá, takže orchestrátor
+7x za sebou zahájil novou plnou vývojovou iteraci se stejným nezměněným DoD,
+dokud Codex nevyčerpal usage limit - bez jediného zaznamenaného přínosu.
+
+Řešení: `run_autonomous_loop` počítá samostatný čítač `protocol_error_streak`
+- kolik iterací PO SOBĚ skončilo s `protocol_error=True` (i po repair pokusu)
+nebo `audit_protocol_error=True`. Jakmile dosáhne `PROTOCOL_ERROR_STREAK_LIMIT`
+(2, záměrně nižší než `NO_PROGRESS_LIMIT`):
+
+- pokud `agent` (typicky `FailoverAgent`, viz `orchestrator/agents/failover.py`)
+  poskytuje metodu `force_failover_on_protocol_error(reason)`, zavolá se -
+  opakovaná protokolová nekompatibilita dostává stejné právo na failover na
+  dalšího nakonfigurovaného providera jako vyčerpaná kvóta/limit. Pokud
+  failover uspěje (existuje další provider), čítač se vynuluje a běh
+  pokračuje s novým providerem;
+- jinak (žádný failover k dispozici, nebo šlo o posledního providera) se běh
+  rovnou zastaví se stavem `AutonomousStatus.PROTOCOL_ERROR` - NEPOKRAČUJE
+  se do další plné iterace se stejným nezměněným DoD.
+
+Zastavení/failover pošle jasný důvod přes `slack_notify.notify()` a
+`AutonomousResult` nese `protocol_error_total`/`protocol_error_wasted_prompt_chars`
+(hrubý odhad promarněných tokenů - `znaky // 4`, stejné jednotky jako jinde v
+logování), takže `outbox/autonomous-<run_id>.json` (a tedy i AI Project
+Manager/Trello/Slack handoff) vidí, kolik iterací/tokenů protokolová chyba
+stála, i na běhu, který nakonec neskončil jako `PROTOCOL_ERROR`. Checkpoint
+(`autonomous_checkpoint.py`) i dosud ověřené DoD položky a výsledky testů
+zůstávají zachované beze změny - stop/failover nikdy neoznačí nic za
+splněné, jen přestane slepě opakovat stejný neúspěšný protokol.
+
 ### Logování
 
 Každá iterace se loguje na dvou místech: (1) `logger.info`/`warning` do
@@ -338,6 +404,52 @@ kompletní záznam všech dosavadních iterací. Strojově čitelný výsledek
 `requested_indices`, `repair_attempted`, `audit_performed`) jde do
 `outbox/autonomous-<run_id>.json`, stejně jako `outbox/<task_id>.json` u
 běžných úkolů.
+
+### Vyčerpání všech providerů (`WAITING_FOR_PROVIDER`, incident cb501524e47e, 26.8.2026)
+
+Když `FailoverAgent` (viz `agents/failover.py`) vyčerpá celé nakonfigurované
+pořadí providerů - každý je buď lokálně nedostupný, nebo vrátil
+`limited=True` - `run_autonomous_loop` běh **neukončí jako chybu**, ale jako
+`AutonomousStatus.WAITING_FOR_PROVIDER` s `retry_after_seconds` převzatým z
+nejbližšího známého resetu (`min()` přes všechny providery, které svůj reset
+znají). `OrchestratorService.run_autonomous` z toho uloží do fronty
+čekající task (`TaskStatus.WAITING_FOR_PROVIDER`) s `retry_at`, `spec_text` a
+`run_id` zachovaným kvůli navázání - a `autonomous_checkpoint.py` už dřív
+uložil, které body Definition of Done jsou ověřené hotové, takže žádný
+následný běh nezačíná od bodu 0.
+
+Produkční incident 26.8.2026 (task `cb501524e47e`): Claude LIMITED (reset
+22:10 Europe/Prague), Antigravity LIMITED (reset cca +70h36m), Codex LIMITED
+(reset 22:05) - orchestrátor čekající task uložil správně, ale AI Project
+Manager viděl jen `status=in_progress` a nedostal žádnou Slack notifikaci,
+protože (a) Slack zpráva při vyčerpání providerů hlásila jen jejich jména,
+ne stav/reset každého zvlášť, (b) neexistovala žádná run-úrovňová
+notifikace o tom, že běh čeká, a (c) nic neřeklo, jestli se běh sám obnoví.
+Oprava:
+
+- `FailoverAgent.run()` při vyčerpání pošle přes `slack_notify.notify()`
+  zprávu se stavem KAŽDÉHO providera zvlášť (LIMITED s časem resetu /
+  nedostupný s důvodem) a nejbližším známým reset/retry
+  (`_describe_status_for_notify`/`_format_duration`).
+- `OrchestratorService.run_autonomous` navíc pošle run-úrovňovou Slack
+  notifikaci (projekt, `run_id`, `retry_after_seconds`) při přechodu do
+  `WAITING_FOR_PROVIDER`.
+- `OrchestratorService.auto_resume_active` (nastaveno konstruktorovým
+  parametrem `persistent`) rozlišuje, jestli TENTO proces sám čekající běh
+  obnoví - `True` jen pro dlouhoběžící proces (`orchestrator.py api`, viz
+  `api.py`), `False` pro jednorázový `orchestrator.py autonomous`/`run`
+  (skutečný způsob, jak AI Project Manager tento orchestrátor spouští - viz
+  README kap. 9). Hodnota jde do `outbox/autonomous-<run_id>.json` jako
+  `auto_resume_active` i do CLI výstupu, takže se nikdy nepředstírá
+  automatické pokračování, které neběží.
+- `OrchestratorService.run_autonomous` teď hledá a uzavírá existující
+  čekající frontový záznam (`find_active_autonomous`) i když běh doběhne
+  přes zcela NOVOU instanci `OrchestratorService` (skutečný produkční
+  případ - každé volání CLI je jiný proces), ne jen přes interní
+  `_waiting_worker`. Bez toho by frontový záznam zůstal navždy trčet na
+  `WAITING_FOR_PROVIDER`, i když běh mezitím dokončila samostatná
+  invokace CLI - přesně ten typ falešného/zastaralého stavu, který DoD
+  zakazuje.
 
 ### Definition of Done
 

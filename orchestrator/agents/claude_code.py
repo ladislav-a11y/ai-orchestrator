@@ -303,6 +303,7 @@ class ClaudeCodeAgent(Agent):
                 success=False,
                 output_text="",
                 error=f"Claude Code neodpověděl do {self.config.timeout_seconds}s (timeout).",
+                timed_out=True,
             )
         except FileNotFoundError as e:
             return AgentRunResult(success=False, output_text="", error=f"Nelze spustit CLI: {e}")
@@ -317,6 +318,28 @@ class ClaudeCodeAgent(Agent):
             is_error = bool(raw.get("is_error", proc.returncode != 0))
             result_text = raw.get("result", "")
             denials = raw.get("permission_denials") or []
+            usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
+            input_tokens = usage.get("input_tokens")
+            output_tokens = usage.get("output_tokens")
+            if not isinstance(input_tokens, int) or isinstance(input_tokens, bool):
+                input_tokens = None
+            if not isinstance(output_tokens, int) or isinstance(output_tokens, bool):
+                output_tokens = None
+            output_details = usage.get("output_tokens_details")
+            if not isinstance(output_details, dict):
+                output_details = {}
+            thinking_tokens = output_details.get("thinking_tokens")
+            if not isinstance(thinking_tokens, int) or isinstance(thinking_tokens, bool):
+                thinking_tokens = None
+            total_tokens = usage.get("total_tokens")
+            if not isinstance(total_tokens, int) or isinstance(total_tokens, bool):
+                total_tokens = None
+            if (
+                total_tokens is None
+                and input_tokens is not None
+                and output_tokens is not None
+            ):
+                total_tokens = input_tokens + output_tokens
             # Never append anything to result_text/output_text here:
             # autonomous.py's DoD contract requires the agent's *own* last
             # message to be exactly one JSON object, and callers parse
@@ -343,6 +366,10 @@ class ClaudeCodeAgent(Agent):
                 raw_response=raw,
                 session_id=raw.get("session_id"),
                 cost_usd=raw.get("total_cost_usd"),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                thinking_tokens=thinking_tokens,
+                total_tokens=total_tokens,
                 error=error_message,
                 permission_denials=len(denials),
                 permission_denial_details=denials,

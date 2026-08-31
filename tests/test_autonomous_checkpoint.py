@@ -10,6 +10,7 @@ from orchestrator.autonomous import (
 )
 from orchestrator.autonomous_checkpoint import (
     apply_checkpoint,
+    apply_pm_checkpoint,
     checkpoint_path,
     load_checkpoint,
     save_checkpoint,
@@ -64,10 +65,19 @@ def test_save_and_load_checkpoint_round_trip(tmp_path):
     dod_items[2].done = True
 
     data_dir = tmp_path / "data"
-    save_checkpoint(data_dir, project_path, dod_source, "cil", dod_items, "run-1")
+    usage_events = [{"provider": "codex", "input_tokens": 10, "stage": "executor"}]
+    usage_by_provider = {"codex": {"input_tokens": 10, "source": "reported"}}
+    usage_total = {"input_tokens": 10, "source": "reported"}
+    save_checkpoint(
+        data_dir, project_path, dod_source, "cil", dod_items, "run-1",
+        usage_events, usage_by_provider, usage_total,
+    )
 
     checkpoint = load_checkpoint(data_dir, project_path, dod_source)
     assert checkpoint is not None
+    assert checkpoint.usage_events == usage_events
+    assert checkpoint.usage_by_provider == usage_by_provider
+    assert checkpoint.usage_total == usage_total
 
     fresh = parse_definition_of_done(dod_source)
     restored = apply_checkpoint(fresh, checkpoint)
@@ -104,6 +114,48 @@ def test_apply_checkpoint_never_partially_applies_on_text_mismatch(tmp_path):
     assert all(not i.done for i in fresh)
 
 
+def test_five_item_checkpoint_rejects_out_of_range_indices_and_preserves_existing_done():
+    """Stale indices 64-65 must not map onto a five-item PM handoff DoD."""
+    from orchestrator.autonomous_checkpoint import DoDCheckpoint
+
+    fresh = parse_definition_of_done(_spec_text(5))
+    fresh[0].done = True
+    stale_items = [
+        {"index": index, "text": item.text, "done": True}
+        for index, item in enumerate(fresh)
+    ]
+    stale_items[3]["index"] = 64
+    stale_items[4]["index"] = 65
+    checkpoint = DoDCheckpoint(
+        project_path="ignored",
+        spec_hash="ignored",
+        goal="cil",
+        items=stale_items,
+        run_id="old-run",
+        saved_at="ignored",
+    )
+
+    assert apply_checkpoint(fresh, checkpoint) == 0
+    assert [item.done for item in fresh] == [True, False, False, False, False]
+
+
+def test_apply_checkpoint_rejects_non_boolean_done_value():
+    from orchestrator.autonomous_checkpoint import DoDCheckpoint
+
+    fresh = parse_definition_of_done(_spec_text(1))
+    checkpoint = DoDCheckpoint(
+        project_path="ignored",
+        spec_hash="ignored",
+        goal="cil",
+        items=[{"text": fresh[0].text, "done": "false"}],
+        run_id="old-run",
+        saved_at="ignored",
+    )
+
+    assert apply_checkpoint(fresh, checkpoint) == 0
+    assert fresh[0].done is False
+
+
 # -- invalidation on spec change (requirement 8) ------------------------
 
 
@@ -131,6 +183,35 @@ def test_checkpoint_invalidated_when_spec_content_changes(tmp_path):
     assert restored == 0
     assert all(not i.done for i in fresh_v2)
 
+
+def test_live_result_updates_do_not_change_checkpoint_identity(tmp_path):
+    declaration = (
+        '- [ ] Produkcni stav '
+        '<!-- LIVE-EVIDENCE: {"command":"read health","expect":"ready"} -->'
+    )
+    with_result = declaration + (
+        '\n<!-- LIVE-RESULT: {"index":0,"exit_code":0,"output":"ready"} -->'
+    )
+    assert checkpoint_path(tmp_path, tmp_path / "project", declaration) == checkpoint_path(
+        tmp_path, tmp_path / "project", with_result
+    )
+
+
+def test_checkpoint_round_trips_live_evidence(tmp_path):
+    project = tmp_path / "project"
+    spec = (
+        '- [x] Produkcni stav '
+        '<!-- LIVE-EVIDENCE: {"command":"read health","expect":"ready"} -->\n'
+        '<!-- LIVE-RESULT: {"index":0,"exit_code":0,"output":"ready now"} -->'
+    )
+    original = parse_definition_of_done(spec)
+    save_checkpoint(tmp_path, project, spec, "cil", original, "run-live")
+    restored_items = parse_definition_of_done(spec.splitlines()[0])
+    checkpoint = load_checkpoint(tmp_path, project, spec.splitlines()[0])
+    assert checkpoint is not None
+    assert apply_checkpoint(restored_items, checkpoint) == 1
+    assert restored_items[0].done is True
+    assert restored_items[0].live_evidence["passed"] is True
 
 def test_checkpoint_survives_pm_checkpoint_run_id_churn(tmp_path):
     """Regression for a real bug found in the live queue: AI Project Manager
@@ -169,6 +250,34 @@ def test_checkpoint_survives_pm_checkpoint_run_id_churn(tmp_path):
     restored = apply_checkpoint(fresh, checkpoint)
     assert restored == 1
     assert fresh[0].done is True
+
+
+def test_explicit_empty_pm_checkpoint_suppresses_stale_local_progress():
+    spec = (
+        _spec_text(3)
+        + '\n\n<!-- PM-CHECKPOINT\n'
+        + '{"run_id":"new-run","checkpoint":{}}\n-->\n'
+    )
+    fresh = parse_definition_of_done(spec)
+
+    restored = apply_pm_checkpoint(fresh, spec)
+
+    assert restored == 0
+    assert all(not item.done for item in fresh)
+
+
+def test_explicit_pm_checkpoint_restores_only_declared_indices():
+    spec = (
+        _spec_text(3)
+        + '\n\n<!-- PM-CHECKPOINT\n'
+        + '{"run_id":"new-run","checkpoint":{"completed_dod_indices":[1]}}\n-->\n'
+    )
+    fresh = parse_definition_of_done(spec)
+
+    restored = apply_pm_checkpoint(fresh, spec)
+
+    assert restored == 1
+    assert [item.done for item in fresh] == [False, True, False]
 
 
 def test_checkpoint_scoped_per_project_not_shared(tmp_path):

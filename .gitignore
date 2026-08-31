@@ -11,4 +11,9 @@ outbox/*.json
 inbox/*.json
 inbox/processed/*.json
 .pytest_cache/
+.pytest-tmp/
+.pytest-*/
+.tmp/
+.tmp*
 logs/autonomous/
+poc/hermes_agent/.artifacts/

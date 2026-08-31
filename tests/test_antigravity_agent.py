@@ -299,6 +299,7 @@ def test_run_timeout(monkeypatch):
     result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
     assert result.success is False
     assert "timeout" in result.error.lower()
+    assert result.timed_out is True
 
 
 def test_run_file_not_found(monkeypatch):

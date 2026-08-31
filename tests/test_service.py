@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from orchestrator import service as service_module
@@ -6,6 +7,14 @@ from orchestrator.agents.base import Agent, AgentRunResult
 from orchestrator.autonomous import AUDIT_MARKER, AutonomousStatus
 from orchestrator.config import ApiConfig, Config, GitConfig, PathsConfig, ProjectEntry, TestingConfig
 from orchestrator.service import OrchestratorService
+
+
+def _audit_response(request):
+    indices = [int(value) for value in re.findall(r"(?m)^(\d+)\. ", request.prompt)]
+    return json.dumps({
+        "items": [{"index": value, "accepted": True, "evidence": "audit evidence"} for value in indices],
+        "notes": "audit ok",
+    })
 
 
 class FakeAgent(Agent):
@@ -20,7 +29,7 @@ class FakeAgent(Agent):
         # this agent's own "done" claim - it must be answered too, or the
         # loop never completes and instead exhausts max_iterations.
         if AUDIT_MARKER in request.prompt:
-            return AgentRunResult(success=True, output_text='{"rejected_indices": [], "notes": "audit ok"}')
+            return AgentRunResult(success=True, output_text=_audit_response(request))
         return AgentRunResult(
             success=True,
             output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
@@ -165,6 +174,79 @@ def test_run_autonomous_completed_writes_log_and_outbox(tmp_path, monkeypatch):
     assert payload["next_step"] == ""
 
 
+def test_run_autonomous_protocol_error_preserves_checkpoint_and_reports_waste_in_outbox(tmp_path, monkeypatch):
+    """DoD points: a run that stops as PROTOCOL_ERROR must (1) keep the
+    checkpoint/DoD progress already verified before the protocol errors
+    started (never regress already-done items back to not-done), and (2)
+    surface a clear stop reason plus a waste metric in the outbox JSON, not
+    just a bare status - see the production incident referenced in
+    autonomous.py's module docstring."""
+    from orchestrator.autonomous import AUDIT_MARKER, PROTOCOL_ERROR_STREAK_LIMIT
+    from orchestrator.autonomous_checkpoint import load_checkpoint
+
+    spec = "- [ ] prvni bod\n- [ ] druhy bod, ktery se nikdy neoznaci"
+
+    class FirstDoneThenProtocolErrorAgent(Agent):
+        name = "fake"
+
+        def __init__(self):
+            self.calls = 0
+
+        def is_available(self):
+            return True, "ok"
+
+        def run(self, request):
+            if AUDIT_MARKER in request.prompt:
+                return AgentRunResult(success=True, output_text=_audit_response(request))
+            self.calls += 1
+            if self.calls == 1:
+                return AgentRunResult(
+                    success=True,
+                    output_text=(
+                        '{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], '
+                        '"notes": "prvni hotovo"}'
+                    ),
+                )
+            return AgentRunResult(success=True, output_text="porad neplatny JSON, ne kontrakt")
+
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: FirstDoneThenProtocolErrorAgent())
+    sent = []
+    monkeypatch.setattr("orchestrator.autonomous.notify", lambda msg: sent.append(msg))
+    cfg = make_cfg(tmp_path)
+
+    service = OrchestratorService(cfg)
+    run_id, result = service.run_autonomous(
+        project_ref="station-agent",
+        goal="Priprav projekt",
+        spec_text=spec,
+        agent_name="fake",
+        max_iterations=10,
+        run_id="protocol-error-run",
+    )
+
+    assert result.status == AutonomousStatus.PROTOCOL_ERROR
+    assert result.dod_items[0].done is True
+    assert result.dod_items[1].done is False
+
+    outbox_path = cfg.outbox_dir / f"autonomous-{run_id}.json"
+    payload = json.loads(outbox_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "protocol_error"
+    assert payload["done"] is False
+    assert payload["checkpoint"]["completed_dod_indices"] == [0]
+    assert payload["protocol_error_total"] >= PROTOCOL_ERROR_STREAK_LIMIT
+    assert payload["protocol_error_wasted_prompt_tokens_estimate"] > 0
+    assert payload["stop_reason"] and "protokol" in payload["stop_reason"].lower()
+
+    checkpoint = load_checkpoint(cfg.data_dir, Path(cfg.projects["station-agent"].path), spec)
+    assert checkpoint is not None
+    done_indices = {i for i, item in enumerate(checkpoint.items) if item.get("done")}
+    assert done_indices == {0}
+
+    assert len(sent) == 1
+    assert "protokol" in sent[0].lower()
+    assert f"{result.protocol_error_total} protokolově chybných iterací" in sent[0]
+
+
 def test_resumed_autonomous_run_reuses_original_run_id(tmp_path, monkeypatch):
     """A run that hits WAITING_FOR_PROVIDER and is later resumed must finish
     under the SAME run_id it started with (e.g. the Trello card id AI
@@ -184,7 +266,7 @@ def test_resumed_autonomous_run_reuses_original_run_id(tmp_path, monkeypatch):
 
         def run(self, request):
             if AUDIT_MARKER in request.prompt:
-                return AgentRunResult(success=True, output_text='{"rejected_indices": [], "notes": "audit ok"}')
+                return AgentRunResult(success=True, output_text=_audit_response(request))
             self.calls += 1
             if self.calls == 1:
                 return AgentRunResult(
@@ -255,6 +337,312 @@ def test_resumed_autonomous_run_reuses_original_run_id(tmp_path, monkeypatch):
         assert resumed_task.status == service_module.TaskStatus.DONE
     finally:
         service.shutdown()
+
+
+class _OnceLimitedFakeAgent(Agent):
+    name = "fake"
+
+    def __init__(self):
+        self.calls = 0
+
+    def is_available(self):
+        return True, "fake agent always available"
+
+    def run(self, request):
+        if AUDIT_MARKER in request.prompt:
+                return AgentRunResult(success=True, output_text=_audit_response(request))
+        self.calls += 1
+        if self.calls == 1:
+            return AgentRunResult(
+                success=False, output_text="", error="rate limit reached",
+                limited=True, retry_after_seconds=90.0,
+            )
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+        )
+
+
+def test_waiting_for_provider_reports_auto_resume_inactive_by_default(tmp_path, monkeypatch):
+    """DoD (produkční incident cb501524e47e, 26.8.2026): a one-shot service
+    (the CLI's default - see OrchestratorService.__init__'s `persistent`)
+    must say plainly, both in the outbox handoff AND in the Slack
+    notification, that automatic continuation is NOT active - there is no
+    persistent worker/scheduler behind this particular invocation."""
+    agent = _OnceLimitedFakeAgent()
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: agent)
+    sent = []
+    monkeypatch.setattr(service_module, "notify", lambda msg: sent.append(msg))
+
+    cfg = make_cfg(tmp_path)
+    service = OrchestratorService(cfg)
+    try:
+        assert service.auto_resume_active is False
+        run_id, result = service.run_autonomous(
+            project_ref="station-agent",
+            goal="Priprav projekt",
+            spec_text="- [ ] Zaloz projekt",
+            agent_name="fake",
+            max_iterations=3,
+            run_id="trello-card-inactive",
+        )
+        assert result.status == AutonomousStatus.WAITING_FOR_PROVIDER
+
+        payload = json.loads(
+            (cfg.outbox_dir / "autonomous-trello-card-inactive.json").read_text(encoding="utf-8")
+        )
+        assert payload["auto_resume_active"] is False
+        assert payload["done"] is False
+
+        assert len(sent) == 1
+        assert "NENÍ aktivní" in sent[0]
+        assert "trello-card-inactive" in sent[0]
+        assert "90" in sent[0]
+    finally:
+        service.shutdown()
+
+
+def test_waiting_for_provider_reports_auto_resume_active_when_persistent(tmp_path, monkeypatch):
+    """The counterpart to the test above: a service explicitly constructed
+    as persistent (e.g. the long-running `orchestrator.py api` process, see
+    api.py's get_service()) must report auto-resume as active instead."""
+    agent = _OnceLimitedFakeAgent()
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: agent)
+    sent = []
+    monkeypatch.setattr(service_module, "notify", lambda msg: sent.append(msg))
+
+    cfg = make_cfg(tmp_path)
+    service = OrchestratorService(cfg, persistent=True)
+    try:
+        assert service.auto_resume_active is True
+        run_id, result = service.run_autonomous(
+            project_ref="station-agent",
+            goal="Priprav projekt",
+            spec_text="- [ ] Zaloz projekt",
+            agent_name="fake",
+            max_iterations=3,
+            run_id="trello-card-active",
+        )
+        assert result.status == AutonomousStatus.WAITING_FOR_PROVIDER
+
+        payload = json.loads(
+            (cfg.outbox_dir / "autonomous-trello-card-active.json").read_text(encoding="utf-8")
+        )
+        assert payload["auto_resume_active"] is True
+
+        assert len(sent) == 1
+        assert "JE aktivní" in sent[0]
+    finally:
+        service.shutdown()
+
+
+def test_fresh_service_instance_resumes_from_checkpoint_and_closes_orphaned_waiting_row(tmp_path, monkeypatch):
+    """Mirrors the real AI Project Manager flow (README ch.9): every
+    autonomous run is a brand-new one-shot process/OrchestratorService
+    instance, NOT the same instance's internal waiting worker resuming a
+    claimed task. After a WAITING_FOR_PROVIDER outcome, a second,
+    completely independent OrchestratorService instance invoked with the
+    same project+spec+run_id must:
+    - resume from the orchestrator-verified checkpoint (skip the
+      already-done item, never redo it);
+    - never report a false 'done' in the interim (waiting) outbox state;
+    - leave no orphaned WAITING_FOR_PROVIDER row behind in the queue once
+      the second invocation actually finishes the run.
+
+    This covers the actual production continuation path, not just the
+    internal-worker-resume path already covered by
+    test_resumed_autonomous_run_reuses_original_run_id.
+    """
+    cfg = make_cfg(tmp_path)
+    spec = "- [ ] prvni bod\n- [ ] druhy bod"
+
+    class PartialThenLimitedAgent(Agent):
+        name = "fake"
+
+        def __init__(self):
+            self.calls = 0
+
+        def is_available(self):
+            return True, "ok"
+
+        def run(self, request):
+            if AUDIT_MARKER in request.prompt:
+                return AgentRunResult(success=True, output_text=_audit_response(request))
+            self.calls += 1
+            if self.calls == 1:
+                # DOD_BATCH_SIZE (8) covers both DoD items in one request, so
+                # the response must address BOTH requested indices (0 and 1)
+                # - naming only index 0 would leave index 1 "missing" and
+                # trip a protocol_error/repair detour instead of cleanly
+                # finishing this iteration with item 0 done, item 1 open.
+                return AgentRunResult(
+                    success=True,
+                    output_text=(
+                        '{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], '
+                        '"notes": "prvni hotovo"}'
+                    ),
+                )
+            return AgentRunResult(
+                success=False, output_text="", error="rate limit", limited=True, retry_after_seconds=5.0,
+            )
+
+    first_agent = PartialThenLimitedAgent()
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: first_agent)
+    first_service = OrchestratorService(cfg)
+    try:
+        run_id, result = first_service.run_autonomous(
+            project_ref="station-agent",
+            goal="Priprav projekt",
+            spec_text=spec,
+            agent_name="fake",
+            max_iterations=5,
+            run_id="trello-card-resume",
+        )
+        assert result.status == AutonomousStatus.WAITING_FOR_PROVIDER
+        assert [item.done for item in result.dod_items] == [True, False]
+    finally:
+        first_service.shutdown()
+
+    outbox_path = cfg.outbox_dir / "autonomous-trello-card-resume.json"
+    interim_payload = json.loads(outbox_path.read_text(encoding="utf-8"))
+    assert interim_payload["done"] is False
+    assert interim_payload["status"] == "waiting_for_provider"
+
+    class FinishingAgent(Agent):
+        name = "fake"
+
+        def __init__(self):
+            self.calls = 0
+
+        def is_available(self):
+            return True, "ok"
+
+        def run(self, request):
+            if AUDIT_MARKER in request.prompt:
+                return AgentRunResult(success=True, output_text=_audit_response(request))
+            self.calls += 1
+            # Only the still-unmet item (index 1) should ever be asked about
+            # - index 0 was already verified done by the checkpoint.
+            assert "druhy bod" in request.prompt
+            assert "prvni bod" not in request.prompt
+            return AgentRunResult(
+                success=True,
+                output_text='{"items": [{"index": 1, "done": true}], "notes": "hotovo"}',
+            )
+
+    second_agent = FinishingAgent()
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: second_agent)
+    second_service = OrchestratorService(cfg)
+    try:
+        run_id2, result2 = second_service.run_autonomous(
+            project_ref="station-agent",
+            goal="Priprav projekt",
+            spec_text=spec,
+            agent_name="fake",
+            max_iterations=5,
+            run_id="trello-card-resume",
+        )
+        assert run_id2 == "trello-card-resume"
+        assert result2.status == AutonomousStatus.COMPLETED
+        assert result2.restored_from_checkpoint == 1
+        assert all(item.done for item in result2.dod_items)
+        assert second_agent.calls == 1
+
+        waiting_rows = second_service.queue.list(status=service_module.TaskStatus.WAITING_FOR_PROVIDER)
+        assert waiting_rows == []
+
+        final_payload = json.loads(outbox_path.read_text(encoding="utf-8"))
+        assert final_payload["status"] == "completed"
+        assert final_payload["done"] is True
+    finally:
+        second_service.shutdown()
+
+
+def test_pm_handoff_with_stale_out_of_range_checkpoint_indices_stays_on_real_five_item_dod(
+    tmp_path, monkeypatch
+):
+    """Regression for the production incident (2026-08-26, P5 cleanup run):
+    AI Project Manager echoed back a PM-CHECKPOINT whose
+    "completed_dod_indices" (64, 65) referred to an unrelated, much larger
+    Trello backlog instead of this card's actual 5-item Definition of Done.
+    apply_pm_checkpoint() used to trust those indices positionally; here
+    they are simply out of range for a 5-item list.
+
+    A real end-to-end run_autonomous() call (not just the isolated
+    autonomous_checkpoint unit tests) must:
+    - never raise/IndexError on the out-of-range PM-CHECKPOINT;
+    - keep the two items already marked "[x]" directly in the DoD text
+      (the orchestrator's own prior verified progress, restated by AI
+      Project Manager) done, instead of the bogus checkpoint wiping them;
+    - only ask the agent about the real remaining items (2, 3, 4);
+    - only ever emit in-range indices (0-4) in the outbox handoff back to
+      AI Project Manager.
+    """
+    cfg = make_cfg(tmp_path)
+    spec = (
+        "- [x] bod jedna\n"
+        "- [x] bod dva\n"
+        "- [ ] bod tri\n"
+        "- [ ] bod ctyri\n"
+        "- [ ] bod pet\n"
+        '\n<!-- PM-CHECKPOINT\n{"run_id":"trello-card-64-65",'
+        '"checkpoint":{"completed_dod_indices":[64,65]}}\n-->\n'
+    )
+
+    class RemainingItemsAgent(Agent):
+        name = "fake"
+
+        def __init__(self):
+            self.calls = 0
+
+        def is_available(self):
+            return True, "ok"
+
+        def run(self, request):
+            if AUDIT_MARKER in request.prompt:
+                return AgentRunResult(success=True, output_text=_audit_response(request))
+            self.calls += 1
+            # Only the three genuinely unmet items should ever be asked
+            # about - the checkpoint's bogus indices 64/65 must never
+            # surface here, and the already-"[x]" items must not either.
+            assert "bod jedna" not in request.prompt
+            assert "bod dva" not in request.prompt
+            return AgentRunResult(
+                success=True,
+                output_text=(
+                    '{"items": ['
+                    '{"index": 2, "done": true}, '
+                    '{"index": 3, "done": true}, '
+                    '{"index": 4, "done": true}'
+                    '], "notes": "zbytek hotovo"}'
+                ),
+            )
+
+    agent = RemainingItemsAgent()
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: agent)
+
+    service = OrchestratorService(cfg)
+    try:
+        run_id, result = service.run_autonomous(
+            project_ref="station-agent",
+            goal="Priprav projekt",
+            spec_text=spec,
+            agent_name="fake",
+            max_iterations=5,
+            run_id="trello-card-64-65",
+        )
+    finally:
+        service.shutdown()
+
+    assert len(result.dod_items) == 5
+    assert result.status == AutonomousStatus.COMPLETED
+    assert [item.done for item in result.dod_items] == [True, True, True, True, True]
+    assert agent.calls == 1
+
+    outbox_path = cfg.outbox_dir / "autonomous-trello-card-64-65.json"
+    payload = json.loads(outbox_path.read_text(encoding="utf-8"))
+    assert payload["checkpoint"]["completed_dod_indices"] == [0, 1, 2, 3, 4]
+    assert all(0 <= i < 5 for i in payload["checkpoint"]["completed_dod_indices"])
 
 
 def test_run_autonomous_requires_goal_or_spec(tmp_path):
@@ -456,8 +844,9 @@ def test_claim_due_waiting_is_atomic_and_cannot_be_claimed_twice(tmp_path):
 
 def test_shutdown_stops_workers(tmp_path):
     cfg = make_cfg(tmp_path)
-    service = OrchestratorService(cfg)
+    service = OrchestratorService(cfg, persistent=True)
 
+    assert service._waiting_worker is not None
     assert service._waiting_worker.is_alive()
 
     service.shutdown()
@@ -465,3 +854,12 @@ def test_shutdown_stops_workers(tmp_path):
     assert service._waiting_worker_stop is True
     assert not service._waiting_worker.is_alive()
 
+
+def test_nonpersistent_service_does_not_start_waiting_worker(tmp_path):
+    cfg = make_cfg(tmp_path)
+    service = OrchestratorService(cfg)
+
+    assert service.auto_resume_active is False
+    assert service._waiting_worker is None
+
+    service.shutdown()

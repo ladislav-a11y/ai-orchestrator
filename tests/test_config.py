@@ -141,7 +141,14 @@ def test_project_inside_workspace_root_subdir_accepted(tmp_path):
 
 def test_default_provider_order():
     cfg = load_config(EXAMPLE, create_if_missing=False)
-    assert cfg.provider_order == ["claude-code", "antigravity", "codex"]
+    assert cfg.provider_order == ["claude-code", "antigravity", "codex", "hermes"]
+
+
+def test_hermes_rejects_non_nous_model(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("hermes:\n  provider: opencode-free\n  model: laguna-s-2.1-free\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="provider=nous"):
+        load_config(path, create_if_missing=False)
 
 
 def test_custom_provider_order_parsed(tmp_path):
@@ -154,6 +161,27 @@ def test_custom_provider_order_parsed(tmp_path):
     assert cfg.provider_order == ["codex", "claude-code"]
 
 
+def test_max_budget_usd_defaults_to_none_for_every_provider():
+    cfg = load_config(EXAMPLE, create_if_missing=False)
+    assert cfg.claude_code.max_budget_usd is None
+    assert cfg.antigravity.max_budget_usd is None
+    assert cfg.codex.max_budget_usd is None
+
+
+def test_max_budget_usd_parsed_per_provider(tmp_path):
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "claude_code:\n  max_budget_usd: 5\n"
+        "antigravity:\n  max_budget_usd: 7.5\n"
+        "codex:\n  max_budget_usd: 3\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_path, create_if_missing=False)
+    assert cfg.claude_code.max_budget_usd == 5
+    assert cfg.antigravity.max_budget_usd == 7.5
+    assert cfg.codex.max_budget_usd == 3
+
+
 def test_invalid_provider_in_provider_order_rejected(tmp_path):
     bad = tmp_path / "config.yaml"
     bad.write_text(
@@ -162,4 +190,3 @@ def test_invalid_provider_in_provider_order_rejected(tmp_path):
     )
     with pytest.raises(ValueError, match="neznámého providera 'unknown-bot'"):
         load_config(bad, create_if_missing=False)
-

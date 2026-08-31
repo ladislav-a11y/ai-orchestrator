@@ -21,6 +21,9 @@ class AgentRunRequest:
     # None on the first attempt.
     context: Optional[str] = None
     session_id: Optional[str] = None  # to resume a previous run of the same task
+    # Optional JSON Schema for the provider's final response. Providers with
+    # native structured output should enforce it; others may rely on prompt.
+    output_schema: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -55,6 +58,12 @@ class AgentRunResult:
     output_tokens: Optional[int] = None
     thinking_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
+    # Provider-attributed usage for every physical CLI call represented by
+    # this result. FailoverAgent preserves limited attempts here as well as
+    # the final provider call, so callers never lose spent tokens on fallback.
+    # ``source`` is ``reported`` for provider metadata; estimates must use a
+    # different explicit value and are never mixed into reported totals.
+    usage_events: list[dict[str, Any]] = field(default_factory=list)
     # True if the provider's failure looks like a quota/rate/session limit
     # rather than an ordinary error (e.g. Antigravity's RESOURCE_EXHAUSTED /
     # "quota has been exceeded" responses) - callers (autonomous.py) can use
@@ -62,6 +71,10 @@ class AgentRunResult:
     # `success` still stays False for a limited response; this is additional
     # detail, not a replacement status enum.
     limited: bool = False
+    # True when the provider process exceeded its configured wall-clock
+    # timeout. This is distinct from a quota limit so FailoverAgent can move
+    # to the next provider without misreporting the cause as LIMITED.
+    timed_out: bool = False
     # Seconds to wait before retrying, when the provider's own response
     # includes that information. None if unknown/not provided.
     retry_after_seconds: Optional[float] = None

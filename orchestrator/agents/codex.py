@@ -8,8 +8,9 @@ Invocation contract (do not weaken this without updating AGENTS.md too):
     earlier version of this adapter passed `--ask-for-approval never`, which
     0.149.0 rejects outright as an unknown argument (the run would fail
     before doing anything) - do not reintroduce it.
-  - always non-interactive: `codex exec --json --cd <project_dir> --sandbox
-    <mode> --ignore-user-config --approve-for-me "<prompt>"`
+  - always non-interactive: the prompt is sent on stdin to `codex exec ... -`
+    so Windows `.cmd` command-line limits cannot truncate long autonomous
+    iteration prompts
     (`--json` makes it emit one JSON object per line on stdout instead of
     human-formatted text; `--ignore-user-config` makes the run's behavior
     depend only on the flags this adapter passes, not on whatever a
@@ -17,12 +18,14 @@ Invocation contract (do not weaken this without updating AGENTS.md too):
     is what actually lets a headless run proceed without a human answering
     approval prompts - it does not by itself widen what's allowed, that is
     still `--sandbox`'s job, see below)
-  - Codex sessions are persisted so the autonomous loop can chain
-    `AgentRunResult.session_id` from one iteration's response into the next
-    iteration's `AgentRunRequest.session_id` and resume the same Codex
-    conversation across an entire run (see autonomous.py). Do not use
-    `--ephemeral`: it disables that persistence and makes the next
-    iteration's `resume` unreliable.
+  - Codex CLI 0.149.0 has a verified `exec resume` permission regression:
+    a fresh `workspace-write` session can run read-only shell commands such
+    as `git status`, but the same session resumed with `codex exec resume`
+    rejects them as `blocked by policy`. Therefore this adapter deliberately
+    ignores incoming Codex `session_id` values and starts each autonomous
+    iteration as a fresh session with the full explicit sandbox/approval
+    flags. Do not re-enable `resume` until the installed CLI can preserve or
+    reapply the same permission context on resumed sessions.
   - NEVER passes `--dangerously-bypass-approvals-and-sandbox` (or its short
     alias `--yolo`) or `--dangerously-bypass-hook-trust` - those flags
     disable the sandbox/approval/hook-trust safety net entirely and are
@@ -74,11 +77,14 @@ Invocation contract (do not weaken this without updating AGENTS.md too):
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 import re
 from datetime import datetime, timedelta
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -264,33 +270,38 @@ class CodexAgent(Agent):
             return False, f"'{self._cli_path} --version' selhalo (kod {proc.returncode}): {proc.stderr.strip()}"
         return True, f"{proc.stdout.strip()} ({self._detect_note})"
 
-    def _build_command(self, request: AgentRunRequest) -> list[str]:
+    def _build_command(
+        self,
+        request: AgentRunRequest,
+        output_schema_path: Optional[Path] = None,
+    ) -> list[str]:
         assert self._cli_path
         cmd = [self._cli_path, "exec"]
-        if request.session_id:
-            # `codex exec resume` has a separate CLI grammar: its options
-            # must precede the session id, and it does not accept --cd or
-            # --sandbox/--approve-for-me. The resumed session retains the
-            # original working directory and permission context.
-            cmd += ["resume", "--json", "--ignore-user-config"]
+        # Codex CLI 0.149.0 reproducibly loses the usable shell permission
+        # context on `exec resume`: even read-only `git status` is rejected
+        # as "blocked by policy". Until resume can preserve/reapply the
+        # sandbox/approval context, every autonomous iteration starts a fresh
+        # Codex session with explicit permissions.
+        cmd += [
+            "--json",
+            "--cd",
+            str(request.project_path),
+            "--ignore-user-config",
+        ]
+        if self.config.sandbox_mode == "read-only":
+            cmd += ["--sandbox", "read-only"]
+        elif self.config.sandbox_mode == "workspace-write":
+            cmd += ["--approve-for-me"]
         else:
-            cmd += [
-                "--json",
-                "--cd",
-                str(request.project_path),
-                "--ignore-user-config",
-            ]
-            if self.config.sandbox_mode == "read-only":
-                cmd += ["--sandbox", "read-only"]
-            elif self.config.sandbox_mode == "workspace-write":
-                cmd += ["--approve-for-me"]
-            else:
-                raise ValueError(f"Unsupported Codex sandbox mode: {self.config.sandbox_mode}")
+            raise ValueError(f"Unsupported Codex sandbox mode: {self.config.sandbox_mode}")
         if self.config.model:
             cmd += ["--model", self.config.model]
-        if request.session_id:
-            cmd += [request.session_id]
-        cmd += [request.prompt]
+        if output_schema_path is not None:
+            cmd += ["--output-schema", str(output_schema_path)]
+        # `codex exec -` reads the prompt from stdin.  Never put an autonomous
+        # prompt on the command line: on Windows the codex.cmd wrapper inherits
+        # cmd.exe's short command-line ceiling and fails before Codex starts.
+        cmd += ["-"]
 
         for forbidden in FORBIDDEN_FLAGS:
             assert forbidden not in cmd, "safety invariant violated: forbidden flag in command"
@@ -310,14 +321,27 @@ class CodexAgent(Agent):
             project_path=request.project_path,
             prompt=prompt,
             session_id=request.session_id,
+            output_schema=request.output_schema,
         )
-        cmd = self._build_command(effective_request)
+
+        output_schema_path: Optional[Path] = None
+        if effective_request.output_schema is not None:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".json",
+                prefix="ai-orchestrator-codex-schema-",
+                delete=False,
+            ) as schema_file:
+                json.dump(effective_request.output_schema, schema_file, ensure_ascii=False)
+                output_schema_path = Path(schema_file.name)
+        cmd = self._build_command(effective_request, output_schema_path)
 
         try:
             proc = subprocess.run(
                 cmd,
                 cwd=str(request.project_path),
-                stdin=subprocess.DEVNULL,
+                input=prompt,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -333,9 +357,13 @@ class CodexAgent(Agent):
                     f"Codex neodpověděl do {self.config.timeout_seconds}s (timeout)."
                     + (f" stderr: {timeout_stderr}" if timeout_stderr else "")
                 ),
+                timed_out=True,
             )
         except FileNotFoundError as e:
             return AgentRunResult(success=False, output_text="", error=f"Nelze spustit CLI: {e}")
+        finally:
+            if output_schema_path is not None:
+                output_schema_path.unlink(missing_ok=True)
 
         events = _iter_events(proc.stdout)
         if not events:
@@ -386,11 +414,22 @@ class CodexAgent(Agent):
                 if msg.get("last_agent_message"):
                     last_agent_message = msg.get("last_agent_message")
 
+        input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("output_tokens")
+        total_tokens = usage.get("total_tokens")
+        if (
+            total_tokens is None
+            and isinstance(input_tokens, int) and not isinstance(input_tokens, bool)
+            and isinstance(output_tokens, int) and not isinstance(output_tokens, bool)
+        ):
+            # Exact arithmetic derivation from reported counters, not a
+            # tokenizer or model-pricing estimate.
+            total_tokens = input_tokens + output_tokens
         token_fields = {
-            "input_tokens": usage.get("input_tokens"),
-            "output_tokens": usage.get("output_tokens"),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
             "thinking_tokens": usage.get("reasoning_output_tokens", usage.get("thinking_tokens")),
-            "total_tokens": usage.get("total_tokens"),
+            "total_tokens": total_tokens,
         }
         raw_response = {"events": events}
 
@@ -440,3 +479,18 @@ class CodexAgent(Agent):
             error=None,
             **token_fields,
         )
+
+
+def contract_fingerprint() -> str:
+    """Stable fingerprint of the code that decides what actually gets sent to
+    the real Codex binary (flags, sandbox mode, --output-schema, stdin usage
+    - see `CodexAgent._build_command`'s docstring/module docstring above).
+
+    Used by `doctor.py`'s live-verification receipt (see AGENTS.md rule 14):
+    a live run's evidence is only trustworthy for as long as this contract
+    hasn't changed underneath it. If `_build_command` is edited, this value
+    changes too, and a previously written receipt is detectably stale -
+    never silently treated as still-valid evidence of the *new* contract.
+    """
+    source = inspect.getsource(CodexAgent._build_command)
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()

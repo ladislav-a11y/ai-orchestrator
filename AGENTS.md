@@ -85,6 +85,22 @@ this file, stop and ask - do not silently override safety rules.
    real chance to recover instead of being falsely declared stuck. Do not
    remove either cap, and do not add a "retry forever" or "ignore the cap"
    option.
+9a. **The autonomous loop must also enforce a per-job, provider-specific
+    financial hard cap, independent of the iteration cap above.**
+    `ClaudeCodeAgentConfig`/`AntigravityAgentConfig`/
+    `CodexAgentConfig.max_budget_usd` (`config.example.yaml`, `None` =
+    unlimited) is checked once per iteration in `run_autonomous_loop`
+    (`_provider_budget_usd`) against this run's own cumulative reported
+    `cost_usd` for the currently active provider - never against a single
+    call's cost, and never triggered by missing/unreported usage data
+    (usage tracking is best-effort). When exceeded, the run fails over to
+    the next configured provider if one is available
+    (`FailoverAgent.force_failover_on_budget_exceeded`, same shape as
+    `force_failover_on_protocol_error`) or otherwise stops immediately with
+    `AutonomousStatus.BUDGET_EXCEEDED` and a Slack notification - it must
+    never keep spending past the configured cap "just this once". Do not
+    remove this check and do not make it opt-out via a flag other than
+    setting `max_budget_usd` to `None`.
 10. **The autonomous loop must never let a malformed agent response burn a
     full extra implementation iteration, and must never trust the executor's
     own completion claim without independent verification.** A protocol
@@ -134,6 +150,125 @@ this file, stop and ask - do not silently override safety rules.
     backstopped the same way by rule 1's sandbox/approval guarantee - a
     denied `git commit` from a sandboxed run comes back as an ordinary
     `error` event, not a hang or a silent allow.
+11a. **Existing-state verification is not commit work.** A DoD item that
+     checks the current HEAD, status, diff, remote, push evidence, or test
+     sequence belongs to the independent audit phase and must explicitly say
+     that no new commit is required. Only an explicit pending controller-
+     finalization item may invoke the controller finalizer; otherwise the
+     validator must not infer a new-commit requirement from evidence wording.
+     When an audit rejects a card, its concrete feedback is persisted by the
+     Project Manager and the next scheduler tick is the only retry boundary.
+11b. **Independent audit execution is ai-orchestrator-only.** Agents may
+     implement and provide evidence, while AI Project Manager may route and
+     persist the result; neither may issue, infer, simulate, or replace the
+     independent `accepted`/`rejected` verdict.
+11c. **Test execution belongs to the orchestrator audit path.** A DoD item
+     that asks to run regression tests or a test suite must be marked as
+     `phase='audit'`; the implementation agent is not dispatched with such an
+     item because the orchestrator runs and evaluates the configured test
+     command after implementation. This prevents an agent from repeatedly
+     leaving an impossible test item open and exhausting the iteration cap.
+11d. **Security-boundary repairs must be deterministic, not an endless pattern chase.**
+     `poc/hermes_agent/security.py` uses an explicit read-only command allowlist
+     plus fail-closed syntax classification; it must reject command-shaped
+     inputs outside that allowlist, including interpreter execution, mutation,
+     redirection, module-loading, and encoded-command forms. A new audit finding
+     must first become a category-level regression test and the implementation
+     must fix the boundary mechanism, not append only the newly quoted command.
+     Do not start another PM/audit tick after the same security class is rejected
+     until the local category test passes and the contract wording remains true.
+12. **A repeated protocol error must never be allowed to run indefinitely,
+    even though it is excluded from the no-progress signature.** Rule 9
+    correctly excludes a protocol error from `NO_PROGRESS_LIMIT` (an agent
+    that garbles its output format is not the same as an agent that is
+    stuck) - but that exclusion must not become a loophole. Incident run
+    `7fffd21835174d9fb9a29237c897f6d2`: Codex made real changes and passed
+    tests in iterations 1-7, but never once returned the required DoD JSON,
+    the one cheap repair reprompt (rule 10) also failed every time, and the
+    run kept starting brand-new full implementation iterations against an
+    unchanged DoD until it burned through the whole provider usage limit.
+    `run_autonomous_loop` tracks *consecutive* unresolved protocol errors
+    separately (`PROTOCOL_ERROR_STREAK_LIMIT`, deliberately lower than
+    `NO_PROGRESS_LIMIT`); once that streak is hit, it first tries
+    `agent.force_failover_on_protocol_error()` (see
+    `orchestrator/agents/failover.py`'s `FailoverAgent` - a repeated
+    protocol violation gets the same right to fail over to another
+    configured provider as a quota/rate limit does), and only stops the run
+    (status `AutonomousStatus.PROTOCOL_ERROR`) if no other provider is
+    configured/available. Do not raise `PROTOCOL_ERROR_STREAK_LIMIT` to
+    match `NO_PROGRESS_LIMIT`, and do not remove the failover attempt.
+13. **`WAITING_FOR_PROVIDER` must never look or be reported like ordinary
+    silent progress, and never leave a stale queue row behind.** Incident
+    `cb501524e47e` (26.8.2026): every configured provider was LIMITED, the
+    orchestrator correctly saved a waiting task, but AI Project Manager only
+    saw a generic `in_progress`-looking state with no Slack message and no
+    indication of whether anything would resume on its own. Three
+    invariants keep this from recurring:
+    - `OrchestratorService.run_autonomous` always looks up any existing
+      WAITING_FOR_PROVIDER/RUNNING queue row for the same project+spec
+      (`existing_waiting_task`, via `queue.find_active_autonomous`) and
+      reconciles it - not just when the internal `_waiting_worker` passes
+      `_waiting_task` explicitly. AI Project Manager drives this CLI as a
+      brand-new one-shot process per invocation (see README ch.9), so a
+      completed/blocked/errored re-run from a *different* process instance
+      must still close out the row the previous invocation left waiting -
+      never leave it stuck at `WAITING_FOR_PROVIDER` forever.
+    - `OrchestratorService.auto_resume_active` (constructor `persistent`
+      flag) must stay `False` for the CLI's plain `OrchestratorService()`
+      (`autonomous`/`run`) and `True` only for the long-running
+      `orchestrator.py api` process (see `api.py`'s `get_service()`) - it is
+      what the CLI output, the Slack notification, and
+      `outbox/autonomous-<run_id>.json`'s `auto_resume_active` field use to
+      tell the caller whether anything will resume this run on its own.
+      Never hardcode it to `True`: the CLI process exits right after
+      printing the result, so its own waiting-worker thread never gets a
+      chance to fire.
+    - Both `FailoverAgent.run()`'s per-provider exhaustion notification and
+      `OrchestratorService.run_autonomous`'s run-level notification must go
+      through `slack_notify.notify()` on every WAITING_FOR_PROVIDER outcome
+      - the former naming each provider's individual status and nearest
+      known reset (`_describe_status_for_notify`/`_format_duration`), the
+      latter naming the run/project/retry time and the auto-resume state
+      above. Do not collapse these into a single generic "providers
+      exhausted" line with no per-provider detail again.
+14. **Verifying the real Codex CLI contract against the live binary is a
+    manual step - never something an autonomous iteration or the default
+    test suite does on its own.** Two equivalent, read-only, file-change-free
+    entry points exist for this, both forcing `--sandbox read-only`
+    regardless of the configured default and both failing closed (never
+    reporting success) if anything in the target directory changes:
+    - `orchestrator.py doctor --live` (`doctor._check_codex_live` in
+      doctor.py) - the same entry point already used for the equivalent
+      Claude Code `doctor --live` login-verification step, now covering
+      Codex too. This is the one to actually run by hand.
+    - `tests/test_codex_agent.py::
+      test_live_smoke_reads_project_state_without_changes` (mirrors the
+      equivalent Antigravity live smoke test), gated behind
+      `AI_ORCHESTRATOR_RUN_LIVE_CODEX_TEST=1` so it never runs under plain
+      `pytest` (see the "Style and scope" rule below: tests must not call a
+      live paid API by default) - useful in a CI job that isn't set up to
+      call `orchestrator.py doctor`.
+    Neither runs inside an autonomous dev iteration, which has neither
+    permission to invoke a live provider CLI nor permission to run tests
+    itself - test execution is exclusively the orchestrator's/a human's job.
+    See README.md "Ověření reálného Codex CLI kontraktu" for both commands.
+    `doctor._check_codex_live`'s own correctness (schema validation, and
+    that a mutated directory is reported as a broken contract rather than
+    silently accepted) is covered by ordinary, always-run unit tests in
+    tests/test_doctor.py that fake `CodexAgent.run()` - only the real network
+    call to the live binary itself is the part that needs a human/CI to
+    actually trigger it once.
+15. **Every operational step must contain one independent command and wait
+    for its complete output before the next step.** Do not concatenate
+    independent actions with `;`, `&&`, `||`, or a pipeline. If a command
+    fails, stop and diagnose the new state instead of repeating it unchanged.
+16. **Whitespace and encoding checks are mandatory and scoped.** Files
+    changed by the current task must remain UTF-8 without BOM, LF, without
+    trailing whitespace, and without an accidental extra blank line at EOF;
+    `git --no-pager diff --check` must be clean for those files before a
+    commit. If the check reports a pre-existing violation in an unrelated
+    dirty file, record it as pre-existing and do not silently modify that
+    file as part of the current task.
 
 ## When adding a new agent/provider (e.g. OpenAI Codex)
 

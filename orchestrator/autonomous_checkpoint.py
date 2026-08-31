@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from orchestrator.spec_text import normalize_spec_text
+from orchestrator.spec_text import extract_pm_checkpoint, normalize_spec_text
 
 CHECKPOINT_SUBDIR = "autonomous_checkpoints"
 
@@ -54,6 +54,9 @@ class DoDCheckpoint:
     items: list[dict]
     run_id: str
     saved_at: str
+    usage_events: list[dict] | None = None
+    usage_by_provider: dict[str, dict] | None = None
+    usage_total: dict | None = None
 
 
 def _fingerprint(text: str) -> str:
@@ -114,6 +117,9 @@ def load_checkpoint(data_dir: Path, project_path: Path, dod_source: str) -> Opti
         items=items,
         run_id=raw.get("run_id") or "",
         saved_at=raw.get("saved_at") or "",
+        usage_events=raw.get("usage_events") if isinstance(raw.get("usage_events"), list) else [],
+        usage_by_provider=raw.get("usage_by_provider") if isinstance(raw.get("usage_by_provider"), dict) else {},
+        usage_total=raw.get("usage_total") if isinstance(raw.get("usage_total"), dict) else {},
     )
 
 
@@ -134,13 +140,81 @@ def apply_checkpoint(dod_items: list, checkpoint: DoDCheckpoint) -> int:
     saved_items = checkpoint.items
     if len(saved_items) != len(dod_items):
         return 0
-    for item, saved in zip(dod_items, saved_items):
+    for expected_index, (item, saved) in enumerate(zip(dod_items, saved_items)):
         if not isinstance(saved, dict) or saved.get("text") != item.text:
+            return 0
+        expected_live = (
+            {"command": item.live_command, "expect": item.live_expected}
+            if getattr(item, "live_command", None) is not None else None
+        )
+        if saved.get("live_verification") != expected_live:
+            return 0
+        # Checkpoints are position based and normally omit an explicit
+        # index. If an external producer includes one, it must match this
+        # exact position; stale PM-DATA/outbox indices must never be mapped
+        # onto a different Definition of Done.
+        saved_index = saved.get("index", expected_index)
+        if not (
+            isinstance(saved_index, int)
+            and not isinstance(saved_index, bool)
+            and saved_index == expected_index
+        ):
+            return 0
+        # Avoid Python truthiness turning a corrupt string such as "false"
+        # into verified progress.
+        if not isinstance(saved.get("done"), bool):
             return 0
 
     restored = 0
     for item, saved in zip(dod_items, saved_items):
-        if bool(saved.get("done")) and not item.done:
+        evidence = saved.get("live_evidence")
+        if evidence is not None and not isinstance(evidence, dict):
+            return 0
+        item.live_evidence = evidence
+        if saved["done"] and not item.done:
+            # A live item is only restorable with a persisted positive
+            # result; a bare done=true is never enough.
+            if item.live_command is None or (
+                isinstance(evidence, dict) and evidence.get("passed") is True
+            ):
+                item.done = True
+                restored += 1
+    return restored
+
+
+def apply_pm_checkpoint(dod_items: list, spec_text: str) -> Optional[int]:
+    """Apply explicit controller state from the PM spec envelope.
+
+    ``None`` means no checkpoint was supplied and a caller may use the local
+    durable checkpoint.  Any integer, including zero, is authoritative PM
+    state and must suppress local stale completion.  Invalid shapes fail
+    closed to zero restored items.
+    """
+    envelope = extract_pm_checkpoint(spec_text)
+    if envelope is None or "checkpoint" not in envelope:
+        return None
+    checkpoint = envelope.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        return 0
+    indices = checkpoint.get("completed_dod_indices", [])
+    if not isinstance(indices, list) or any(
+        not isinstance(index, int)
+        or isinstance(index, bool)
+        or index < 0
+        or index >= len(dod_items)
+        for index in indices
+    ):
+        return 0
+
+    restored = 0
+    for index in sorted(set(indices)):
+        item = dod_items[index]
+        evidence = getattr(item, "live_evidence", None)
+        if item.live_command is not None and not (
+            isinstance(evidence, dict) and evidence.get("passed") is True
+        ):
+            continue
+        if not item.done:
             item.done = True
             restored += 1
     return restored
@@ -153,6 +227,9 @@ def save_checkpoint(
     goal: str,
     dod_items: list,
     run_id: str,
+    usage_events: Optional[list[dict]] = None,
+    usage_by_provider: Optional[dict[str, dict]] = None,
+    usage_total: Optional[dict] = None,
 ) -> Path:
     """Persist the orchestrator's current, verified DoD state. Called after
     every iteration (not just at the end of a run) so progress survives
@@ -165,9 +242,23 @@ def save_checkpoint(
         "project_path": str(Path(project_path).resolve()),
         "spec_hash": _fingerprint(normalize_spec_text(dod_source) or ""),
         "goal": goal,
-        "items": [{"text": item.text, "done": item.done} for item in dod_items],
+        "items": [
+            {
+                "text": item.text,
+                "done": item.done,
+                "live_verification": (
+                    {"command": item.live_command, "expect": item.live_expected}
+                    if getattr(item, "live_command", None) is not None else None
+                ),
+                "live_evidence": getattr(item, "live_evidence", None),
+            }
+            for item in dod_items
+        ],
         "run_id": run_id,
         "saved_at": datetime.now(timezone.utc).isoformat(),
+        "usage_events": usage_events or [],
+        "usage_by_provider": usage_by_provider or {},
+        "usage_total": usage_total or {},
     }
     tmp_path = path.with_name(path.name + f".{run_id}.tmp")
     tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

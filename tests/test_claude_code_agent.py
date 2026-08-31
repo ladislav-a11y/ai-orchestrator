@@ -64,6 +64,11 @@ def test_run_success(monkeypatch):
             "result": "hotovo",
             "session_id": "abc123",
             "total_cost_usd": 0.01,
+            "usage": {
+                "input_tokens": 48,
+                "output_tokens": 12,
+                "output_tokens_details": {"thinking_tokens": 5},
+            },
         }
     )
 
@@ -77,6 +82,39 @@ def test_run_success(monkeypatch):
     assert result.output_text == "hotovo"
     assert result.session_id == "abc123"
     assert result.cost_usd == 0.01
+    assert result.input_tokens == 48
+    assert result.output_tokens == 12
+    assert result.thinking_tokens == 5
+    assert result.total_tokens == 60
+
+
+def test_run_ignores_missing_or_malformed_usage(monkeypatch):
+    agent = ClaudeCodeAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    fake_stdout = json.dumps(
+        {
+            "is_error": False,
+            "result": "hotovo",
+            "usage": {
+                "input_tokens": "unknown",
+                "output_tokens": True,
+                "total_tokens": {},
+                "output_tokens_details": "unknown",
+            },
+        }
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.success is True
+    assert result.input_tokens is None
+    assert result.output_tokens is None
+    assert result.thinking_tokens is None
+    assert result.total_tokens is None
 
 
 def test_run_reports_agent_error(monkeypatch):
@@ -210,6 +248,7 @@ def test_run_timeout(monkeypatch):
     result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
     assert result.success is False
     assert "timeout" in result.error.lower()
+    assert result.timed_out is True
 
 
 def test_run_plaintext_weekly_limit_on_stdout_maps_to_limited(monkeypatch):

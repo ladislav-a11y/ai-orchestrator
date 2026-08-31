@@ -13,6 +13,12 @@ def test_is_git_repo_false(tmp_path):
     assert git_utils.is_git_repo(not_a_repo) is False
 
 
+def test_is_git_repo_false_for_subdirectory_of_repo(git_repo):
+    nested_directory = git_repo / "nested"
+    nested_directory.mkdir()
+    assert git_utils.is_git_repo(nested_directory) is False
+
+
 def test_no_changes_initially(git_repo):
     assert git_utils.has_uncommitted_changes(git_repo) is False
 

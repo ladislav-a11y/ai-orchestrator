@@ -44,11 +44,14 @@ ANTIGRAVITY_ALLOWED_MODES = {"accept-edits", "plan", ""}
 # read-only/inspection run.
 CODEX_ALLOWED_SANDBOX_MODES = {"read-only", "workspace-write"}
 
+HERMES_PROVIDER = "nous"
+HERMES_FREE_MODEL = "upstage/solar-pro4:free"
+
 # Supported provider implementations in the orchestrator registry.
-AVAILABLE_AGENTS = ["claude-code", "antigravity", "codex"]
+AVAILABLE_AGENTS = ["claude-code", "antigravity", "codex", "hermes"]
 
 # Default provider failover order for autonomous mode.
-DEFAULT_PROVIDER_ORDER = ["claude-code", "antigravity", "codex"]
+DEFAULT_PROVIDER_ORDER = ["claude-code", "antigravity", "codex", "hermes"]
 
 
 
@@ -67,7 +70,9 @@ class ClaudeCodeAgentConfig:
     allowed_tools: list[str] = field(default_factory=list)
     disallowed_tools: list[str] = field(default_factory=list)
     max_budget_usd: Optional[float] = None
-    timeout_seconds: int = 1800
+    # Ten-minute wall-clock cap prevents a stalled provider from consuming
+    # the whole autonomous tick; FailoverAgent can then try the next one.
+    timeout_seconds: int = 600
 
 
 @dataclass
@@ -80,7 +85,14 @@ class AntigravityAgentConfig:
     # --dangerously-skip-permissions flag, which this adapter never passes
     # regardless of config (see orchestrator/agents/antigravity.py).
     mode: str = "accept-edits"
-    timeout_seconds: int = 1800
+    # Per-job hard cap on this provider's reported spend, in USD - same
+    # enforcement as ClaudeCodeAgentConfig.max_budget_usd (see there and
+    # autonomous.py's _provider_budget_usd/BUDGET_EXCEEDED): the orchestrator
+    # itself tracks cumulative reported cost_usd for this provider across a
+    # single autonomous run and fails over/stops once it is exceeded, so a
+    # provider-side lack of a matching CLI flag is not a gap. None = no limit.
+    max_budget_usd: Optional[float] = None
+    timeout_seconds: int = 600
 
 
 @dataclass
@@ -93,7 +105,20 @@ class CodexAgentConfig:
     # config.py rejects that at load time, and this adapter never passes
     # --dangerously-bypass-approvals-and-sandbox regardless of this setting.
     sandbox_mode: str = "workspace-write"
-    timeout_seconds: int = 1800
+    # Per-job hard cap on this provider's reported spend, in USD - see
+    # AntigravityAgentConfig.max_budget_usd for the shared rationale. None =
+    # no limit.
+    max_budget_usd: Optional[float] = None
+    timeout_seconds: int = 600
+
+
+@dataclass
+class HermesAgentConfig:
+    cli_path: str = ""  # empty = auto-detect Hermes CLI
+    # Hard policy: only the Nous free model is accepted by load_config and
+    # HermesAgent. No provider/model fallback is allowed for Hermes.
+    model: str = HERMES_FREE_MODEL
+    timeout_seconds: int = 600
 
 
 @dataclass
@@ -136,6 +161,7 @@ class Config:
     claude_code: ClaudeCodeAgentConfig = field(default_factory=ClaudeCodeAgentConfig)
     antigravity: AntigravityAgentConfig = field(default_factory=AntigravityAgentConfig)
     codex: CodexAgentConfig = field(default_factory=CodexAgentConfig)
+    hermes: HermesAgentConfig = field(default_factory=HermesAgentConfig)
     git: GitConfig = field(default_factory=GitConfig)
     testing: TestingConfig = field(default_factory=TestingConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -249,7 +275,7 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         allowed_tools=list(cc_raw.get("allowed_tools", []) or []),
         disallowed_tools=list(cc_raw.get("disallowed_tools", []) or []),
         max_budget_usd=cc_raw.get("max_budget_usd"),
-        timeout_seconds=int(cc_raw.get("timeout_seconds", 1800)),
+        timeout_seconds=int(cc_raw.get("timeout_seconds", 600)),
     )
 
     ag_raw = raw.get("antigravity") or {}
@@ -264,7 +290,8 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         cli_path=ag_raw.get("cli_path", ""),
         model=ag_raw.get("model", ""),
         mode=antigravity_mode,
-        timeout_seconds=int(ag_raw.get("timeout_seconds", 1800)),
+        max_budget_usd=ag_raw.get("max_budget_usd"),
+        timeout_seconds=int(ag_raw.get("timeout_seconds", 600)),
     )
 
     codex_raw = raw.get("codex") or {}
@@ -279,7 +306,22 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         cli_path=codex_raw.get("cli_path", ""),
         model=codex_raw.get("model", ""),
         sandbox_mode=codex_sandbox_mode,
-        timeout_seconds=int(codex_raw.get("timeout_seconds", 1800)),
+        max_budget_usd=codex_raw.get("max_budget_usd"),
+        timeout_seconds=int(codex_raw.get("timeout_seconds", 600)),
+    )
+
+    hermes_raw = raw.get("hermes") or {}
+    hermes_model = str(hermes_raw.get("model", HERMES_FREE_MODEL))
+    hermes_provider = str(hermes_raw.get("provider", HERMES_PROVIDER)).strip().lower()
+    if hermes_provider != HERMES_PROVIDER or hermes_model != HERMES_FREE_MODEL:
+        raise ValueError(
+            "Hermes smí používat pouze provider=nous a model=upstage/solar-pro4:free; "
+            f"nalezeno provider={hermes_provider!r}, model={hermes_model!r}."
+        )
+    hermes = HermesAgentConfig(
+        cli_path=hermes_raw.get("cli_path", ""),
+        model=hermes_model,
+        timeout_seconds=int(hermes_raw.get("timeout_seconds", 600)),
     )
 
     git_raw = raw.get("git") or {}
@@ -342,6 +384,7 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         claude_code=claude_code,
         antigravity=antigravity,
         codex=codex,
+        hermes=hermes,
         git=git,
         testing=testing,
         api=api,

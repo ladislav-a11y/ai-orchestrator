@@ -14,6 +14,7 @@ provider_order:
   - claude-code
   - antigravity
   - codex
+  - hermes
 
 
 # Kořen pracovního prostoru: hranice, mimo kterou orchestrátor (a jím řízený
@@ -66,7 +67,7 @@ claude_code:
   # ale i tak hlídá běžné rozpočtové chování Claude Code).
   max_budget_usd: null
   # Po kolika sekundách bez odpovědi orchestrátor běh Claude Code ukončí.
-  timeout_seconds: 1800
+  timeout_seconds: 600
 
 # Nastavení agenta Antigravity (lokální CLI "agy"). Vybere se buď jako
 # default_agent výše, nebo za běhu přepínačem "--agent antigravity".
@@ -81,8 +82,12 @@ antigravity:
   # co by odpovídalo "--dangerously-skip-permissions" - ten přepínač adapter
   # nikdy nepoužije bez ohledu na tuto hodnotu.
   mode: accept-edits
+  # Tvrdý strop reportované útraty za jeden autonomní běh (job) v USD -
+  # hlídá to orchestrátor sám (kumulativní cost_usd napříč iteracemi tohoto
+  # providera v rámci jednoho běhu), ne CLI "agy". null = bez limitu.
+  max_budget_usd: null
   # Po kolika sekundách bez odpovědi orchestrátor běh Antigravity ukončí.
-  timeout_seconds: 1800
+  timeout_seconds: 600
 
 # Nastavení agenta OpenAI Codex (lokální CLI "codex"). Vybere se buď jako
 # default_agent výše, nebo za běhu přepínačem "--agent codex".
@@ -99,8 +104,20 @@ codex:
   # --dangerously-bypass-approvals-and-sandbox (ten adapter nikdy nepoužije
   # bez ohledu na tuto hodnotu) by to znamenalo obejití sandboxu.
   sandbox_mode: workspace-write
+  # Tvrdý strop reportované útraty za jeden autonomní běh (job) v USD -
+  # hlídá to orchestrátor sám (kumulativní cost_usd napříč iteracemi tohoto
+  # providera v rámci jednoho běhu), ne CLI "codex". null = bez limitu.
+  max_budget_usd: null
   # Po kolika sekundách bez odpovědi orchestrátor běh Codexu ukončí.
-  timeout_seconds: 1800
+  timeout_seconds: 600
+
+# Nastavení Hermes Agentu. Hermes je záměrně Nous-only: žádný jiný provider
+# ani model nesmí být použit jako jeho fallback.
+hermes:
+  cli_path: ""
+  provider: nous
+  model: upstage/solar-pro4:free
+  timeout_seconds: 600
 
 # Git integrace.
 git:

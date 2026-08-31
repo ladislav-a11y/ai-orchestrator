@@ -127,6 +127,14 @@ def write_autonomous_log(logs_dir: Path, run_id: str, project: str, goal: str, r
         if it.note:
             lines += ["", f"poznámka: {it.note}"]
 
+    lines += ["", "--- spotřeba AI (metadata providerů) ---"]
+    if result.usage_by_provider:
+        for provider, usage in result.usage_by_provider.items():
+            lines.append(f"{provider}: {usage}")
+        lines.append(f"celkem: {result.usage_total}")
+    else:
+        lines.append("Provider nevrátil usage metadata; běh tím nebyl označen jako chyba.")
+
     if result.committed:
         lines += ["", "--- commit ---", f"hash: {result.commit_hash}"]
     if result.error:

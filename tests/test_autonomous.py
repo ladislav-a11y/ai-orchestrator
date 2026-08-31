@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 
 from orchestrator.agents.base import Agent, AgentRunResult
 from orchestrator.autonomous import (
@@ -8,13 +9,30 @@ from orchestrator.autonomous import (
     AutonomousStatus,
     DOD_BATCH_SIZE,
     NO_PROGRESS_LIMIT,
+    PROTOCOL_ERROR_STREAK_LIMIT,
     _extract_json,
+    _build_audit_prompt,
+    _controller_audit_gate_indices,
+    controller_finalization_from_spec,
     parse_definition_of_done,
     run_autonomous_loop,
 )
 from orchestrator.config import Config, GitConfig
 
 LOGGER = logging.getLogger("test")
+
+
+def _audit_response(request, *, accepted=True, index=None, evidence="audit evidence"):
+    indices = [int(value) for value in re.findall(r"(?m)^(\d+)\. ", request.prompt)]
+    if index is not None:
+        indices = [index]
+    return json.dumps({
+        "items": [
+            {"index": value, "accepted": accepted, "evidence": evidence}
+            for value in indices
+        ],
+        "notes": "audit ok",
+    })
 
 
 class FakeAgent(Agent):
@@ -40,10 +58,198 @@ def _confirming_audit_or(executor_run_fn):
 
     def run_fn(request):
         if AUDIT_MARKER in request.prompt:
-            return AgentRunResult(success=True, output_text='{"rejected_indices": [], "notes": "audit ok"}')
+            return AgentRunResult(success=True, output_text=_audit_response(request))
         return executor_run_fn(request)
 
     return run_fn
+
+
+def test_orchestrator_owns_executor_and_audit_output_contracts(tmp_path):
+    requests = []
+
+    def run_fn(request):
+        requests.append(request)
+        if AUDIT_MARKER in request.prompt:
+            return AgentRunResult(
+                success=True,
+                output_text=_audit_response(request),
+            )
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+        )
+
+    result = run_autonomous_loop(
+        run_id="schema-contract",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=parse_definition_of_done("- [ ] bod A"),
+        config=Config(),
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=1,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert len(requests) == 2
+    assert requests[0].output_schema["properties"]["items"]["items"]["properties"]["index"]["enum"] == [0]
+    audit_items = requests[1].output_schema["properties"]["items"]
+    assert audit_items["minItems"] == audit_items["maxItems"] == 1
+    assert audit_items["items"]["properties"]["index"]["enum"] == [0]
+    # Codex native structured outputs support only a strict JSON Schema
+    # subset. ``uniqueItems`` makes ``codex exec`` reject the audit schema
+    # before the auditor can run. Duplicate indices are normalized by the
+    # audit parser already, so that unsupported keyword is unnecessary.
+    assert "uniqueItems" not in audit_items
+    assert AUDIT_MARKER not in requests[0].prompt
+    assert AUDIT_MARKER in requests[1].prompt
+
+
+def test_implementation_only_completes_before_audit(tmp_path):
+    requests = []
+
+    def run_fn(request):
+        requests.append(request)
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+        )
+
+    result = run_autonomous_loop(
+        run_id="implementation-only",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=parse_definition_of_done("- [ ] bod A"),
+        config=Config(),
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=1,
+        auto_commit_requested=False,
+        implementation_only=True,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert len(requests) == 1
+    assert AUDIT_MARKER not in requests[0].prompt
+    assert len(result.iterations) == 1
+    assert result.iterations[0].audit_performed is False
+    assert result.committed is False
+    assert all(item.done for item in result.dod_items)
+
+
+def test_audit_prompt_includes_successful_test_output():
+    dod = parse_definition_of_done("- [x] testy projdou")
+    prompt = _build_audit_prompt(
+        "cil",
+        dod,
+        " M feature.py",
+        "python -m pytest -q",
+        True,
+        "324 passed, 4 skipped in 30.77s",
+    )
+
+    assert "324 passed, 4 skipped in 30.77s" in prompt
+
+
+def test_controller_owned_audit_gate_does_not_repeat_executor(tmp_path):
+    requests = []
+
+    def run_fn(request):
+        requests.append(request)
+        if AUDIT_MARKER in request.prompt:
+            return AgentRunResult(
+                success=True,
+                output_text=_audit_response(request),
+            )
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "implemented"}',
+        )
+
+    result = run_autonomous_loop(
+        run_id="controller-audit-gate",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=parse_definition_of_done(
+            "- [ ] implementace\n"
+            "- [ ] plnÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ testovacÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­ sada projde a ai-orchestrator vydÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ accepted/rejected verdikt"
+        ),
+        config=Config(),
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=5,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert len(requests) == 2
+    assert result.iterations[0].requested_indices == [0]
+    assert all(item.done for item in result.dod_items)
+
+
+def test_czech_independent_audit_gate_is_controller_owned():
+    items = parse_definition_of_done(
+        "- [ ] implementace\n- [ ] plné testy a nezávislý audit projdou"
+    )
+
+    assert _controller_audit_gate_indices(items) == {1}
+
+
+def test_controller_finalization_is_extracted_only_for_audit_specs():
+    proof = {"status": "completed", "done": True, "commit_hash": "abc"}
+    spec = json.dumps({"mode": "audit", "checkpoint": {"finalization": proof}})
+
+    assert controller_finalization_from_spec(spec) == proof
+    assert controller_finalization_from_spec(spec.replace('"audit"', '"autonomous"')) is None
+
+
+def test_controller_finalization_audit_skips_provider_when_proof_is_current(git_repo, tmp_path):
+    import subprocess
+
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=git_repo, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "HEAD"], cwd=git_repo, check=True, capture_output=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=git_repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=git_repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    proof = {
+        "status": "completed", "done": True, "committed": False,
+        "clean": True, "tests_passed": True, "pushed": True,
+        "commit_hash": head, "remote_commit": head,
+        "branch": branch, "remote": str(remote),
+    }
+    calls = []
+
+    def provider_must_not_run(request):
+        calls.append(request)
+        raise AssertionError("controller audit must not call a provider")
+
+    result = run_autonomous_loop(
+        run_id="controller-finalization-audit",
+        project_path=git_repo,
+        goal="audit",
+        dod_items=parse_definition_of_done("- [x] hotovo"),
+        config=Config(),
+        agent=FakeAgent(provider_must_not_run),
+        logger=LOGGER,
+        test_command='python -c "print(123)"',
+        max_iterations=1,
+        auto_commit_requested=False,
+        controller_finalization=proof,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert result.iterations[0].audit_performed is True
+    assert result.iterations[0].audit_rejected_indices == []
+    assert calls == []
 
 
 # -- Definition of Done parsing ----------------------------------------------
@@ -56,6 +262,35 @@ def test_parse_definition_of_done_checklist():
     assert items[1].done is False
     assert items[2].done is False
 
+
+def test_parse_definition_of_done_inline_trello_checklist():
+    spec = (
+        "CIL: Opravit orchestrator.\n\n"
+        "DEFINITION OF DONE: [ ] jedna neplatna odpoved => max 1 repair "
+        "[x] opakovany protocol_error nezpusobi 7-10 plnych iteraci "
+        "[ ] moznost failoveru na jineho providera "
+        "[ ] checkpoint zachovan"
+    )
+    items = parse_definition_of_done(spec)
+    assert [i.text for i in items] == [
+        "jedna neplatna odpoved => max 1 repair",
+        "opakovany protocol_error nezpusobi 7-10 plnych iteraci",
+        "moznost failoveru na jineho providera",
+        "checkpoint zachovan",
+    ]
+    assert [i.done for i in items] == [False, True, False, False]
+
+
+def test_parse_definition_of_done_deduplicates_goal_and_rendered_checklist():
+    spec = (
+        "## Goal\nDEFINITION OF DONE: [ ] bod A [ ] bod B\n\n"
+        "## Definition of Done\n- [ ] bod A\n- [ ] bod B\n"
+    )
+
+    items = parse_definition_of_done(spec)
+
+    assert [item.text for item in items] == ["bod A", "bod B"]
+    assert [item.done for item in items] == [False, False]
 
 def test_parse_definition_of_done_plain_goal_is_single_item():
     items = parse_definition_of_done("Aplikace umi prihlasit uzivatele")
@@ -92,7 +327,101 @@ def test_parse_definition_of_done_ignores_headings_and_prose():
     assert [i.done for i in items] == [False, True, False, True]
 
 
-# -- success: DoD splněná, testy prošly -> completed + commit -----------------
+def test_parse_live_evidence_contract_and_external_result():
+    spec = (
+        '- [x] Produkcni health check '
+        '<!-- LIVE-EVIDENCE: {"command":"GET /health","expect":"ok"} -->\n'
+        '<!-- LIVE-RESULT: {"index":0,"exit_code":0,"output":"status: ok"} -->'
+    )
+    item = parse_definition_of_done(spec)[0]
+    assert item.text == "Produkcni health check"
+    assert item.live_command == "GET /health"
+    assert item.live_expected == "ok"
+    assert item.done is True
+    assert item.live_evidence["passed"] is True
+
+
+def test_live_item_without_or_with_failed_evidence_stays_open():
+    declaration = (
+        '- [x] Produkcni label '
+        '<!-- LIVE-EVIDENCE: {"command":"read Trello labels","expect":"project_key"} -->'
+    )
+    missing = parse_definition_of_done(declaration)[0]
+    assert missing.done is False
+    assert missing.live_evidence is None
+
+    failed = parse_definition_of_done(
+        declaration + '\n<!-- LIVE-RESULT: {"index":0,"exit_code":0,"output":"no labels"} -->'
+    )[0]
+    assert failed.done is False
+    assert failed.live_evidence["passed"] is False
+
+
+def test_local_tests_and_agent_claim_cannot_close_live_item(tmp_path):
+    dod = parse_definition_of_done(
+        '- [ ] Produkcni stav '
+        '<!-- LIVE-EVIDENCE: {"command":"read production","expect":"ready"} -->'
+    )
+
+    def executor(request):
+        return AgentRunResult(
+            success=True,
+            output_text='{"items":[{"index":0,"done":true}],"notes":"lokalne hotovo"}',
+        )
+
+    result = run_autonomous_loop(
+        run_id="live-gate-fail", project_path=tmp_path, goal="over produkci",
+        dod_items=dod, config=Config(), agent=FakeAgent(executor), logger=LOGGER,
+        test_command='python -c "print(123)"', max_iterations=1,
+        auto_commit_requested=False,
+    )
+    assert result.status == AutonomousStatus.MAX_ITERATIONS
+    assert result.iterations[0].tests_passed is True
+    assert result.dod_items[0].done is False
+    assert result.iterations[0].audit_performed is False
+
+
+def test_run_autonomous_completes_when_live_evidence_satisfied(git_repo):
+    # Mirror-image regression of test_local_tests_and_agent_claim_cannot_close_live_item:
+    # once AI Project Manager (or an operator) has performed the declared
+    # read-only check and recorded a passing LIVE-RESULT *before* this run
+    # even starts, parse_definition_of_done already marks the item done, so
+    # the run must not stay stuck open forever - it should skip straight to
+    # test+audit verification (no unmet indices to send an executor prompt
+    # about) and reach COMPLETED, same as any other satisfied DoD item.
+    dod = parse_definition_of_done(
+        '- [x] Produkcni stav '
+        '<!-- LIVE-EVIDENCE: {"command":"read production","expect":"ready"} -->\n'
+        '<!-- LIVE-RESULT: {"index":0,"exit_code":0,"output":"stav: ready"} -->'
+    )
+    assert dod[0].done is True
+    assert dod[0].live_evidence["passed"] is True
+
+    executor_calls = []
+
+    def executor(request):
+        executor_calls.append(request)
+        return AgentRunResult(success=True, output_text='{"items":[],"notes":"nic k reseni"}')
+
+    cfg = Config()
+    cfg.git = GitConfig(auto_commit=True)
+
+    result = run_autonomous_loop(
+        run_id="live-gate-pass", project_path=git_repo, goal="over produkci",
+        dod_items=dod, config=cfg, agent=FakeAgent(_confirming_audit_or(executor)), logger=LOGGER,
+        test_command=None, max_iterations=1, auto_commit_requested=True,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert result.dod_items[0].done is True
+    assert result.dod_items[0].live_evidence["passed"] is True
+    assert result.iterations[0].audit_performed is True
+    # Nothing was unmet, so the (expensive) executor prompt must have been
+    # skipped entirely - only the independent audit call was made.
+    assert executor_calls == []
+
+
+# -- success: DoD splnĂ„â€šĂ˘â‚¬ĹľÄ‚ËĂ˘â€šÂ¬ÄąĹşnÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡, testy proÄ‚â€žĂ„â€¦Ä‚â€ąĂ˘â‚¬Ë‡ly -> completed + commit -----------------
 
 
 def test_run_autonomous_completed_with_commit(git_repo):
@@ -176,7 +505,7 @@ def test_run_autonomous_accumulates_breaker_saved_attempts_across_calls(git_repo
         if AUDIT_MARKER in request.prompt:
             return AgentRunResult(
                 success=True,
-                output_text='{"rejected_indices": [], "notes": "audit ok"}',
+                output_text=_audit_response(request),
                 breaker_saved_attempts=5,
             )
         return AgentRunResult(
@@ -288,8 +617,10 @@ def test_run_autonomous_commits_when_run_explicitly_requests_it_even_if_config_d
 def test_run_autonomous_never_commits_when_tests_fail(tmp_path):
     dod = parse_definition_of_done("- [ ] Neco co agent tvrdi ze je hotove")
     test_cmd = 'python -c "import sys; sys.exit(1)"'
+    requests = []
 
     def run_fn(request):
+        requests.append(request)
         return AgentRunResult(
             success=True,
             output_text='{"items": [{"index": 0, "done": true}], "notes": "tvrdim ze hotovo"}',
@@ -316,6 +647,9 @@ def test_run_autonomous_never_commits_when_tests_fail(tmp_path):
     assert result.commit_hash is None
     assert len(result.iterations) == 2
     assert all(it.tests_passed is False for it in result.iterations)
+    assert len(requests) == 2
+    assert "Výsledek testů z minulé iterace" in requests[1].prompt
+    assert "SELHALY" in requests[1].prompt
 
 
 # -- max iterations: never fully completes, stops at the requested cap ------
@@ -491,8 +825,13 @@ def test_run_autonomous_preserves_verified_done_items_across_iterations(tmp_path
 def test_run_autonomous_malformed_response_does_not_cause_false_blocked(tmp_path):
     """Regression for run 9cd54b5bf219: an agent whose response cannot be
     parsed as the expected JSON contract must be recorded as a protocol
-    error and given another chance, not silently treated as a repeated
-    'no progress' state that trips the blocked detector."""
+    error and given another (single, cheap-repair) chance, not silently
+    treated as a repeated 'no progress' state that trips the blocked
+    detector. It must also not be allowed to repeat forever (see
+    PROTOCOL_ERROR_STREAK_LIMIT / run 7fffd21835174d9fb9a29237c897f6d2) - a
+    plain single agent with no failover has nothing to fail over to, so the
+    run stops as PROTOCOL_ERROR at the low threshold, well before
+    max_iterations=3 would otherwise be reached."""
     dod = parse_definition_of_done("- [ ] bod, ktery se nikdy neoznaci")
 
     def run_fn(request):
@@ -512,9 +851,10 @@ def test_run_autonomous_malformed_response_does_not_cause_false_blocked(tmp_path
         auto_commit_requested=False,
     )
 
-    assert result.status == AutonomousStatus.MAX_ITERATIONS
-    assert len(result.iterations) == 3
+    assert result.status == AutonomousStatus.PROTOCOL_ERROR
+    assert len(result.iterations) == PROTOCOL_ERROR_STREAK_LIMIT
     assert all(it.protocol_error for it in result.iterations)
+    assert result.protocol_error_total == PROTOCOL_ERROR_STREAK_LIMIT
 
 
 def test_run_autonomous_incomplete_json_is_protocol_error_not_no_progress(tmp_path):
@@ -541,8 +881,271 @@ def test_run_autonomous_incomplete_json_is_protocol_error_not_no_progress(tmp_pa
         auto_commit_requested=False,
     )
 
-    assert result.status == AutonomousStatus.MAX_ITERATIONS
+    assert result.status == AutonomousStatus.PROTOCOL_ERROR
+    assert len(result.iterations) == PROTOCOL_ERROR_STREAK_LIMIT
     assert all(it.protocol_error for it in result.iterations)
+
+
+def test_run_autonomous_stops_well_before_max_iterations_on_repeated_protocol_error(tmp_path):
+    """Regression for the production incident of 2026-08-26 (run
+    7fffd21835174d9fb9a29237c897f6d2): Codex made real changes and passed
+    tests in iterations 1-7, but never once returned the required DoD JSON,
+    and the single repair reprompt also failed every time - so the run kept
+    starting fresh full implementation iterations against an unchanged DoD
+    until it burned through the whole provider usage limit. An agent that
+    returns 7 consecutive invalid JSON responses (never valid, never a
+    successful repair) must now cause the run to stop at
+    PROTOCOL_ERROR_STREAK_LIMIT, not after all 7."""
+    dod = parse_definition_of_done("- [ ] bod, ktery se nikdy neoznaci")
+    calls = {"count": 0}
+
+    def run_fn(request):
+        calls["count"] += 1
+        return AgentRunResult(success=True, output_text="tohle vubec neni JSON, porad dokola")
+
+    cfg = Config()
+    result = run_autonomous_loop(
+        run_id="test-run",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=dod,
+        config=cfg,
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=10,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.PROTOCOL_ERROR
+    assert len(result.iterations) == PROTOCOL_ERROR_STREAK_LIMIT
+    assert len(result.iterations) < 7
+    # Each iteration with an unresolved protocol error makes exactly 2 agent
+    # calls (main prompt + one cheap repair reprompt) - never a fresh full
+    # implementation iteration on top of that.
+    assert calls["count"] == PROTOCOL_ERROR_STREAK_LIMIT * 2
+    assert result.protocol_error_total == PROTOCOL_ERROR_STREAK_LIMIT
+    assert result.protocol_error_wasted_prompt_chars > 0
+    assert "protokol" in (result.error or "").lower()
+
+
+def test_run_autonomous_protocol_error_stop_notifies_slack_with_reason_and_waste(tmp_path, monkeypatch):
+    """DoD point: when a run stops as PROTOCOL_ERROR (no failover-capable
+    agent available), Slack/outbox must get a clear reason and a waste
+    metric, not just a bare status code - see the module docstring and the
+    production incident referenced above."""
+    sent = []
+    monkeypatch.setattr("orchestrator.autonomous.notify", lambda msg: sent.append(msg))
+
+    dod = parse_definition_of_done("- [ ] bod, ktery se nikdy neoznaci")
+
+    def run_fn(request):
+        return AgentRunResult(success=True, output_text="tohle vubec neni JSON, porad dokola")
+
+    cfg = Config()
+    result = run_autonomous_loop(
+        run_id="test-run-notify",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=dod,
+        config=cfg,
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=10,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.PROTOCOL_ERROR
+    assert len(sent) == 1
+    message = sent[0]
+    assert "test-run-notify" in message
+    assert "PROTOCOL_ERROR" in message
+    assert "protokolovou nekompatibilitu" in message
+    assert f"{PROTOCOL_ERROR_STREAK_LIMIT}x" in message
+    assert "promarněná spotřeba" in message
+    assert f"{result.protocol_error_total} protokolově chybných iterací" in message
+
+
+def test_run_autonomous_fails_over_to_next_provider_on_repeated_protocol_error(tmp_path):
+    """When the caller supplies a failover-capable agent (see
+    agents/failover.py), a repeated protocol violation must trigger a
+    failover to the next configured provider instead of stopping the whole
+    run - the same right a quota/rate limit already gets."""
+    dod = parse_definition_of_done("- [ ] Priprav feature")
+
+    class FakeFailoverAgent(Agent):
+        name = "fake-failover"
+
+        def __init__(self):
+            self.failover_calls: list[str] = []
+            self._switched = False
+
+        def is_available(self):
+            return True, "ok"
+
+        def force_failover_on_protocol_error(self, reason: str) -> bool:
+            self.failover_calls.append(reason)
+            self._switched = True
+            return True
+
+        def run(self, request):
+            if AUDIT_MARKER in request.prompt:
+                return AgentRunResult(success=True, output_text=_audit_response(request))
+            if not self._switched:
+                return AgentRunResult(success=True, output_text="porad neplatny JSON")
+            return AgentRunResult(
+                success=True,
+                output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo po failoveru"}',
+            )
+
+    agent = FakeFailoverAgent()
+    result = run_autonomous_loop(
+        run_id="test-run",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=dod,
+        config=Config(),
+        agent=agent,
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=5,
+        auto_commit_requested=False,
+    )
+
+    assert len(agent.failover_calls) == 1
+    assert result.status == AutonomousStatus.COMPLETED
+    assert all(item.done for item in result.dod_items)
+
+
+def test_run_autonomous_stops_as_budget_exceeded_when_no_failover(tmp_path):
+    """Per-job, provider-specific financial hard cap (see AGENTS.md rule 9a
+    and ARCHITECTURE.md "Per-job finanĂ„â€šĂ˘â‚¬ĹľĂ„Ä…Ă‚Â¤nÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­ limit"): independent of
+    max_iterations, once this run's own cumulative reported cost_usd for
+    the active provider exceeds its configured max_budget_usd, a plain
+    (non-failover) agent must stop the run as BUDGET_EXCEEDED instead of
+    continuing to spend past the cap."""
+    dod = parse_definition_of_done("- [ ] bod, ktery se nikdy neoznaci")
+
+    def run_fn(request):
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": false}], "notes": "pracuji"}',
+            cost_usd=2.0,
+        )
+
+    class NamedFakeAgent(FakeAgent):
+        name = "claude-code"
+
+    cfg = Config()
+    cfg.claude_code.max_budget_usd = 1.0
+    result = run_autonomous_loop(
+        run_id="test-run",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=dod,
+        config=cfg,
+        agent=NamedFakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=5,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.BUDGET_EXCEEDED
+    assert len(result.iterations) == 1
+    assert "finanční limit" in (result.error or "")
+
+
+def test_run_autonomous_does_not_trigger_budget_cap_when_unconfigured(tmp_path):
+    """None (the default) means no limit - reported spend must never be
+    compared against a cap that was never configured."""
+    dod = parse_definition_of_done("- [ ] bod")
+
+    def run_fn(request):
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+            cost_usd=999.0,
+        )
+
+    class NamedFakeAgent(FakeAgent):
+        name = "claude-code"
+
+    result = run_autonomous_loop(
+        run_id="test-run",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=dod,
+        config=Config(),
+        agent=NamedFakeAgent(_confirming_audit_or(run_fn)),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=5,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+
+
+def test_run_autonomous_fails_over_to_next_provider_on_budget_exceeded(tmp_path):
+    """When the caller supplies a failover-capable agent (see
+    agents/failover.py), exceeding the active provider's configured
+    max_budget_usd must trigger a failover to the next configured provider
+    instead of stopping the whole run - the same right a repeated protocol
+    violation or a quota/rate limit already gets."""
+    dod = parse_definition_of_done("- [ ] Priprav feature")
+
+    class FakeFailoverAgent(Agent):
+        name = "fake-failover"
+
+        def __init__(self):
+            self.failover_calls: list[str] = []
+            self._switched = False
+            self.active_provider_name = "claude-code"
+
+        def is_available(self):
+            return True, "ok"
+
+        def force_failover_on_budget_exceeded(self, reason: str) -> bool:
+            self.failover_calls.append(reason)
+            self._switched = True
+            self.active_provider_name = "antigravity"
+            return True
+
+        def run(self, request):
+            if AUDIT_MARKER in request.prompt:
+                return AgentRunResult(success=True, output_text=_audit_response(request))
+            if not self._switched:
+                return AgentRunResult(
+                    success=True,
+                    output_text='{"items": [{"index": 0, "done": false}], "notes": "prilis drahe"}',
+                    cost_usd=5.0,
+                )
+            return AgentRunResult(
+                success=True,
+                output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo po failoveru"}',
+            )
+
+    agent = FakeFailoverAgent()
+    cfg = Config()
+    cfg.claude_code.max_budget_usd = 1.0
+    result = run_autonomous_loop(
+        run_id="test-run",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=dod,
+        config=cfg,
+        agent=agent,
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=5,
+        auto_commit_requested=False,
+    )
+
+    assert len(agent.failover_calls) == 1
+    assert result.status == AutonomousStatus.COMPLETED
+    assert all(item.done for item in result.dod_items)
 
 
 def test_protocol_error_does_not_apply_partial_dod_updates(tmp_path):
@@ -586,6 +1189,41 @@ def test_protocol_error_does_not_apply_partial_dod_updates(tmp_path):
 
 def test_run_autonomous_autodetects_pytest_when_no_test_command_configured(tmp_path):
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+
+    def run_fn(request):
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": false}], "notes": "zkousim"}',
+        )
+
+    cfg = Config()
+    result = run_autonomous_loop(
+        run_id="test-run",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=parse_definition_of_done("- [ ] neco co se nikdy neoznaci"),
+        config=cfg,
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,  # not configured - must be auto-detected, not skipped
+        max_iterations=1,
+        auto_commit_requested=False,
+    )
+
+    assert len(result.iterations) == 1
+    assert isinstance(result.iterations[0].tests_passed, bool)
+    assert result.iterations[0].test_output is not None
+
+
+def test_run_autonomous_autodetects_pytest_for_requirements_txt_project(tmp_path):
+    """Regression: this repo (ai-orchestrator) itself has a "tests/" dir and
+    a requirements.txt but no pyproject.toml/setup.py/setup.cfg/pytest.ini/
+    tox.ini - before requirements.txt was added to _PYTHON_PROJECT_MARKERS,
+    autonomous runs against this project's own repo never auto-detected a
+    test command, so tests_passed stayed None forever instead of a real,
+    orchestrator-verified pass/fail (see AGENTS.md rule 9)."""
+    (tmp_path / "requirements.txt").write_text("pytest\n", encoding="utf-8")
     (tmp_path / "tests").mkdir()
 
     def run_fn(request):
@@ -674,14 +1312,14 @@ def test_extract_json_recovers_from_trailing_permission_denial_note():
     """Regression for run 11b4aaae08b4: the Claude Code CLI wrapper used to
     append a plain-text note *after* the agent's own valid JSON payload
     whenever a tool call was permission-denied, e.g.:
-        '{"items": [...], "notes": "..."}\\n\\n[orchestrator] Claude odmítl 15 akci(í) kvůli oprávněním.'
+        '{"items": [...], "notes": "..."}\\n\\n[orchestrator] Claude odmÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tl 15 akci(Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­) kvÄ‚â€žĂ„â€¦Ă„Ä…Ă‚Â»li oprÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡vnĂ„â€šĂ˘â‚¬ĹľÄ‚ËĂ˘â€šÂ¬ÄąĹşnÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­m.'
     A naive `json.loads` on the whole string fails on the trailing text,
     which is exactly why 8 iterations in that run were misreported as
     protocol_error despite tests_passed=True and a perfectly valid agent
     response. `_extract_json` must recover the JSON object regardless."""
     text = (
         '{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], "notes": "hotovo"}'
-        "\n\n[orchestrator] Claude odmítl 15 akci(í) kvůli oprávněním."
+        "\n\n[orchestrator] Claude odmÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tl 15 akci(Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­) kvÄ‚â€žĂ„â€¦Ă„Ä…Ă‚Â»li oprÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡vnĂ„â€šĂ˘â‚¬ĹľÄ‚ËĂ˘â€šÂ¬ÄąĹşnÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­m."
     )
     parsed = _extract_json(text)
     assert parsed is not None
@@ -691,7 +1329,7 @@ def test_extract_json_recovers_from_trailing_permission_denial_note():
 
 def test_extract_json_recovers_from_leading_prose_and_fence():
     text = (
-        "Shrnutí práce: opravil jsem X a Y.\n\n"
+        "ShrnutÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­ prÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ce: opravil jsem X a Y.\n\n"
         "```json\n"
         '{"items": [{"index": 0, "done": true}], "notes": "ok"}\n'
         "```\n"
@@ -831,9 +1469,9 @@ def test_run_autonomous_audit_reopens_falsely_claimed_done_item(tmp_path):
             if audit_calls["n"] == 1:
                 return AgentRunResult(
                     success=True,
-                    output_text='{"rejected_indices": [0], "notes": "bod A ve skutecnosti chybi"}',
+                    output_text=_audit_response(request, accepted=False, index=0, evidence="bod A ve skutecnosti chybi"),
                 )
-            return AgentRunResult(success=True, output_text='{"rejected_indices": [], "notes": "ted uz ok"}')
+            return AgentRunResult(success=True, output_text=_audit_response(request))
         return AgentRunResult(
             success=True,
             output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
@@ -859,6 +1497,47 @@ def test_run_autonomous_audit_reopens_falsely_claimed_done_item(tmp_path):
     # not completed on the first iteration - the audit reopened it
     assert len(result.iterations) == 2
     assert result.dod_items[0].done is True
+
+
+def test_strict_audit_requires_evidence_for_every_dod_index(tmp_path):
+    dod = parse_definition_of_done("- [ ] bod A\n- [ ] bod B")
+
+    def run_fn(request):
+        if AUDIT_MARKER in request.prompt:
+            # Missing index 1 must fail closed instead of silently accepting
+            # every executor checkbox as verified completion.
+            return AgentRunResult(
+                success=True,
+                output_text=(
+                    '{"items":[{"index":0,"accepted":true,'
+                    '"evidence":"module.py:10 + test_a"}],"notes":"neuplne"}'
+                ),
+            )
+        return AgentRunResult(
+            success=True,
+            output_text=(
+                '{"items":[{"index":0,"done":true},{"index":1,"done":true}],'
+                '"notes":"hotovo"}'
+            ),
+        )
+
+    result = run_autonomous_loop(
+        run_id="strict-audit-evidence",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=dod,
+        config=Config(),
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=2,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.PROTOCOL_ERROR
+    assert result.iterations[-1].audit_protocol_error is True
+    assert "missing=[1]" in result.iterations[-1].note
+    assert '"index":0' in result.iterations[-1].note
 
 
 def test_run_autonomous_waits_when_provider_is_limited(tmp_path):
@@ -892,3 +1571,124 @@ def test_run_autonomous_waits_when_provider_is_limited(tmp_path):
     assert result.retry_after_seconds == 600
     assert result.error == "All providers LIMITED"
     assert result.dod_items[0].done is False
+
+
+def test_run_autonomous_waits_when_provider_becomes_limited_during_repair(tmp_path):
+    """Regression: a provider limit hit specifically on the cheap repair
+    reprompt (not the main executor call) must still propagate as
+    WAITING_FOR_PROVIDER, not be swallowed into a protocol_error iteration
+    that eventually stops the run as PROTOCOL_ERROR (see incident
+    cb501524e47e, 26.8.2026)."""
+    dod = parse_definition_of_done("- [ ] bod A")
+    calls = {"n": 0}
+
+    def run_fn(request):
+        assert AUDIT_MARKER not in request.prompt, "audit must not run when repair hits a provider limit"
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Main executor call: malformed response triggers the repair path.
+            return AgentRunResult(success=True, output_text="tohle vubec neni JSON")
+        # Repair reprompt call: every provider is now exhausted.
+        return AgentRunResult(
+            success=False, output_text="", error="All providers LIMITED",
+            limited=True, retry_after_seconds=450,
+        )
+
+    result = run_autonomous_loop(
+        run_id="wait-during-repair",
+        project_path=tmp_path,
+        goal="cekani na providera behem repair",
+        dod_items=dod,
+        config=Config(),
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=5,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.WAITING_FOR_PROVIDER
+    assert result.retry_after_seconds == 450
+    assert result.error == "All providers LIMITED"
+    assert result.dod_items[0].done is False
+    assert len(result.iterations) == 1
+    assert result.iterations[0].repair_attempted is True
+    assert result.iterations[0].repair_succeeded is False
+    assert calls["n"] == 2
+
+
+def test_run_autonomous_waits_when_provider_becomes_limited_during_audit(tmp_path):
+    """Regression: a provider limit hit specifically on the independent
+    audit call (after the executor already claimed every DoD item done and
+    the orchestrator's own tests agreed) must still propagate as
+    WAITING_FOR_PROVIDER, not as an unresolved audit protocol error (see
+    incident cb501524e47e, 26.8.2026)."""
+    dod = parse_definition_of_done("- [ ] bod A")
+
+    def run_fn(request):
+        if AUDIT_MARKER in request.prompt:
+            return AgentRunResult(
+                success=False, output_text="", error="All providers LIMITED",
+                limited=True, retry_after_seconds=300,
+            )
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+        )
+
+    result = run_autonomous_loop(
+        run_id="wait-during-audit",
+        project_path=tmp_path,
+        goal="cekani na providera behem auditu",
+        dod_items=dod,
+        config=Config(),
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=3,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.WAITING_FOR_PROVIDER
+    assert result.retry_after_seconds == 300
+    assert result.error == "All providers LIMITED"
+    # The executor's verified claim (item done) must survive - a provider
+    # outage during the audit is not the same as the audit rejecting it.
+    assert result.dod_items[0].done is True
+    assert len(result.iterations) == 1
+    assert result.iterations[0].audit_performed is True
+    assert result.iterations[0].audit_protocol_error is True
+
+
+def test_run_autonomous_aggregates_reported_usage_without_guessing_missing_values(tmp_path):
+    calls = 0
+
+    def run_fn(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return AgentRunResult(
+                success=True,
+                output_text='{"items": [{"index": 0, "done": true}], "notes": "ok"}',
+                input_tokens=100, output_tokens=20, total_tokens=120, cost_usd=0.01,
+            )
+        return AgentRunResult(
+            success=True,
+                output_text=_audit_response(request),
+            input_tokens=30, output_tokens=5, total_tokens=35,
+        )
+
+    result = run_autonomous_loop(
+        run_id="usage", project_path=tmp_path, goal="cil",
+        dod_items=parse_definition_of_done("- [ ] bod"), config=Config(),
+        agent=FakeAgent(run_fn), logger=LOGGER, test_command=None,
+        max_iterations=1, auto_commit_requested=False,
+    )
+
+    # Both physical provider calls count: implementation and independent audit.
+    assert result.usage_total["input_tokens"] == 130
+    assert result.usage_total["output_tokens"] == 25
+    assert result.usage_total["total_tokens"] == 155
+    assert [event["stage"] for event in result.usage_events] == ["executor", "audit"]
+    assert result.usage_total["thinking_tokens"] is None
+    assert result.usage_total["source"] == "reported"

@@ -1,0 +1,208 @@
+"""Controller-owned, explicit-scope repository finalization."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import subprocess
+from pathlib import Path
+from typing import Optional, Sequence
+
+from orchestrator.autonomous import _detect_test_command, run_test_command
+from orchestrator.config import Config
+
+
+logger = logging.getLogger("orchestrator.finalize")
+
+
+def _git(project_path: Path, args: Sequence[str], timeout: int = 120) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args], cwd=str(project_path), capture_output=True,
+        text=True, encoding="utf-8", errors="replace", timeout=timeout,
+    )
+
+
+def _result(status: str, **fields) -> dict:
+    return {"status": status, "done": status == "completed", **fields}
+
+
+def _blocked(reason: str, **fields) -> dict:
+    return _result("blocked", committed=False, clean=False, error=reason, **fields)
+
+
+def _safe_paths(paths: Sequence[str]) -> list[str]:
+    safe = []
+    for raw in paths:
+        path = str(raw).strip().replace("\\", "/")
+        candidate = Path(path)
+        if not path or candidate.is_absolute() or ".." in candidate.parts:
+            raise ValueError(f"unsafe finalize path: {raw!r}")
+        if path == ".git" or path.startswith(".git/"):
+            raise ValueError(f"Git metadata cannot be finalized: {raw!r}")
+        if path not in safe:
+            safe.append(path)
+    return safe
+
+
+def _status_paths(status_output: str) -> list[str]:
+    paths = []
+    for line in status_output.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1]
+        if path:
+            paths.append(path.replace("\\", "/"))
+    return paths
+
+
+def finalize_repository(
+    project_path: Path,
+    config: Config,
+    run_id: str,
+    goal: str = "",
+    paths: Sequence[str] = (),
+    test_command: Optional[str] = None,
+    push_requested: bool = False,
+    allowed_remote: Optional[str] = None,
+) -> dict:
+    """Finalize only the explicitly supplied worktree paths.
+
+    This is intentionally separate from the agent loop.  The caller must
+    supply the paths already inspected by the Project Manager; this function
+    never uses ``git add -A`` and never offers force-push or history rewrite.
+    """
+    project_path = Path(project_path).resolve()
+    try:
+        safe_paths = _safe_paths(paths)
+    except ValueError as exc:
+        return _blocked(str(exc))
+
+    repo = _git(project_path, ["rev-parse", "--show-toplevel"])
+    if repo.returncode != 0 or Path(repo.stdout.strip()).resolve() != project_path:
+        return _blocked(f"not a Git worktree root: {project_path}")
+    branch = _git(project_path, ["branch", "--show-current"]).stdout.strip()
+    if not branch:
+        return _blocked("detached HEAD cannot be finalized safely")
+
+    selected_test = test_command or _detect_test_command(project_path)
+    tests_passed = True
+    test_output = ""
+    if selected_test:
+        tests_passed, test_output = run_test_command(project_path, selected_test, logger)
+    if not tests_passed:
+        return _blocked(
+            "controller test command failed", tests_passed=False,
+            test_command=selected_test, test_output=test_output[-4000:], branch=branch,
+        )
+
+    check = _git(project_path, ["diff", "--check"])
+    if check.returncode != 0:
+        return _blocked("git diff --check failed", diff_check=check.stderr or check.stdout, branch=branch)
+
+    before = _git(project_path, ["status", "--porcelain"])
+    if before.returncode != 0:
+        return _blocked("could not read Git status", branch=branch)
+    dirty = bool(before.stdout.strip())
+    committed = False
+    head = _git(project_path, ["rev-parse", "HEAD"]).stdout.strip()
+    if dirty:
+        if not safe_paths:
+            return _blocked("dirty worktree has no explicit finalize paths", branch=branch)
+        dirty_paths = _status_paths(before.stdout)
+        outside_scope = [path for path in dirty_paths if path not in safe_paths]
+        if outside_scope:
+            return _blocked(
+                "dirty worktree contains paths outside the explicit finalize scope",
+                dirty_paths=dirty_paths, outside_scope=outside_scope, branch=branch,
+            )
+        staged = _git(project_path, ["add", "--", *safe_paths])
+        if staged.returncode != 0:
+            return _blocked(f"git add of explicit finalize paths failed: {staged.stderr}", branch=branch)
+        staged_check = _git(project_path, ["diff", "--cached", "--check"])
+        if staged_check.returncode != 0:
+            return _blocked(
+                "git diff --cached --check failed",
+                staged_diff_check=staged_check.stderr or staged_check.stdout, branch=branch,
+            )
+        summary = goal.strip().splitlines()[0][:72] if goal.strip() else "finalize repository"
+        message = f"{config.git.commit_message_prefix}{summary}\n\nController finalization {run_id}"
+        commit = _git(project_path, ["commit", "-m", message])
+        if commit.returncode != 0:
+            return _blocked(f"controller commit failed: {commit.stderr or commit.stdout}", branch=branch)
+        committed = True
+        head = _git(project_path, ["rev-parse", "HEAD"]).stdout.strip()
+
+    after = _git(project_path, ["status", "--porcelain"])
+    if after.returncode != 0 or after.stdout.strip():
+        return _blocked(
+            "post-commit Git status is not clean", committed=committed,
+            commit_hash=head, clean=False, status=after.stdout.strip(), branch=branch,
+        )
+
+    origin = _git(project_path, ["remote", "get-url", "origin"]).stdout.strip()
+    remote_head = None
+    if push_requested:
+        if not origin:
+            return _blocked("origin remote is missing", committed=committed, commit_hash=head, clean=True)
+        if not allowed_remote or origin != allowed_remote:
+            return _blocked(
+                "origin remote is not on the explicit push allowlist",
+                committed=committed, commit_hash=head, clean=True, remote=origin,
+            )
+        pushed = _git(project_path, ["push", "origin", branch], timeout=120)
+        if pushed.returncode != 0:
+            return _blocked(
+                f"git push failed: {pushed.stderr or pushed.stdout}",
+                committed=committed, commit_hash=head, clean=True, remote=origin,
+            )
+        lookup = _git(project_path, ["ls-remote", "origin", f"refs/heads/{branch}"])
+        if lookup.returncode == 0 and lookup.stdout.strip():
+            remote_head = lookup.stdout.split()[0]
+        if remote_head != head:
+            return _blocked(
+                "remote HEAD does not match local HEAD after push",
+                committed=committed, commit_hash=head, clean=True,
+                remote=origin, remote_commit=remote_head,
+            )
+
+    return _result(
+        "completed", committed=committed, commit_hash=head, clean=True,
+        tests_passed=True, test_command=selected_test, branch=branch,
+        remote=origin or None, pushed=push_requested, remote_commit=remote_head,
+        run_id=run_id,
+    )
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Controller-owned explicit-scope commit and verified push"
+    )
+    parser.add_argument("--project", required=True, help="Registered project name or checkout path")
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--goal", default="")
+    parser.add_argument("--test-command")
+    parser.add_argument("--path", action="append", default=[])
+    parser.add_argument("--push", action="store_true")
+    parser.add_argument("--allowed-remote")
+    args = parser.parse_args(argv)
+    try:
+        from orchestrator.config import load_config
+
+        config = load_config()
+        entry = config.resolve_project(args.project)
+        result = finalize_repository(
+            Path(entry.path), config, args.run_id, goal=args.goal,
+            paths=args.path, test_command=args.test_command,
+            push_requested=args.push, allowed_remote=args.allowed_remote,
+        )
+    except (FileNotFoundError, ValueError, KeyError) as exc:
+        result = _blocked(str(exc))
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return 0 if result.get("status") == "completed" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

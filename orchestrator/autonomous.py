@@ -20,6 +20,23 @@ AGENTS.md):
     comparison instead of being treated as "no progress" (see
     `_apply_dod_updates` and the `protocol_error` handling in
     `run_autonomous_loop`).
+  - a protocol error is NOT free to repeat forever just because it is
+    excluded from the no-progress signature above (see incident run
+    7fffd21835174d9fb9a29237c897f6d2: Codex made real changes and passed
+    tests in iterations 1-7, but never once returned the required DoD JSON,
+    the single repair reprompt failed every time too, and the run kept
+    starting brand new full implementation iterations against an unchanged
+    DoD until it burned through the provider's whole usage limit). A
+    separate counter, `PROTOCOL_ERROR_STREAK_LIMIT`, tracks *consecutive*
+    unresolved protocol errors (i.e. still broken after the one cheap
+    repair). Once that low threshold is hit: if `agent` exposes
+    `force_failover_on_protocol_error()` (see agents/failover.py) and
+    another configured provider is available, the run fails over to it and
+    keeps going (a repeated protocol violation is exactly the kind of
+    provider-side incompatibility failover exists for, not just quota/rate
+    limits); otherwise the run stops immediately with
+    `AutonomousStatus.PROTOCOL_ERROR` instead of continuing to spend
+    iterations/tokens on an agent that cannot follow the contract.
   - a commit is only ever attempted when every Definition of Done item is
     marked done AND the orchestrator's own test run (never the agent's
     claim) passed on that same iteration AND the independent audit pass
@@ -69,11 +86,16 @@ from orchestrator.config import Config
 from orchestrator.git_utils import (
     GitError,
     commit as git_commit,
+    current_branch,
+    current_head,
     has_uncommitted_changes,
     is_git_repo,
+    origin_url,
+    remote_branch_head,
     status_porcelain,
 )
 from orchestrator.runner import run_test_command, tail_text
+from orchestrator.slack_notify import notify
 
 DEFAULT_MAX_ITERATIONS = 10
 # Sanity ceiling - independent of what a caller/CLI flag requests, so a typo
@@ -82,6 +104,14 @@ ABSOLUTE_MAX_ITERATIONS = 50
 # How many consecutive iterations with an unchanged (unmet DoD items, test
 # result) signature before the run is declared "blocked" (no progress).
 NO_PROGRESS_LIMIT = 3
+# How many consecutive iterations with an unresolved protocol error (agent's
+# JSON still invalid/incomplete even after the one cheap repair reprompt)
+# before the run gives up on the current provider - see module docstring
+# and incident run 7fffd21835174d9fb9a29237c897f6d2. Deliberately low (not
+# NO_PROGRESS_LIMIT): a protocol error carries no information about whether
+# the underlying task is stuck, so there is no reason to give it as many
+# free passes as genuine no-progress gets.
+PROTOCOL_ERROR_STREAK_LIMIT = 2
 # Max number of currently-unmet DoD items presented to the agent in a single
 # iteration. Keeps the prompt (and the required JSON response) small and
 # reliable regardless of how large the overall Definition of Done is - a
@@ -89,10 +119,87 @@ NO_PROGRESS_LIMIT = 3
 # module docstring): asking for a 66-entry JSON response every iteration is
 # both expensive and fragile.
 DOD_BATCH_SIZE = 8
+RUNTIME_CONTRACT_PATH = Path(__file__).resolve().parents[2] / "AI_PROJECT_RUNTIME.md"
+
+
+def _runtime_contract_text() -> str:
+    """Load the machine contract; the human handbook is never prompted."""
+    return RUNTIME_CONTRACT_PATH.read_text(encoding="utf-8").strip()
+
 # Marker line that opens every independent audit prompt, so a caller can
 # recognize (and tests can simulate) the audit role distinctly from the
 # executor role, even though both go through the same `Agent`.
 AUDIT_MARKER = "AUDITORSKÁ KONTROLA"
+
+# Some Trello cards include the final controller/audit gate in their visible
+# DoD (for example, "ai-orchestrator vydá accepted/rejected verdikt").  That
+# is evidence owned by this orchestrator, not implementation work an executor
+# can complete.  Keep the item in the final audit contract, but do not ask an
+# executor to repeat the implementation loop just to claim it.
+_CONTROLLER_AUDIT_GATE_RE = re.compile(
+    r"accepted\s*/\s*rejected.*(?:ai[- ]orchestrator|audit)"
+    r"|(?:ai[- ]orchestrator|audit).*accepted\s*/\s*rejected"
+    r"|(?:nezávisl|independent)\w*\s+audit",
+    re.IGNORECASE,
+)
+
+
+def _controller_audit_gate_indices(items: list[DoDItem]) -> set[int]:
+    """Return DoD indices owned by the orchestrator's final audit gate."""
+    return {
+        index for index, item in enumerate(items)
+        if item.live_command is None and _CONTROLLER_AUDIT_GATE_RE.search(item.text or "")
+    }
+
+
+def controller_finalization_from_spec(spec_text: str) -> Optional[dict]:
+    """Extract a controller proof only from an explicit audit-mode spec."""
+    if not re.search(r'"mode"\s*:\s*"audit"', spec_text or ""):
+        return None
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"(?m)^\s*\{", spec_text or ""):
+        try:
+            value, _ = decoder.raw_decode(spec_text[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        candidates = [value.get("finalization")]
+        checkpoint = value.get("checkpoint")
+        if isinstance(checkpoint, dict):
+            candidates.insert(0, checkpoint.get("finalization"))
+        for candidate in candidates:
+            if isinstance(candidate, dict) and candidate.get("commit_hash"):
+                return candidate
+    return None
+
+
+def controller_finalization_is_current(project_path: Path, finalization: object) -> bool:
+    """Verify a persisted controller proof without invoking an AI provider."""
+    if not isinstance(finalization, dict):
+        return False
+    required = (
+        finalization.get("status") == "completed"
+        and finalization.get("done") is True
+        and isinstance(finalization.get("committed"), bool)
+        and finalization.get("clean") is True
+        and finalization.get("tests_passed") is True
+        and finalization.get("pushed") is True
+        and bool(finalization.get("commit_hash"))
+        and finalization.get("remote_commit") == finalization.get("commit_hash")
+    )
+    if not required or not is_git_repo(project_path):
+        return False
+    head = current_head(project_path)
+    branch = current_branch(project_path)
+    return bool(
+        head
+        and head == finalization.get("commit_hash")
+        and branch == finalization.get("branch")
+        and not status_porcelain(project_path)
+        and origin_url(project_path) == finalization.get("remote")
+        and remote_branch_head(project_path, branch) == head
+    )
 
 
 class AutonomousStatus(str, Enum):
@@ -102,12 +209,32 @@ class AutonomousStatus(str, Enum):
     BLOCKED = "blocked"
     MAX_ITERATIONS = "max_iterations"
     ERROR = "error"
+    # A protocol error (agent JSON invalid/incomplete even after the one
+    # cheap repair reprompt) repeated PROTOCOL_ERROR_STREAK_LIMIT times in a
+    # row with no other provider left to fail over to - see module
+    # docstring and PROTOCOL_ERROR_STREAK_LIMIT. Distinct from BLOCKED
+    # (which means genuinely no progress on a verified state) so callers
+    # and the Trello/Slack handoff can report the real reason instead of a
+    # generic "stuck".
+    PROTOCOL_ERROR = "protocol_error"
+    # This job's cumulative reported spend on the active provider exceeded
+    # that provider's configured max_budget_usd (see _provider_budget_usd)
+    # and no other configured provider was available to fail over to - a
+    # financial safety cap the orchestrator enforces itself, distinct from
+    # WAITING_FOR_PROVIDER (a provider-reported quota/rate limit).
+    BUDGET_EXCEEDED = "budget_exceeded"
 
 
 @dataclass
 class DoDItem:
     text: str
     done: bool = False
+    # Optional orchestrator-run verification for integration/production
+    # assertions.  The agent may claim the item, but it cannot make it done:
+    # a zero exit code and the expected stdout/stderr fragment are required.
+    live_command: Optional[str] = None
+    live_expected: Optional[str] = None
+    live_evidence: Optional[dict] = None
 
 
 @dataclass
@@ -138,7 +265,11 @@ class IterationLog:
     audit_performed: bool = False
     audit_rejected_indices: list[int] = field(default_factory=list)
     audit_protocol_error: bool = False
+    # Whether the one allowed cheap audit repair reprompt was attempted this
+    # iteration (mirrors AuditOutcome.audit_repair_attempted).
+    audit_repair_attempted: bool = False
     agent_name: Optional[str] = None
+    usage: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
@@ -164,11 +295,166 @@ class AutonomousResult:
     # across every agent.run() call in this run (executor + repair + audit)
     # - see AgentRunResult.breaker_saved_attempts.
     breaker_saved_attempts: int = 0
+    # Total number of iterations in this run whose executor or audit
+    # response was an unresolved protocol error (invalid/incomplete JSON
+    # even after the one cheap repair reprompt) - see
+    # PROTOCOL_ERROR_STREAK_LIMIT. Reported so a caller (CLI output, the
+    # outbox handoff to AI Project Manager, Slack) can see how much of a
+    # run's iteration/token budget was wasted on protocol violations rather
+    # than real work, even on a run that did not end in PROTOCOL_ERROR.
+    protocol_error_total: int = 0
+    # Sum of len(prompt) (main executor prompt + its repair reprompt, when
+    # attempted) for every iteration counted in protocol_error_total - a
+    # cheap, dependency-free stand-in for wasted token usage, in the same
+    # units as IterationLog.prompt_chars/the module's "~tokens odhadem" log
+    # lines (chars // 4).
+    protocol_error_wasted_prompt_chars: int = 0
+    # Whether *any* iteration in this run attempted the cheap audit repair
+    # reprompt: tracks (max 1 per iter) so the outbox/CLI can report whether
+    # audit recovery was tried at all. Aggregated by `snapshot()` from the
+    # per-iteration logs. Mirrors per-iteration IterationLog.audit_repair_attempted.
+    audit_repair_attempted: bool = False
+    # Reported provider metadata only. Missing usage is represented by an
+    # empty list/totals with null values and never fails the run.
+    usage_events: list[dict] = field(default_factory=list)
+    usage_by_provider: dict[str, dict] = field(default_factory=dict)
+    usage_total: dict = field(default_factory=dict)
 
 
 # -- Definition of Done parsing ---------------------------------------------
 
 _CHECKBOX_RE = re.compile(r"^[-*]\s*\[([ xX])\]\s+(.+)$")
+_INLINE_CHECKBOX_RE = re.compile(r"\[([ xX])\]\s*([^\[]+?)(?=\s*\[[ xX]\]|\s*$)")
+_LIVE_EVIDENCE_RE = re.compile(r"\s*<!--\s*LIVE-EVIDENCE\s*:\s*(\{.*\})\s*-->\s*$", re.IGNORECASE)
+_LIVE_RESULT_RE = re.compile(r"<!--\s*LIVE-RESULT\s*:\s*(\{.*?\})\s*-->", re.IGNORECASE)
+
+
+def _parse_item(text: str, done: bool) -> DoDItem:
+    """Parse an optional machine-readable live verification declaration.
+
+    Syntax (kept inside a Markdown comment so Trello/spec prose stays tidy):
+    ``item <!-- LIVE-EVIDENCE: {"command":"...","expect":"..."} -->``.
+    Invalid/incomplete metadata is intentionally left in the item text and
+    never silently treated as a live-verified item.
+    """
+    match = _LIVE_EVIDENCE_RE.search(text)
+    if not match:
+        return DoDItem(text=text.strip(), done=done)
+    try:
+        metadata = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return DoDItem(text=text.strip(), done=done)
+    command = metadata.get("command") if isinstance(metadata, dict) else None
+    expected = metadata.get("expect") if isinstance(metadata, dict) else None
+    if not isinstance(command, str) or not command.strip() or not isinstance(expected, str):
+        return DoDItem(text=text.strip(), done=done)
+    return DoDItem(
+        text=text[: match.start()].strip(), done=done,
+        live_command=command.strip(), live_expected=expected,
+    )
+
+
+def _dod_dict(item: DoDItem) -> dict:
+    return {
+        "text": item.text,
+        "done": item.done,
+        "live_verification": (
+            {"command": item.live_command, "expect": item.live_expected}
+            if item.live_command is not None else None
+        ),
+        "live_evidence": item.live_evidence,
+    }
+
+
+def _usage_from_result(result, provider: Optional[str], stage: str, iteration: int) -> list[dict]:
+    events = list(result.usage_events or [])
+    if not events:
+        event = {
+            "provider": provider or "unknown", "source": "reported",
+            "input_tokens": result.input_tokens, "output_tokens": result.output_tokens,
+            "thinking_tokens": result.thinking_tokens, "total_tokens": result.total_tokens,
+            "cost_usd": result.cost_usd,
+        }
+        if any(event[k] is not None for k in ("input_tokens", "output_tokens", "thinking_tokens", "total_tokens", "cost_usd")):
+            events = [event]
+    return [{**event, "stage": stage, "iteration": iteration} for event in events]
+
+
+def _usage_summary(events: list[dict]) -> tuple[dict[str, dict], dict]:
+    fields = ("input_tokens", "output_tokens", "thinking_tokens", "total_tokens", "cost_usd")
+    by_provider: dict[str, dict] = {}
+    for event in events:
+        bucket = by_provider.setdefault(event.get("provider") or "unknown", {key: None for key in fields})
+        for key in fields:
+            value = event.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                bucket[key] = (bucket[key] or 0) + value
+        bucket["source"] = "reported"
+    total = {key: None for key in fields}
+    for bucket in by_provider.values():
+        for key in fields:
+            if bucket.get(key) is not None:
+                total[key] = (total[key] or 0) + bucket[key]
+    total["source"] = "reported" if by_provider else None
+    return by_provider, total
+
+
+def _provider_budget_usd(config: Config, provider_name: Optional[str]) -> Optional[float]:
+    """Look up the per-job financial cap configured for `provider_name`
+    (see ClaudeCodeAgentConfig/AntigravityAgentConfig/CodexAgentConfig's
+    max_budget_usd). None means "no limit configured" - never treated as a
+    zero-budget cap."""
+    mapping = {
+        "claude-code": config.claude_code.max_budget_usd,
+        "antigravity": config.antigravity.max_budget_usd,
+        "codex": config.codex.max_budget_usd,
+    }
+    return mapping.get(provider_name or "")
+
+
+def _apply_declared_live_results(spec_text: str, items: list[DoDItem]) -> None:
+    """Attach externally performed, read-only live checks to DoD items.
+
+    The orchestrator deliberately does not execute commands embedded in a
+    Trello/spec string. AI Project Manager (or a human operator) performs
+    the declared check and appends a result comment containing ``index``,
+    integer ``exit_code`` and string ``output``. Pass/fail is derived here,
+    never trusted from a producer-supplied boolean.
+    """
+    for match in _LIVE_RESULT_RE.finditer(spec_text):
+        try:
+            result = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(result, dict):
+            continue
+        index, exit_code, output = result.get("index"), result.get("exit_code"), result.get("output")
+        if (
+            not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(items)
+            or not isinstance(exit_code, int) or isinstance(exit_code, bool)
+            or not isinstance(output, str)
+        ):
+            continue
+        item = items[index]
+        if item.live_command is None:
+            continue
+        passed = exit_code == 0 and (item.live_expected or "") in output
+        item.live_evidence = {
+            "command": item.live_command,
+            "expect": item.live_expected,
+            "exit_code": exit_code,
+            "output": tail_text(output, 2000),
+            "passed": passed,
+        }
+
+
+def _enforce_live_evidence(items: list[DoDItem]) -> None:
+    """An agent claim or checked box cannot replace integration evidence."""
+    for item in items:
+        if item.live_command is not None and not (
+            isinstance(item.live_evidence, dict) and item.live_evidence.get("passed") is True
+        ):
+            item.done = False
 
 
 def parse_definition_of_done(spec_text: str) -> list[DoDItem]:
@@ -196,11 +482,36 @@ def parse_definition_of_done(spec_text: str) -> list[DoDItem]:
             continue
         m = _CHECKBOX_RE.match(line)
         if m:
-            items.append(DoDItem(text=m.group(2).strip(), done=m.group(1).lower() == "x"))
+            items.append(_parse_item(m.group(2).strip(), m.group(1).lower() == "x"))
+            continue
+        if "[" in line:
+            for inline_match in _INLINE_CHECKBOX_RE.finditer(line):
+                text = inline_match.group(2).strip()
+                if text:
+                    items.append(_parse_item(text, inline_match.group(1).lower() == "x"))
     if not items:
         stripped = spec_text.strip()
         if stripped:
             items.append(DoDItem(text=stripped))
+    else:
+        # AI Project Manager specs intentionally repeat the Trello task in
+        # the Goal section and render the same requirements again as a
+        # Markdown checklist. Treat equal requirement text as one DoD item,
+        # otherwise a 9-point card becomes 18 points and burns extra provider
+        # iterations. Contradictory checkbox states merge conservatively.
+        unique: dict[str, DoDItem] = {}
+        for item in items:
+            existing = unique.get(item.text)
+            if existing is None:
+                unique[item.text] = item
+                continue
+            existing.done = existing.done and item.done
+            if existing.live_command is None and item.live_command is not None:
+                existing.live_command = item.live_command
+                existing.live_expected = item.live_expected
+        items = list(unique.values())
+    _apply_declared_live_results(spec_text, items)
+    _enforce_live_evidence(items)
     return items
 
 
@@ -387,6 +698,99 @@ def _build_repair_prompt(requested_indices: list[int], dod_items: list[DoDItem])
     return "\n".join(lines)
 
 
+def _build_audit_repair_prompt(
+    dod_items: list[DoDItem],
+    previous_test_output: Optional[str],
+) -> str:
+    """Cheap, bounded reprompt used at most once per audit when the auditor's
+    first response was not valid audit JSON. Never a second full review pass -
+    it only asks the auditor to resend its own evaluation in the right shape.
+
+    Kept short: no goal repetition, no full project-status rebuild, no
+    re-listing of every DoD item's full text unless the item text is short.
+    The contract (schema shape) is restated because that is what broke.
+    """
+    lines = [
+        "Tvá předchozí audit odpověď nebyla platný JSON podle zadaného kontraktu.",
+        "NEDĚLEJ žádnou novou kontrolu, nic neměň - jen znovu pošli svůj výsledek "
+        "v tomto tvaru (jenom JSON, bez markdownu, bez textu před ani za ním):",
+        json.dumps(
+            {
+                "items": [
+                    {"index": i, "accepted": True, "evidence": "kratky dulez pro index i"}
+                    for i in range(len(dod_items))
+                ],
+                "notes": "strucne zduvodneni",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        "",
+        "Každý index musí mít právě jeden záznam s 'accepted' (bool) a 'evidence' "
+        "(konkretni soubor/symbol/test/live vystup).",
+        f"Počet bodů k ověření: {len(dod_items)}.",
+    ]
+    if previous_test_output:
+        lines.append("")
+        lines.append("Výstup testů (k dispozici pro kontext):")
+        lines.append(previous_test_output[:800])
+    return "\n".join(lines)
+
+
+def _dod_response_schema(requested_indices: list[int]) -> dict:
+    """Strict final-response contract for implementation and repair calls."""
+    return {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "minItems": len(requested_indices),
+                "maxItems": len(requested_indices),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer", "enum": requested_indices},
+                        "done": {"type": "boolean"},
+                    },
+                    "required": ["index", "done"],
+                    "additionalProperties": False,
+                },
+            },
+            "notes": {"type": "string"},
+        },
+        "required": ["items", "notes"],
+        "additionalProperties": False,
+    }
+
+
+def _audit_response_schema(item_count: int) -> dict:
+    """Strict final-response contract for the independent audit call."""
+    indices = list(range(item_count))
+    return {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "minItems": item_count,
+                "maxItems": item_count,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer", "enum": indices},
+                        "accepted": {"type": "boolean"},
+                        "evidence": {"type": "string"},
+                    },
+                    "required": ["index", "accepted", "evidence"],
+                    "additionalProperties": False,
+                },
+            },
+            "notes": {"type": "string"},
+        },
+        "required": ["items", "notes"],
+        "additionalProperties": False,
+    }
+
+
 def _project_status_text(project_path: Path) -> str:
     if not is_git_repo(project_path):
         return "(projekt není Git repozitář, stav nelze zobrazit)"
@@ -420,6 +824,9 @@ def _build_iteration_prompt(
     lines = [
         f"Autonomní vývojová iterace {iteration}/{max_iterations}.",
         "",
+        "Kanonický runtime contract (machine rules):",
+        _runtime_contract_text(),
+        "",
         f"Cíl projektu: {goal}",
         "",
         f"Definition of Done: {done_count}/{total} bodů celkem už ověřeno jako splněno "
@@ -428,7 +835,13 @@ def _build_iteration_prompt(
         "zaměřit v této iteraci:",
     ]
     for idx in requested_indices:
-        lines.append(f"{idx}. [NESPLNĚNO] {dod_items[idx].text}")
+        item = dod_items[idx]
+        lines.append(f"{idx}. [NESPLNĚNO] {item.text}")
+        if item.live_command is not None:
+            lines.append(
+                f"   LIVE DŮKAZ VYŽADOVÁN: krok={item.live_command!r}; očekávaný výstup="
+                f"{item.live_expected!r}. Bez LIVE-RESULT od externí integrace tento bod neoznačuj hotový."
+            )
 
     lines += ["", "Aktuální stav projektu (git status --porcelain):", project_status]
 
@@ -482,6 +895,9 @@ def _build_audit_prompt(
         f"{AUDIT_MARKER} (nezávislá kontrola před dokončením běhu - NEDĚLEJ žádné změny v kódu "
         "ani v souborech, pouze ověřuj).",
         "",
+        "Kanonický runtime contract (machine rules):",
+        _runtime_contract_text(),
+        "",
         f"Cíl projektu: {goal}",
         "",
         "Implementační agent tvrdí, že jsou splněny všechny následující body Definition of Done:",
@@ -494,7 +910,7 @@ def _build_audit_prompt(
     if test_command:
         result_label = "nespuštěny" if tests_passed is None else ("PROŠLY" if tests_passed else "SELHALY")
         lines += ["", f"Výsledek testů ({test_command}) ověřený orchestrátorem (ne agentem): {result_label}"]
-        if tests_passed is False and test_output:
+        if test_output:
             lines += ["Výstup testů:", tail_text(test_output, 1500)]
 
     lines += [
@@ -505,8 +921,12 @@ def _build_audit_prompt(
         "",
         "Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný "
         "markdown blok, žádný text před ani za ním) přesně v tomto tvaru:",
-        '{"rejected_indices": [], "notes": "strucne zduvodneni"}',
-        "Pokud jsou všechny body skutečně splněné, pošli prázdný seznam rejected_indices.",
+        '{"items":[{"index":0,"accepted":false,"evidence":"soubor/test/live vystup"}],'
+        '"notes":"strucne zduvodneni"}',
+        "Pole items musí obsahovat právě jeden záznam pro KAŽDÝ index. Evidence musí být konkrétní "
+        "a dohledatelná (soubor+symbol, test, nebo live výstup); samotné tvrzení implementačního "
+        "agenta ani obecné 'testy prošly' není důkaz splnění daného bodu. Pokud důkaz chybí, nastav "
+        "accepted=false.",
     ]
     return "\n".join(lines)
 
@@ -518,6 +938,82 @@ class AuditOutcome:
     protocol_error: bool
     session_id: Optional[str]
     breaker_saved_attempts: int = 0
+    # Set when the audit call itself failed because every configured
+    # provider is exhausted/unavailable (AgentRunResult.limited), NOT
+    # because the agent returned malformed JSON. Kept distinct from
+    # `protocol_error` so the caller can correctly transition the whole run
+    # to WAITING_FOR_PROVIDER instead of counting this towards
+    # PROTOCOL_ERROR_STREAK_LIMIT - see run_autonomous_loop.
+    limited: bool = False
+    retry_after_seconds: Optional[float] = None
+    error: Optional[str] = None
+    usage_events: list[dict] = field(default_factory=list)
+    # Whether the one allowed cheap audit repair reprompt was attempted this
+    # iteration (tracked so the log/outbox can show whether the audit recovered
+    # via repair or failed cleanly - mirrors executor's repair_attempted).
+    audit_repair_attempted: bool = False
+
+
+def _validate_audit_response(
+    parsed: dict,
+    expected_indices: set[int],
+    item_count: int,
+) -> tuple[bool, list[int], list[str]]:
+    """Validate an already-parsed audit JSON against the strict contract.
+
+    Accepts only the structured format
+    (``{"items": [{"index":..., "accepted":..., "evidence":...}]}``).
+    The former flat format is rejected because it cannot carry evidence for
+    every index and would weaken the independent-audit boundary.
+
+    Returns (protocol_error, rejected_indices, evidence_lines). When
+    protocol_error is True the response is structurally broken and must not
+    be trusted at all; rejected_indices is only meaningful when protocol_error
+    is False.
+    """
+    audit_items = parsed.get("items")
+
+    # Legacy flat format is intentionally no longer accepted.  It has no
+    # per-index evidence, so an empty rejection list could falsely accept an
+    # entire project without an independent proof for each DoD item.
+    if not isinstance(audit_items, list):
+        legacy_rejected = parsed.get("rejected_indices")
+        if isinstance(legacy_rejected, list) and all(isinstance(i, int) for i in legacy_rejected):
+            return True, [], ["legacy audit response lacks per-index evidence"]
+        return True, [], []
+
+    seen: set[int] = set()
+    rejected: list[int] = []
+    evidence_lines: list[str] = []
+    for item in audit_items:
+        if not isinstance(item, dict):
+            return True, [], []
+        idx = item.get("index")
+        accepted = item.get("accepted")
+        evidence = item.get("evidence")
+        if (
+            not isinstance(idx, int)
+            or isinstance(idx, bool)
+            or idx not in expected_indices
+            or idx in seen
+            or not isinstance(accepted, bool)
+            or not isinstance(evidence, str)
+            or not evidence.strip()
+        ):
+            return True, [], []
+        seen.add(idx)
+        if not accepted:
+            rejected.append(idx)
+        evidence_lines.append(f"{idx}:{'OK' if accepted else 'REJECT'} {evidence.strip()}")
+
+    if seen != expected_indices:
+        missing = sorted(expected_indices - seen)
+        if missing:
+            evidence_lines.append(f"missing={missing}")
+        return True, [], evidence_lines
+
+    rejected.sort()
+    return False, rejected, evidence_lines
 
 
 def _run_audit(
@@ -533,34 +1029,228 @@ def _run_audit(
     run_id: str,
     iteration: int,
     logger,
+    max_iterations: int,
 ) -> AuditOutcome:
     """One independent, read-only verification call, made only when the
     executor claims completion and the orchestrator's own tests agree (see
     `run_autonomous_loop`). Never re-implements anything - it only ever
     confirms or rejects the executor's claim, so a commit is never gated on
-    the executor's self-report alone."""
+    the executor's self-report alone.
+
+    When the agent's response is not valid audit JSON, it gets exactly one
+    cheap repair reprompt (see `_build_audit_repair_prompt`) - never a full
+    re-audit iteration. If the repair also fails, the error is recorded as a
+    protocol error and excluded from no-progress tracking (same as the
+    executor repair path).
+    """
     prompt = _build_audit_prompt(goal, dod_items, project_status, test_command, tests_passed, test_output)
     logger.info(
         "Autonomní běh %s: iterace %s - všechny body tvrzeny jako splněné, spouštím nezávislý "
-        "audit (%s znaků, ~%s tokenů odhadem)",
-        run_id, iteration, len(prompt), len(prompt) // 4,
+        "audit (%s znaků, ~%s tokenů odhadem, schema %s znaků)",
+        run_id, iteration, len(prompt), len(prompt) // 4, len(_audit_response_schema(len(dod_items))),
     )
-    result = agent.run(AgentRunRequest(project_path=project_path, prompt=prompt, session_id=session_id))
+    audit_schema = _audit_response_schema(len(dod_items))
+    result = agent.run(
+        AgentRunRequest(
+            project_path=project_path,
+            prompt=prompt,
+            session_id=session_id,
+            output_schema=audit_schema,
+        )
+    )
     new_session_id = result.session_id or session_id
     saved = result.breaker_saved_attempts
+    provider = getattr(agent, "active_provider_name", getattr(agent, "name", None))
+    audit_usage = _usage_from_result(result, provider, "audit", iteration)
     if not result.success:
-        return AuditOutcome([], "Audit selhal (chyba agenta), zkusim priste znovu.", True, new_session_id, saved)
+        if result.limited:
+            # All configured providers are exhausted/unavailable - this is
+            # not a protocol violation, it must propagate as
+            # WAITING_FOR_PROVIDER (see incident cb501524e47e, 26.8.2026,
+            # and the module docstring's PROTOCOL_ERROR_STREAK_LIMIT note).
+            return AuditOutcome(
+                [], "Audit narazil na vyčerpané/nedostupné providery.", True, new_session_id, saved,
+                limited=True, retry_after_seconds=result.retry_after_seconds, error=result.error,
+                usage_events=audit_usage,
+            )
+        return AuditOutcome([], "Audit selhal (chyba agenta), zkusím příště znovu.", True, new_session_id, saved, usage_events=audit_usage)
 
     parsed = _extract_json(result.output_text)
-    if not parsed or not isinstance(parsed.get("rejected_indices"), list):
-        return AuditOutcome([], "Audit nevrátil platný JSON, zkusim priste znovu.", True, new_session_id, saved)
+    if not parsed:
+        # One cheap repair reprompt - never a re-audit iteration (same
+        # contract as the executor repair path, see module docstring).
+        return _audit_with_repair(
+            agent, project_path, goal, dod_items, project_status, test_command,
+            tests_passed, test_output, session_id, run_id, iteration, logger,
+            max_iterations, new_session_id=new_session_id, saved=saved, provider=provider,
+            usage=audit_usage, raw_output=result.output_text,
+        )
 
-    rejected = sorted(
-        {idx for idx in parsed["rejected_indices"] if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(dod_items)}
+    expected_indices = set(range(len(dod_items)))
+    protocol_error, rejected, evidence_lines = _validate_audit_response(
+    parsed, expected_indices, len(dod_items),
     )
+    if protocol_error:
+        # Try one repair before giving up on this audit.
+        return _audit_with_repair(
+            agent, project_path, goal, dod_items, project_status, test_command,
+            tests_passed, test_output, session_id, run_id, iteration, logger,
+            max_iterations, new_session_id=new_session_id, saved=saved, provider=provider,
+            usage=audit_usage, evidence_lines=evidence_lines, raw_output=result.output_text,
+        )
     notes = parsed.get("notes")
     notes = notes if isinstance(notes, str) else ""
-    return AuditOutcome(rejected, notes, False, new_session_id, saved)
+    if evidence_lines:
+        notes = (notes + " | " + " ; ".join(evidence_lines)).strip(" |")
+    return AuditOutcome(rejected, notes, False, new_session_id, saved, usage_events=audit_usage)
+
+
+def _run_controller_audit(
+    project_path: Path,
+    dod_items: list[DoDItem],
+    controller_gate_indices: set[int],
+    finalization: dict,
+    tests_passed: Optional[bool],
+    run_id: str,
+    logger,
+) -> AuditOutcome:
+    """Perform the controller-owned, zero-provider audit for finalization."""
+    unverified = [
+        index for index, item in enumerate(dod_items)
+        if not item.done and index not in controller_gate_indices
+    ]
+    proof_ok = tests_passed is True and not unverified and controller_finalization_is_current(
+        project_path, finalization
+    )
+    evidence = (
+        "Controller-owned deterministic audit: finalization proof, current HEAD, branch, "
+        "clean working tree, tests passed, origin and remote HEAD verified."
+    )
+    if proof_ok:
+        logger.info("Autonomní běh %s: controller finalization audit accepted without provider", run_id)
+        return AuditOutcome([], evidence, False, None, usage_events=[])
+    rejected = sorted(set(unverified) | controller_gate_indices)
+    reason = evidence + " Důkaz je neúplný nebo aktuální stav repozitáře nesouhlasí."
+    logger.warning("Autonomní běh %s: controller finalization audit rejected %s", run_id, rejected)
+    return AuditOutcome(rejected, reason, False, None, usage_events=[])
+
+
+def _audit_with_repair(
+    agent: Agent,
+    project_path: Path,
+    goal: str,
+    dod_items: list[DoDItem],
+    project_status: str,
+    test_command: Optional[str],
+    tests_passed: Optional[bool],
+    test_output: Optional[str],
+    session_id: Optional[str],
+    run_id: str,
+    iteration: int,
+    logger,
+    max_iterations: int,
+    *,
+    new_session_id: Optional[str],
+    saved: int,
+    provider: Optional[str],
+    usage: list[dict],
+    evidence_lines: list[str] = (),
+    raw_output: str = "",
+) -> AuditOutcome:
+    """After a failed/invalid first audit response, attempt exactly one cheap
+    repair reprompt (resend the JSON, no re-review). If that also fails the
+    error is recorded as a protocol error and excluded from no-progress
+    tracking (same as the executor repair path).
+
+    This is deliberately separate from `_run_audit` so the main path stays
+    linear and the repair codepath cannot accidentally be made recursive.
+    """
+    repair_prompt = _build_audit_repair_prompt(dod_items, test_output)
+    repair_prompt_chars = len(repair_prompt)
+    evidence_note = ((" [" + "; ".join(evidence_lines) + "]") if evidence_lines else "")
+    if raw_output:
+        evidence_note += " raw=" + tail_text(raw_output, 1500)
+    logger.info(
+        "Autonomní běh %s: iterace %s - audit odpověď nebyla platná, zkouším jeden levný "
+        "repair pokus (%s znaků)",
+        run_id, iteration, repair_prompt_chars,
+    )
+    repair_result = agent.run(
+        AgentRunRequest(
+            project_path=project_path,
+            prompt=repair_prompt,
+            session_id=new_session_id,
+            output_schema=_audit_response_schema(len(dod_items)),
+        )
+    )
+    repair_usage = _usage_from_result(repair_result, provider, "audit-repair", iteration)
+    usage.extend(repair_usage)
+
+    if not repair_result.success:
+        if repair_result.limited:
+            logger.error(
+                "Autonomní běh %s: iterace %s/%s - audit repair narazil na "
+                "vyčerpané/nedostupné providery, přecházím do WAITING_FOR_PROVIDER: %s",
+                run_id, iteration, len(project_status.split("\n")) or 1, repair_result.error,
+            )
+            return AuditOutcome(
+                [], "Audit repair narazil na vyčerpané/nedostupné providery.", True,
+                repair_result.session_id or new_session_id, saved,
+                audit_repair_attempted=True,
+                limited=True, retry_after_seconds=repair_result.retry_after_seconds,
+                error=repair_result.error, usage_events=usage,
+            )
+        logger.warning(
+            "Autonomní běh %s: iterace %s/%s - audit i po repair pokusu stále neplatná JSON",
+            run_id, iteration, max_iterations,
+        )
+        return AuditOutcome(
+            [], "Audit nevrátil platný JSON ani po repair pokusu." + evidence_note, True,
+            repair_result.session_id or new_session_id, saved,
+            audit_repair_attempted=True, usage_events=usage,
+        )
+
+    repaired_parsed = _extract_json(repair_result.output_text)
+    if not repaired_parsed:
+        logger.warning(
+            "Autonomní běh %s: iterace %s/%s - audit repair odpověď stále nebyla JSON",
+            run_id, iteration, max_iterations,
+        )
+        return AuditOutcome(
+            [], "Audit nevrátil platný JSON ani po repair pokusu." + evidence_note, True,
+            repair_result.session_id or new_session_id, saved,
+            audit_repair_attempted=True, usage_events=usage,
+        )
+
+    expected_indices = set(range(len(dod_items)))
+    repair_protocol_error, repaired_rejected, repaired_evidence_lines = _validate_audit_response(
+        repaired_parsed, expected_indices, len(dod_items),
+    )
+    if repair_protocol_error:
+        logger.warning(
+            "Autonomní běh %s: iterace %s/%s - audit repair odpověď stále nebyla platná",
+            run_id, iteration, max_iterations,
+        )
+        return AuditOutcome(
+            [], "Audit nevrátil platný JSON ani po repair pokusu." + evidence_note, True,
+            repair_result.session_id or new_session_id, saved,
+            audit_repair_attempted=True, usage_events=usage,
+        )
+
+    repair_notes = repaired_parsed.get("notes")
+    repair_notes = repair_notes if isinstance(repair_notes, str) else ""
+    combined = list(evidence_lines) + list(repaired_evidence_lines)
+    if combined:
+        repair_notes = (repair_notes + " | " + " ; ".join(combined)).strip(" |")
+    logger.info(
+        "Autonomní běh %s: iterace %s - audit repair pokus úspěšný, přijato %s bod(ů)",
+        run_id, iteration, len(repaired_rejected),
+    )
+    return AuditOutcome(
+        repaired_rejected, repair_notes, False,
+        repair_result.session_id or new_session_id, saved,
+        audit_repair_attempted=True, usage_events=usage,
+    )
 
 
 def _iteration_signature(dod_items: list[DoDItem], tests_passed: Optional[bool], test_output: Optional[str]) -> str:
@@ -618,7 +1308,18 @@ def _commit_if_ready(
 
 # -- test command auto-detection ---------------------------------------------
 
-_PYTHON_PROJECT_MARKERS = ("pyproject.toml", "setup.cfg", "setup.py", "pytest.ini", "tox.ini")
+_PYTHON_PROJECT_MARKERS = (
+    "pyproject.toml", "setup.cfg", "setup.py", "pytest.ini", "tox.ini",
+    # A project with a "tests/" dir and a plain requirements.txt but no
+    # packaging metadata file (this repo itself, ai-orchestrator, is one
+    # such project) is still unambiguously a real Python test suite, not a
+    # guess - without this marker, _detect_test_command returned None here
+    # and every autonomous run against this project's own repo silently
+    # never executed its test suite (tests_passed stayed None forever
+    # instead of a real pass/fail), which is exactly the "unverified DoD
+    # item" AGENTS.md rule 9 exists to prevent.
+    "requirements.txt",
+)
 
 
 def _detect_test_command(project_path: Path) -> Optional[str]:
@@ -653,6 +1354,8 @@ def run_autonomous_loop(
     auto_commit_requested: bool = True,
     on_iteration: Optional[Callable[[AutonomousResult], None]] = None,
     preexisting_dirty: Optional[bool] = None,
+    controller_finalization: Optional[dict] = None,
+    implementation_only: bool = False,
 ) -> AutonomousResult:
     max_iterations = max(1, min(max_iterations, ABSOLUTE_MAX_ITERATIONS))
     # preexisting_dirty, when passed by OrchestratorService.run_autonomous(),
@@ -688,6 +1391,10 @@ def run_autonomous_loop(
     prev_test_output: Optional[str] = None
     total_prompt_chars = 0
     breaker_saved_total = 0
+    protocol_error_streak = 0
+    protocol_error_total = 0
+    protocol_error_wasted_chars = 0
+    usage_events: list[dict] = []
 
     def note_breaker_savings(saved: int) -> None:
         """Surface the PreToolUse circuit breaker's short-circuit count
@@ -705,9 +1412,16 @@ def run_autonomous_loop(
             )
 
     def snapshot(status: AutonomousStatus, **extra) -> AutonomousResult:
+        usage_by_provider, usage_total = _usage_summary(usage_events)
         return AutonomousResult(
             status=status, iterations=list(iterations), dod_items=dod_items,
-            breaker_saved_attempts=breaker_saved_total, **extra,
+            audit_repair_attempted=any(it.audit_repair_attempted for it in iterations),
+            breaker_saved_attempts=breaker_saved_total,
+            protocol_error_total=protocol_error_total,
+            protocol_error_wasted_prompt_chars=protocol_error_wasted_chars,
+            usage_events=list(usage_events), usage_by_provider=usage_by_provider,
+            usage_total=usage_total,
+            **extra,
         )
 
     logger.info(
@@ -715,15 +1429,42 @@ def run_autonomous_loop(
         run_id, project_path, max_iterations, len(dod_items), DOD_BATCH_SIZE,
     )
 
+    controller_gate_indices = _controller_audit_gate_indices(dod_items)
+    if controller_gate_indices:
+        logger.info(
+            "Autonomní běh %s: DoD body %s jsou auditní brána kontroleru; "
+            "nebudou blokovat implementační iterace",
+            run_id, sorted(controller_gate_indices),
+        )
+
     for i in range(1, max_iterations + 1):
         project_status = _project_status_text(project_path)
         requested_indices = _select_batch(dod_items)
+        requested_indices = [
+            index for index in requested_indices if index not in controller_gate_indices
+        ]
+        if not requested_indices and prev_tests_passed is False:
+            # Executor checkboxes are not verified completion when the
+            # orchestrator's own tests fail. Reopen one bounded batch so the
+            # next iteration actually calls the implementation agent with
+            # the failing test output instead of burning every remaining
+            # iteration on identical test-only retries.
+            requested_indices = list(range(min(DOD_BATCH_SIZE, len(dod_items))))
+            for idx in requested_indices:
+                dod_items[idx].done = False
+            logger.info(
+                "Autonomní běh %s: předchozí testy selhaly při všech DoD bodech tvrzených jako "
+                "hotové; znovuotevírám opravnou dávku %s pro implementačního agenta",
+                run_id, requested_indices,
+            )
 
         agent_output = ""
         agent_error: Optional[str] = None
         protocol_error = False
         repair_attempted = False
         repair_succeeded = False
+        repair_prompt_chars = 0
+        iteration_usage: list[dict] = []
         notes = previous_notes
 
         if requested_indices:
@@ -740,8 +1481,16 @@ def run_autonomous_loop(
                 prompt_chars, prompt_chars // 4, total_prompt_chars,
             )
             result = agent.run(
-                AgentRunRequest(project_path=project_path, prompt=prompt, session_id=session_id)
+                AgentRunRequest(
+                    project_path=project_path,
+                    prompt=prompt,
+                    session_id=session_id,
+                    output_schema=_dod_response_schema(requested_indices),
+                )
             )
+            provider_name = getattr(agent, "active_provider_name", getattr(agent, "name", None))
+            iteration_usage.extend(_usage_from_result(result, provider_name, "executor", i))
+            usage_events.extend(iteration_usage)
             session_id = result.session_id or session_id
             note_breaker_savings(result.breaker_saved_attempts)
 
@@ -751,7 +1500,7 @@ def run_autonomous_loop(
                     IterationLog(
                         index=i, prompt=prompt, agent_output=result.output_text, agent_error=result.error,
                         tests_passed=None, test_output=None,
-                        dod_snapshot=[{"text": d.text, "done": d.done} for d in dod_items],
+                        dod_snapshot=[_dod_dict(d) for d in dod_items],
                         requested_indices=requested_indices, prompt_chars=prompt_chars,
                         agent_name=getattr(agent, "active_provider_name", getattr(agent, "name", None)),
                     )
@@ -775,16 +1524,62 @@ def run_autonomous_loop(
                 repair_attempted = True
                 repair_targets = missing or list(requested_indices)
                 repair_prompt = _build_repair_prompt(repair_targets, dod_items)
+                repair_prompt_chars = len(repair_prompt)
                 logger.info(
                     "Autonomní běh %s: iterace %s/%s - odpověď agenta neodpovídá protokolu, "
                     "zkouším jeden levný repair pokus na indexy %s (%s znaků)",
                     run_id, i, max_iterations, repair_targets, len(repair_prompt),
                 )
                 repair_result = agent.run(
-                    AgentRunRequest(project_path=project_path, prompt=repair_prompt, session_id=session_id)
+                    AgentRunRequest(
+                        project_path=project_path,
+                        prompt=repair_prompt,
+                        session_id=session_id,
+                        output_schema=_dod_response_schema(repair_targets),
+                    )
                 )
+                repair_usage = _usage_from_result(
+                    repair_result, getattr(agent, "active_provider_name", getattr(agent, "name", None)),
+                    "repair", i,
+                )
+                iteration_usage.extend(repair_usage)
+                usage_events.extend(repair_usage)
                 session_id = repair_result.session_id or session_id
                 note_breaker_savings(repair_result.breaker_saved_attempts)
+                if not repair_result.success and repair_result.limited:
+                    # All configured providers are exhausted/unavailable -
+                    # this is not a protocol violation, it must propagate as
+                    # WAITING_FOR_PROVIDER, not be swallowed into another
+                    # unresolved protocol_error iteration (see incident
+                    # cb501524e47e, 26.8.2026: without this check, a
+                    # provider limit hit specifically during the repair
+                    # reprompt call eventually stopped the run as
+                    # PROTOCOL_ERROR instead of WAITING_FOR_PROVIDER).
+                    logger.error(
+                        "Autonomní běh %s: iterace %s/%s - repair pokus narazil na "
+                        "vyčerpané/nedostupné providery, přecházím do WAITING_FOR_PROVIDER "
+                        "místo protokolové chyby: %s",
+                        run_id, i, max_iterations, repair_result.error,
+                    )
+                    iterations.append(
+                        IterationLog(
+                            index=i, prompt=prompt, agent_output=agent_output,
+                            agent_error=repair_result.error,
+                            tests_passed=None, test_output=None,
+                            dod_snapshot=[_dod_dict(d) for d in dod_items],
+                            note=notes, protocol_error=True,
+                            requested_indices=requested_indices, prompt_chars=prompt_chars,
+                            repair_attempted=True, repair_succeeded=False,
+                            audit_repair_attempted=True,
+                            agent_name=getattr(agent, "active_provider_name", getattr(agent, "name", None)),
+                            usage=iteration_usage,
+                        )
+                    )
+                    final = snapshot(AutonomousStatus.WAITING_FOR_PROVIDER, error=repair_result.error)
+                    final.retry_after_seconds = repair_result.retry_after_seconds
+                    if on_iteration:
+                        on_iteration(final)
+                    return final
                 if repair_result.success:
                     repair_parsed = _extract_json(repair_result.output_text)
                     repair_notes, repair_protocol_error, _ = _apply_dod_updates(
@@ -808,6 +1603,9 @@ def run_autonomous_loop(
                 run_id, i, max_iterations,
             )
 
+        # Agent claim and local tests cannot close an integration item.
+        _enforce_live_evidence(dod_items)
+
         if test_command:
             tests_passed, test_output = run_test_command(project_path, test_command, logger)
         else:
@@ -818,7 +1616,16 @@ def run_autonomous_loop(
         audit_performed = False
         audit_rejected: list[int] = []
         audit_protocol_error = False
+        audit_repair_attempted = False
+        controller_gate_rejected = False
 
+        # Controller-owned audit gates remain false until the independent
+        # audit itself accepts them. They must not force the executor into
+        # repeated implementation iterations.
+        implementation_done = all(
+            item.done or index in controller_gate_indices
+            for index, item in enumerate(dod_items)
+        )
         all_done = all(item.done for item in dod_items)
         tests_ok = tests_passed is not False
         completed = False
@@ -826,20 +1633,75 @@ def run_autonomous_loop(
         committed = False
         commit_hash: Optional[str] = None
 
-        if all_done and tests_ok and not protocol_error:
+        if implementation_done and tests_ok and not protocol_error and implementation_only:
+            completed = True
+            previous_notes = (
+                f"{previous_notes} [implementation-only] "
+                "Implementation and orchestrator-run tests are complete; "
+                "audit is deferred to the separate following workflow tick."
+            ).strip()
+        elif implementation_done and tests_ok and not protocol_error:
             audit_performed = True
-            audit = _run_audit(
-                agent, project_path, goal, dod_items, project_status, test_command,
-                tests_passed, test_output, session_id, run_id, i, logger,
-            )
+            if controller_finalization is not None:
+                audit = _run_controller_audit(
+                    project_path, dod_items, controller_gate_indices, controller_finalization,
+                    tests_passed, run_id, logger,
+                )
+            else:
+                audit = _run_audit(
+                    agent, project_path, goal, dod_items, project_status, test_command,
+                    tests_passed, test_output, session_id, run_id, i, logger, max_iterations,
+                )
             session_id = audit.session_id or session_id
             note_breaker_savings(audit.breaker_saved_attempts)
+            usage_events.extend(audit.usage_events)
+            iteration_usage.extend(audit.usage_events)
+
+            if audit.limited:
+                # All configured providers are exhausted/unavailable - this
+                # is not a protocol violation, it must propagate as
+                # WAITING_FOR_PROVIDER (see incident cb501524e47e,
+                # 26.8.2026: without this check, a provider limit hit
+                # specifically during the independent audit call eventually
+                # stopped the run as PROTOCOL_ERROR instead of
+                # WAITING_FOR_PROVIDER).
+                logger.error(
+                    "Autonomní běh %s: iterace %s/%s - audit narazil na vyčerpané/nedostupné "
+                    "providery, přecházím do WAITING_FOR_PROVIDER: %s",
+                    run_id, i, max_iterations, audit.error,
+                )
+                audit_repair_attempted = audit.audit_repair_attempted
+                iterations.append(
+                    IterationLog(
+                        index=i, prompt=prompt, agent_output=agent_output, agent_error=audit.error,
+                        tests_passed=tests_passed, test_output=test_output,
+                        dod_snapshot=[_dod_dict(d) for d in dod_items],
+                        note=previous_notes, protocol_error=protocol_error,
+                        requested_indices=requested_indices, prompt_chars=prompt_chars,
+                        repair_attempted=repair_attempted, repair_succeeded=repair_succeeded,
+                        audit_performed=True, audit_rejected_indices=[],
+                        audit_protocol_error=True,
+                        audit_repair_attempted=audit.audit_repair_attempted,
+                        agent_name=getattr(agent, "active_provider_name", getattr(agent, "name", None)),
+                        usage=iteration_usage,
+                    )
+                )
+                final = snapshot(AutonomousStatus.WAITING_FOR_PROVIDER, error=audit.error)
+                final.retry_after_seconds = audit.retry_after_seconds
+                if on_iteration:
+                    on_iteration(final)
+                return final
+
             audit_rejected = audit.rejected_indices
             audit_protocol_error = audit.protocol_error
+            audit_repair_attempted = audit.audit_repair_attempted
 
             if audit_protocol_error:
                 previous_notes = f"{previous_notes} [audit] {audit.notes}".strip()
             elif audit_rejected:
+                controller_gate_rejected = bool(
+                    set(audit_rejected) & controller_gate_indices
+                )
                 for idx in audit_rejected:
                     dod_items[idx].done = False
                 logger.warning(
@@ -850,6 +1712,17 @@ def run_autonomous_loop(
                     f"{previous_notes} [audit] Auditor odmítl body {audit_rejected}: {audit.notes}"
                 ).strip()
             else:
+                # Preserve the per-item acceptance evidence in the durable
+                # iteration/outbox log as well. Without this, a successful
+                # audit left only rejected_indices=[], making an operator
+                # unable to distinguish evidence-backed acceptance from a
+                # rubber-stamp response.
+                previous_notes = (
+                    f"{previous_notes} [audit] Auditor přijal všechny body: {audit.notes}"
+                ).strip()
+                for idx in controller_gate_indices:
+                    dod_items[idx].done = True
+                all_done = all(item.done for item in dod_items)
                 committed, commit_hash, commit_error = _commit_if_ready(
                     project_path, config, auto_commit_requested, tests_passed, run_id, goal, logger,
                     preexisting_dirty=preexisting_dirty,
@@ -860,15 +1733,27 @@ def run_autonomous_loop(
             IterationLog(
                 index=i, prompt=prompt, agent_output=agent_output, agent_error=agent_error,
                 tests_passed=tests_passed, test_output=test_output,
-                dod_snapshot=[{"text": d.text, "done": d.done} for d in dod_items],
+                dod_snapshot=[_dod_dict(d) for d in dod_items],
                 note=previous_notes, protocol_error=protocol_error,
                 requested_indices=requested_indices, prompt_chars=prompt_chars,
                 repair_attempted=repair_attempted, repair_succeeded=repair_succeeded,
                 audit_performed=audit_performed, audit_rejected_indices=audit_rejected,
                 audit_protocol_error=audit_protocol_error,
+                audit_repair_attempted=audit_repair_attempted,
                 agent_name=getattr(agent, "active_provider_name", getattr(agent, "name", None)),
+                usage=iteration_usage,
             )
         )
+        if controller_gate_rejected:
+            reason = (
+                "independent audit rejected the controller-owned accepted/rejected gate; "
+                "refusing to repeat implementation iterations"
+            )
+            logger.warning("Autonomní běh %s: %s", run_id, reason)
+            final = snapshot(AutonomousStatus.BLOCKED, error=reason)
+            if on_iteration:
+                on_iteration(final)
+            return final
         logger.info(
             "Autonomní běh %s: iterace %s/%s dokončena (testy prošly=%s, nesplněných bodů=%s, "
             "protokolová chyba=%s, repair pokus=%s, audit proveden=%s)",
@@ -886,6 +1771,99 @@ def run_autonomous_loop(
             if on_iteration:
                 on_iteration(final)
             return final
+
+        # A protocol error (executor JSON still invalid/incomplete after the
+        # one cheap repair, or an unparsable audit response) is excluded from
+        # the no-progress signature below because it carries no signal about
+        # whether the task itself is stuck - but it must not be free to
+        # repeat forever either (see incident run
+        # 7fffd21835174d9fb9a29237c897f6d2 in the module docstring: 7
+        # consecutive protocol errors burned a whole provider's usage limit
+        # for zero verified progress before this counter existed). Tracked
+        # separately from same_signature_count, with its own low threshold.
+        iteration_had_protocol_error = protocol_error or audit_protocol_error
+        if iteration_had_protocol_error:
+            protocol_error_streak += 1
+            protocol_error_total += 1
+            protocol_error_wasted_chars += prompt_chars + repair_prompt_chars
+        else:
+            protocol_error_streak = 0
+
+        if iteration_had_protocol_error and protocol_error_streak >= PROTOCOL_ERROR_STREAK_LIMIT:
+            reason = (
+                f"Agent {protocol_error_streak}x za sebou nevrátil platný JSON kontrakt "
+                "(i po repair pokusu) - jde o protokolovou nekompatibilitu, ne o chybějící "
+                "pokrok v úkolu."
+            )
+            # A repeated protocol violation is a provider-side
+            # incompatibility, exactly like a quota/rate limit - so it gets
+            # the same right to fail over to another configured provider
+            # (see agents/failover.py's FailoverAgent), not just quota/rate
+            # limits. Plain single-agent callers (no failover configured)
+            # have no such method and fall straight through to stopping.
+            force_failover = getattr(agent, "force_failover_on_protocol_error", None)
+            if callable(force_failover) and force_failover(reason):
+                logger.warning(
+                    "Autonomní běh %s: iterace %s/%s - %s Failover proveden, pokračuji dalším "
+                    "providerem.",
+                    run_id, i, max_iterations, reason,
+                )
+                protocol_error_streak = 0
+            else:
+                logger.error(
+                    "Autonomní běh %s: iterace %s/%s - %s Žádný další provider není k dispozici, "
+                    "zastavuji běh jako PROTOCOL_ERROR místo dalšího plýtvání iteracemi/limitem.",
+                    run_id, i, max_iterations, reason,
+                )
+                notify(
+                    f"[AI Orchestrator] Autonomní běh {run_id} zastaven (PROTOCOL_ERROR): {reason} "
+                    f"Odhadovaná promarněná spotřeba: ~{protocol_error_wasted_chars // 4} tokenů "
+                    f"přes {protocol_error_total} protokolově chybných iterací."
+                )
+                final = snapshot(AutonomousStatus.PROTOCOL_ERROR, error=reason)
+                if on_iteration:
+                    on_iteration(final)
+                return final
+
+        # Per-job, provider-specific financial hard cap (see
+        # ClaudeCodeAgentConfig/AntigravityAgentConfig/CodexAgentConfig.
+        # max_budget_usd and _provider_budget_usd): checked once per
+        # iteration against this run's own cumulative reported cost_usd for
+        # the currently active provider, never against a single call's
+        # cost - a provider that has no reported cost_usd (usage tracking is
+        # best-effort, see AutonomousResult.usage_events) never triggers
+        # this, it can only ever fire on positively confirmed spend.
+        budget_provider_name = getattr(agent, "active_provider_name", getattr(agent, "name", None))
+        budget_limit = _provider_budget_usd(config, budget_provider_name)
+        if budget_limit is not None:
+            usage_by_provider, _ = _usage_summary(usage_events)
+            spent = (usage_by_provider.get(budget_provider_name) or {}).get("cost_usd")
+            if spent is not None and spent > budget_limit:
+                budget_reason = (
+                    f"Provider '{budget_provider_name}' překročil nakonfigurovaný finanční "
+                    f"limit pro tuto úlohu (utraceno ${spent:.2f} > limit ${budget_limit:.2f})."
+                )
+                force_failover_budget = getattr(agent, "force_failover_on_budget_exceeded", None)
+                if callable(force_failover_budget) and force_failover_budget(budget_reason):
+                    logger.warning(
+                        "Autonomní běh %s: iterace %s/%s - %s Failover proveden, pokračuji "
+                        "dalším providerem.",
+                        run_id, i, max_iterations, budget_reason,
+                    )
+                else:
+                    logger.error(
+                        "Autonomní běh %s: iterace %s/%s - %s Žádný další provider není k "
+                        "dispozici, zastavuji běh jako BUDGET_EXCEEDED.",
+                        run_id, i, max_iterations, budget_reason,
+                    )
+                    notify(
+                        f"[AI Orchestrator] Autonomní běh {run_id} zastaven (BUDGET_EXCEEDED): "
+                        f"{budget_reason}"
+                    )
+                    final = snapshot(AutonomousStatus.BUDGET_EXCEEDED, error=budget_reason)
+                    if on_iteration:
+                        on_iteration(final)
+                    return final
 
         # Only a verified, comparable iteration counts towards no-progress:
         # a protocol error (unparsable/incomplete agent JSON, even after the

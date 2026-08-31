@@ -23,7 +23,13 @@ _service: Optional[OrchestratorService] = None
 def get_service() -> OrchestratorService:
     global _service
     if _service is None:
-        _service = OrchestratorService()
+        # This process blocks forever in uvicorn.run() (see serve() below),
+        # so its OrchestratorService's internal waiting worker thread will
+        # actually get a chance to resume a WAITING_FOR_PROVIDER task on its
+        # own - unlike the CLI's one-shot `autonomous`/`run` commands, which
+        # exit right after their single task finishes. See
+        # OrchestratorService.__init__'s `persistent` parameter.
+        _service = OrchestratorService(persistent=True)
     return _service
 
 

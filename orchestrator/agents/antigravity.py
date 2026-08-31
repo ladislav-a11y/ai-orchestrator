@@ -266,6 +266,7 @@ class AntigravityAgent(Agent):
                     f"Antigravity neodpověděl do {self.config.timeout_seconds}s (timeout)."
                     + (f" stderr: {timeout_stderr}" if timeout_stderr else "")
                 ),
+                timed_out=True,
             )
         except FileNotFoundError as e:
             return AgentRunResult(success=False, output_text="", error=f"Nelze spustit CLI: {e}")

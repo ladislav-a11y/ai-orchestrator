@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from orchestrator.agents import codex as codex_module
-from orchestrator.agents.codex import CodexAgent, find_codex_cli
+from orchestrator.agents.codex import CodexAgent, contract_fingerprint, find_codex_cli
 from orchestrator.agents.base import AgentRunRequest
 from orchestrator.config import CodexAgentConfig
 
@@ -52,6 +52,24 @@ def test_find_codex_cli_missing_explicit_path():
     assert "neexistuje" in note
 
 
+def test_contract_fingerprint_is_stable_and_looks_like_sha256():
+    first = contract_fingerprint()
+    second = contract_fingerprint()
+    assert first == second
+    assert len(first) == 64
+    int(first, 16)  # raises ValueError if not valid hex
+
+
+def test_contract_fingerprint_changes_with_build_command_source(monkeypatch):
+    original = contract_fingerprint()
+
+    def other_build_command(self, request, output_schema_path=None):
+        return ["codex", "exec", "different-contract-shape", "-"]
+
+    monkeypatch.setattr(CodexAgent, "_build_command", other_build_command)
+    assert contract_fingerprint() != original
+
+
 def test_command_never_contains_forbidden_flags():
     agent = CodexAgent(make_config())
     cmd = agent._build_command(AgentRunRequest(project_path=Path("."), prompt="hello"))
@@ -71,9 +89,48 @@ def test_command_uses_exec_json_and_safe_sandbox():
     assert "--ephemeral" not in cmd
     assert "--ignore-user-config" in cmd
     assert "--approve-for-me" in cmd
-    assert cmd[-1] == "hello"
+    assert cmd[-1] == "-"
+    assert "hello" not in cmd
     assert "--cd" in cmd
     assert cmd[cmd.index("--cd") + 1] == "."
+    assert "--output-schema" not in cmd
+
+
+def test_run_enforces_and_cleans_up_output_schema(monkeypatch):
+    agent = CodexAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
+    captured_schema_path = None
+
+    def fake_run(cmd, **kwargs):
+        nonlocal captured_schema_path
+        assert "--output-schema" in cmd
+        captured_schema_path = Path(cmd[cmd.index("--output-schema") + 1])
+        assert json.loads(captured_schema_path.read_text(encoding="utf-8")) == schema
+        stdout = jsonl(
+            {"type": "thread.started", "thread_id": "thread-schema"},
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": '{"ok":true}'},
+            },
+            {"type": "turn.completed", "usage": {}},
+        )
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="hello", output_schema=schema)
+    )
+
+    assert result.success is True
+    assert result.output_text == '{"ok":true}'
+    assert captured_schema_path is not None
+    assert not captured_schema_path.exists()
 
 
 def test_command_uses_read_only_sandbox_without_approve_for_me():
@@ -87,21 +144,21 @@ def test_command_uses_read_only_sandbox_without_approve_for_me():
     assert "--ask-for-approval" not in cmd
 
 
-def test_command_uses_resume_subcommand_when_session_id_present():
+def test_command_starts_fresh_session_when_session_id_present():
     agent = CodexAgent(make_config())
     cmd = agent._build_command(
         AgentRunRequest(project_path=Path("."), prompt="hello", session_id="sess-1")
     )
     assert cmd[1] == "exec"
-    assert cmd[2] == "resume"
-    assert cmd[3] == "--json"
-    assert "--cd" not in cmd
+    assert "resume" not in cmd
+    assert "sess-1" not in cmd
+    assert "--json" in cmd
+    assert "--cd" in cmd
+    assert cmd[cmd.index("--cd") + 1] == "."
     assert "--ignore-user-config" in cmd
-    assert cmd[cmd.index("--json") + 2] == "sess-1"
-    # --ephemeral would skip persisting session state, which would make a
-    # later `resume` of this same session impossible - must not be used here.
+    assert "--sandbox" not in cmd
+    assert "--approve-for-me" in cmd
     assert "--ephemeral" not in cmd
-    assert "--approve-for-me" not in cmd
 
 
 def test_run_success(monkeypatch):
@@ -125,7 +182,8 @@ def test_run_success(monkeypatch):
     )
 
     def fake_run(cmd, **kwargs):
-        assert kwargs["stdin"] is subprocess.DEVNULL
+        assert cmd[-1] == "-"
+        assert "udelej neco" in kwargs["input"]
         return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -164,7 +222,8 @@ def test_run_success_parses_current_codex_jsonl_schema(monkeypatch):
     )
 
     def fake_run(cmd, **kwargs):
-        assert kwargs["stdin"] is subprocess.DEVNULL
+        assert cmd[-1] == "-"
+        assert "udelej neco" in kwargs["input"]
         return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -177,6 +236,9 @@ def test_run_success_parses_current_codex_jsonl_schema(monkeypatch):
     assert result.input_tokens == 100
     assert result.output_tokens == 20
     assert result.thinking_tokens == 5
+    # Current Codex omits total_tokens even though both exact components are
+    # present; the adapter must preserve a useful exact total.
+    assert result.total_tokens == 120
 
 
 def test_run_incomplete_current_schema_output_is_an_error(monkeypatch):
@@ -338,16 +400,18 @@ def test_run_timeout(monkeypatch):
     result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
     assert result.success is False
     assert "timeout" in result.error.lower()
+    assert result.timed_out is True
 
 
 def test_run_prompt_forbids_agent_git_commit(monkeypatch):
     agent = CodexAgent(make_config())
     monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
 
-    captured_cmd = {}
+    captured = {}
 
     def fake_run(cmd, **kwargs):
-        captured_cmd["cmd"] = cmd
+        captured["cmd"] = cmd
+        captured["input"] = kwargs["input"]
         fake_stdout = jsonl({"id": "s", "msg": {"type": "task_complete", "last_agent_message": "hotovo"}})
         return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
 
@@ -355,7 +419,8 @@ def test_run_prompt_forbids_agent_git_commit(monkeypatch):
 
     agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
 
-    sent_prompt = captured_cmd["cmd"][-1]
+    assert captured["cmd"][-1] == "-"
+    sent_prompt = captured["input"]
     assert "git commit" in sent_prompt
     assert "git status" in sent_prompt
     assert "udelej neco" in sent_prompt
@@ -366,7 +431,7 @@ def test_run_prompt_forbids_agent_git_commit(monkeypatch):
     reason=f"pouze explicitně přes {LIVE_ENV_VAR}=1 - spouští skutečné Codex CLI a spotřebovává kvótu",
 )
 def test_live_smoke_reads_project_state_without_changes(tmp_path):
-    """Optional live smoke test: real `codex` CLI, read-only prompt, no mutation.
+    """Real CLI contract smoke: read-only, structured final JSON, no mutation.
 
     Never runs in normal test runs (see skipif above) - only when explicitly
     requested, and only against a throwaway tmp_path, never a real project.
@@ -379,6 +444,7 @@ def test_live_smoke_reads_project_state_without_changes(tmp_path):
     available, note = agent.is_available()
     assert available, note
 
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
     (tmp_path / "marker.txt").write_text("hello", encoding="utf-8")
     before = sorted(p.name for p in tmp_path.iterdir())
 
@@ -386,12 +452,20 @@ def test_live_smoke_reads_project_state_without_changes(tmp_path):
         AgentRunRequest(
             project_path=tmp_path,
             prompt=(
-                "Do not create, modify, or delete any files. Just reply with the "
-                "single word OK to confirm you received this."
+                "Do not create, modify, or delete any files. Inspect marker.txt, then report "
+                "whether its content is hello using the required final JSON response."
             ),
+            output_schema={
+                "type": "object",
+                "properties": {"marker_is_hello": {"type": "boolean"}},
+                "required": ["marker_is_hello"],
+                "additionalProperties": False,
+            },
         )
     )
 
     after = sorted(p.name for p in tmp_path.iterdir())
     assert before == after, "live smoke test must never mutate the project directory"
+    assert result.success, result.error
+    assert json.loads(result.output_text) == {"marker_is_hello": True}
     assert result.raw_response is not None
