@@ -12,6 +12,7 @@ default_agent: claude-code
 # nedostupnosti CLI automaticky přepne na dalšího.
 provider_order:
   - hermes
+  - gemini
   - antigravity
   - claude-code
   - codex
@@ -117,6 +118,14 @@ hermes:
   cli_path: ""
   provider: nous
   model: upstage/solar-pro4:free
+  timeout_seconds: 600
+
+# Nastavení Gemini CLI. Gemini je headless provider s explicitním modelem
+# dostupným ve free tieru; API klíč dodává GEMINI_API_KEY v prostředí.
+gemini:
+  cli_path: ""
+  model: gemini-2.5-flash
+  approval_mode: auto_edit
   timeout_seconds: 600
 
 # Git integrace.

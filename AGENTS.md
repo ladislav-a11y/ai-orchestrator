@@ -190,6 +190,15 @@ this file, stop and ask - do not silently override safety rules.
      is active, autonomous.py must dispatch only one DoD item per iteration
      and keep final notes short; full-suite verification belongs to the
      orchestrator audit, not the Nous-free handoff.
+11f. **Production Gemini handoffs use the explicit free-tier-capable model and
+     safe approval mode.** The adapter must invoke the installed `gemini` CLI
+     headlessly with `--output-format json`, `--model gemini-2.5-flash`,
+     `--approval-mode auto_edit`, and explicit `--skip-trust` for the selected
+     workspace. `--skip-trust` is only a headless workspace acknowledgement;
+     it is not a permission bypass. The adapter must never pass `--yolo`/`-y`
+     or silently substitute another model. Malformed JSON, quota/rate errors,
+     and timeouts must remain distinct `AgentRunResult` failures so the
+     configured failover chain can continue without claiming successful work.
 12. **A repeated protocol error must never be allowed to run indefinitely,
     even though it is excluded from the no-progress signature.** Rule 9
     correctly excludes a protocol error from `NO_PROGRESS_LIMIT` (an agent
@@ -286,7 +295,7 @@ this file, stop and ask - do not silently override safety rules.
 ## When adding a new agent/provider (e.g. OpenAI Codex)
 
 - Implement `orchestrator/agents/base.py`'s `Agent` interface in a new file
-  (`orchestrator/agents/codex.py`, ...).
+  (`orchestrator/agents/codex.py`, `orchestrator/agents/gemini.py`, ...).
 - Register it in `orchestrator/agents/registry.py` - do not scatter
   `if agent_name == "..."` branches elsewhere in the codebase.
 - Apply the same non-interactive-safe defaults: no destructive-by-default

@@ -13,6 +13,7 @@ from orchestrator.agents.base import Agent
 from orchestrator.agents.claude_code import ClaudeCodeAgent
 from orchestrator.agents.codex import CodexAgent
 from orchestrator.agents.hermes import HermesAgent
+from orchestrator.agents.gemini import GeminiAgent
 from orchestrator.config import AVAILABLE_AGENTS, Config
 
 
@@ -25,6 +26,8 @@ def build_agent(name: str, config: Config) -> Agent:
         return CodexAgent(config.codex)
     if name == "hermes":
         return HermesAgent(config.hermes)
+    if name == "gemini":
+        return GeminiAgent(config.gemini)
     if name in ("auto", "failover"):
         from orchestrator.agents.failover import build_failover_agent
         return build_failover_agent(config)

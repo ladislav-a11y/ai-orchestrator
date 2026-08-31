@@ -141,7 +141,13 @@ def test_project_inside_workspace_root_subdir_accepted(tmp_path):
 
 def test_default_provider_order():
     cfg = load_config(EXAMPLE, create_if_missing=False)
-    assert cfg.provider_order == ["hermes", "antigravity", "claude-code", "codex"]
+    assert cfg.provider_order == ["hermes", "gemini", "antigravity", "claude-code", "codex"]
+
+
+def test_gemini_defaults_to_explicit_free_tier_model_and_safe_approval_mode():
+    cfg = load_config(EXAMPLE, create_if_missing=False)
+    assert cfg.gemini.model == "gemini-2.5-flash"
+    assert cfg.gemini.approval_mode == "auto_edit"
 
 
 def test_hermes_rejects_non_nous_model(tmp_path):

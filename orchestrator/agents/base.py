@@ -75,6 +75,11 @@ class AgentRunResult:
     # timeout. This is distinct from a quota limit so FailoverAgent can move
     # to the next provider without misreporting the cause as LIMITED.
     timed_out: bool = False
+    # True when this provider cannot serve the request in the current local
+    # environment (for example an unsupported CLI/account authentication
+    # state). This is distinct from LIMITED so failover can continue without
+    # falsely reporting quota exhaustion.
+    unavailable: bool = False
     # Seconds to wait before retrying, when the provider's own response
     # includes that information. None if unknown/not provided.
     retry_after_seconds: Optional[float] = None

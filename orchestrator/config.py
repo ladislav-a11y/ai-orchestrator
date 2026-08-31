@@ -46,12 +46,13 @@ CODEX_ALLOWED_SANDBOX_MODES = {"read-only", "workspace-write"}
 
 HERMES_PROVIDER = "nous"
 HERMES_FREE_MODEL = "upstage/solar-pro4:free"
+GEMINI_FREE_MODEL = "gemini-2.5-flash"
 
 # Supported provider implementations in the orchestrator registry.
-AVAILABLE_AGENTS = ["claude-code", "antigravity", "codex", "hermes"]
+AVAILABLE_AGENTS = ["claude-code", "antigravity", "codex", "hermes", "gemini"]
 
 # Default provider failover order for autonomous mode.
-DEFAULT_PROVIDER_ORDER = ["hermes", "antigravity", "claude-code", "codex"]
+DEFAULT_PROVIDER_ORDER = ["hermes", "gemini", "antigravity", "claude-code", "codex"]
 
 
 
@@ -122,6 +123,18 @@ class HermesAgentConfig:
 
 
 @dataclass
+class GeminiAgentConfig:
+    cli_path: str = ""  # empty = auto-detect ("gemini" in PATH)
+    # Explicit model keeps headless PM runs deterministic. Gemini CLI uses
+    # the configured GEMINI_API_KEY; the model itself is the free-tier
+    # capable Gemini 2.5 Flash endpoint.
+    model: str = GEMINI_FREE_MODEL
+    # auto_edit approves file edits but does not enable yolo/all-tools mode.
+    approval_mode: str = "auto_edit"
+    timeout_seconds: int = 600
+
+
+@dataclass
 class GitConfig:
     # Default for every task/run that does not explicitly override
     # `auto_commit=...` itself (CLI `--commit`/`--no-commit`, or the API/
@@ -162,6 +175,7 @@ class Config:
     antigravity: AntigravityAgentConfig = field(default_factory=AntigravityAgentConfig)
     codex: CodexAgentConfig = field(default_factory=CodexAgentConfig)
     hermes: HermesAgentConfig = field(default_factory=HermesAgentConfig)
+    gemini: GeminiAgentConfig = field(default_factory=GeminiAgentConfig)
     git: GitConfig = field(default_factory=GitConfig)
     testing: TestingConfig = field(default_factory=TestingConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -324,6 +338,14 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         timeout_seconds=int(hermes_raw.get("timeout_seconds", 600)),
     )
 
+    gemini_raw = raw.get("gemini") or {}
+    gemini = GeminiAgentConfig(
+        cli_path=gemini_raw.get("cli_path", ""),
+        model=str(gemini_raw.get("model", GEMINI_FREE_MODEL)),
+        approval_mode=str(gemini_raw.get("approval_mode", "auto_edit")),
+        timeout_seconds=int(gemini_raw.get("timeout_seconds", 600)),
+    )
+
     git_raw = raw.get("git") or {}
     git = GitConfig(
         auto_commit=bool(git_raw.get("auto_commit", False)),
@@ -385,6 +407,7 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         antigravity=antigravity,
         codex=codex,
         hermes=hermes,
+        gemini=gemini,
         git=git,
         testing=testing,
         api=api,

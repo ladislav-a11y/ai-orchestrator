@@ -1,7 +1,7 @@
 # ai-orchestrator
 
-Lokální AI orchestrátor pro Windows 11. Řídí AI agenty (zatím Claude Code,
-později i OpenAI Codex), kteří pracují na tvých projektech - spustí agenta na
+Lokální AI orchestrátor pro Windows 11. Řídí AI agenty (Claude Code, Gemini,
+OpenAI Codex a Hermes), kteří pracují na tvých projektech - spustí agenta na
 zadaný úkol, spustí testy, a pokud vše projde a ty to povolíš, vytvoří Git
 commit. Nic se neděje bez tvého vědomí a nic se nikdy neposílá na internet
 mimo volání samotného AI modelu.
@@ -74,6 +74,26 @@ přeskočí, viz `AGENTS.md` - testy nesmí v základní sadě volat placené AP
 Autonomní vývojová iterace ani `doctor --live` sama o sobě nikdy nespouští -
 nemá k tomu oprávnění ani přístup k živému `codex` CLI - tento krok musí
 provést člověk (nebo CI) s přístupem k reálnému, přihlášenému Codex CLI.
+
+### Gemini CLI jako free-tier provider
+
+Gemini je v automatickém pořadí hned za Hermesem a používá výhradně explicitní
+model `gemini-2.5-flash`. Headless adapter vyžaduje JSON výstup, režim
+`auto_edit` a `--skip-trust` pouze pro zvolený pracovní adresář; nikdy
+nepoužívá `--yolo` ani tichý přechod na jiný model. Ověření instalace bez
+spuštění modelu:
+
+```bash
+gemini --version
+```
+
+Samotný `gemini --version` nepotvrzuje přihlášení ani dostupnost free-tieru.
+Při živém ověření 31. 8. 2026 nainstalovaný CLI vrátil
+`UNSUPPORTED_CLIENT` / `IneligibleTierError` pro Gemini Code Assist for
+individuals. To je stav účtu/CLI mimo orchestrátor; adapter jej vrací jako
+selhání a failover pokračuje dalším providerem, bez tvrzení, že Gemini úlohu
+provedl. Po migraci CLI/účtu na podporovaný přístup lze stejný provider znovu
+ověřit bez změny konfigurace modelu.
 
 ## 3. Kontrola prostředí (doctor)
 
@@ -182,7 +202,8 @@ Běh skončí jedním z těchto stavů:
   vytvoří se Git commit. Pokud testy neprošly, commit se **nikdy** nevytvoří -
   ani s `--commit`.
 - **waiting_for_provider** - všichni nakonfigurovaní provideři (viz
-  `provider_order`, výchozí claude-code → antigravity → codex) jsou LIMITED
+  `provider_order`, výchozí hermes → gemini → antigravity → claude-code → codex)
+  jsou LIMITED
   nebo lokálně nedostupní. Běh se **neukončí jako chyba** - uloží se do fronty
   jako čekající task s `retry_after_seconds` a Definition of Done checkpointem
   (viz `data/autonomous_checkpoints/`), pošle se Slack notifikace s stavem

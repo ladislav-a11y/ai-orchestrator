@@ -2,10 +2,10 @@
 
 In autonomous development mode, users should not need to know which provider
 currently has available quota. FailoverAgent tries providers in a configured
-order (default: claude-code -> antigravity -> codex), skips locally
+order (default: hermes -> gemini -> antigravity -> claude-code -> codex), skips locally
 unavailable providers, and automatically fails over to the next provider
 when a provider returns AgentRunResult(limited=True) due to quota/rate/session
-limits or times out.
+limits, times out, or reports an unavailable local/account runtime.
 """
 
 from __future__ import annotations
@@ -209,6 +209,9 @@ class FailoverAgent(Agent):
             if status and status.budget_exceeded:
                 notes.append(f"{p_name} (BUDGET_EXCEEDED)")
                 continue
+            if status and not status.available:
+                notes.append(f"{p_name} (nedostupný: {status.unavailable_reason or 'neznámý důvod'})")
+                continue
             ok, msg = p.is_available()
             if ok:
                 available_names.append(p_name)
@@ -247,6 +250,13 @@ class FailoverAgent(Agent):
             if status and status.budget_exceeded:
                 self.logger.info(
                     "Provider '%s' je v tomto běhu již označen jako BUDGET_EXCEEDED, přeskakuji.",
+                    provider_name,
+                )
+                self._active_provider_index += 1
+                continue
+            if status and not status.available:
+                self.logger.info(
+                    "Provider '%s' je v tomto běhu již označen jako nedostupný, přeskakuji.",
                     provider_name,
                 )
                 self._active_provider_index += 1
@@ -334,6 +344,33 @@ class FailoverAgent(Agent):
                     continue
                 self.logger.error(
                     "Provider '%s' překročil timeout a žádný další provider v pořadí %s nezbývá.",
+                    provider_name, order_names,
+                )
+                break
+
+            if result.unavailable:
+                self._provider_statuses[provider_name] = ProviderStatus(
+                    name=provider_name,
+                    available=False,
+                    unavailable_reason=result.error or "provider je pro tento běh nedostupný",
+                )
+                next_index = self._active_provider_index + 1
+                if next_index < len(self.providers):
+                    next_name = getattr(
+                        self.providers[next_index], "name", str(self.providers[next_index])
+                    )
+                    self.logger.warning(
+                        "Provider '%s' je nedostupný: %s. Přepínám na providera '%s'.",
+                        provider_name, result.error or "neznámý důvod", next_name,
+                    )
+                    notify(
+                        f"[AI Orchestrator] Provider {provider_name} je nedostupný; "
+                        f"přepínám na {next_name}. Důvod: {result.error or 'neznámý důvod'}"
+                    )
+                    self._active_provider_index += 1
+                    continue
+                self.logger.error(
+                    "Provider '%s' je nedostupný a žádný další provider v pořadí %s nezbývá.",
                     provider_name, order_names,
                 )
                 break
@@ -432,6 +469,8 @@ def build_failover_agent(
     if agent_builder is None:
         from orchestrator.agents.registry import build_agent as agent_builder
 
-    order = provider_order or config.provider_order or ["claude-code", "antigravity", "codex"]
+    order = provider_order or config.provider_order or [
+        "hermes", "gemini", "antigravity", "claude-code", "codex"
+    ]
     providers = [agent_builder(name, config) for name in order]
     return FailoverAgent(providers=providers, logger=logger)

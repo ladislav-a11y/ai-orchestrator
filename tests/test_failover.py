@@ -156,6 +156,30 @@ def test_failover_first_unavailable_second_succeeds(caplog):
     assert "Vybrán provider 'antigravity'" in caplog.text
 
 
+def test_failover_provider_run_auth_unavailable_second_succeeds(caplog):
+    caplog.set_level(logging.INFO)
+
+    p1 = MockAgent(
+        "gemini",
+        available=True,
+        run_fn=lambda request: AgentRunResult(
+            success=False,
+            output_text="",
+            error="UNSUPPORTED_CLIENT",
+            unavailable=True,
+        ),
+    )
+    p2 = MockAgent("antigravity", available=True)
+
+    agent = FailoverAgent([p1, p2])
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="vytvor feature"))
+
+    assert result.success is True
+    assert len(p1.run_calls) == 1
+    assert len(p2.run_calls) == 1
+    assert "je nedostupný" in caplog.text
+
+
 # -- 4. All providers are LIMITED or unavailable -----------------------------
 
 
