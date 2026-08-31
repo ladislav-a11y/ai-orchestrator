@@ -106,6 +106,18 @@ def test_autonomous_cli_passes_run_id_and_writes_outbox(tmp_path, monkeypatch):
         service.shutdown()
 
 
+def test_autonomous_cli_accepts_model_override():
+    args = cli.build_parser().parse_args([
+        "autonomous",
+        "--project", "station-agent",
+        "--goal", "cil",
+        "--agent", "claude-code",
+        "--model", "claude-opus-4-1",
+    ])
+
+    assert args.model == "claude-opus-4-1"
+
+
 def test_autonomous_cli_reports_missing_live_evidence(tmp_path, monkeypatch, capsys):
     """A DoD item declaring LIVE-EVIDENCE without a matching LIVE-RESULT must
     stay open (see orchestrator.autonomous._enforce_live_evidence) and the

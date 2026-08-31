@@ -12,6 +12,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
@@ -282,6 +283,7 @@ class OrchestratorService:
         goal: Optional[str] = None,
         spec_text: Optional[str] = None,
         agent_name: Optional[str] = None,
+        model_override: Optional[str] = None,
         test_command_override: Optional[str] = None,
         max_iterations: Optional[int] = None,
         auto_commit: Optional[bool] = None,
@@ -318,7 +320,26 @@ class OrchestratorService:
             test_command = entry.test_command or self.config.testing.test_command or None
 
         if agent_name:
-            agent = build_agent(agent_name, self.config)
+            agent_config = self.config
+            if model_override:
+                model = model_override.strip()
+                agent_config = replace(self.config)
+                if agent_name == "claude-code":
+                    agent_config.claude_code = replace(self.config.claude_code, model=model)
+                elif agent_name == "antigravity":
+                    agent_config.antigravity = replace(self.config.antigravity, model=model)
+                elif agent_name == "codex":
+                    agent_config.codex = replace(self.config.codex, model=model)
+                elif agent_name == "hermes":
+                    # HermesAgent validates the Nous-only model again at
+                    # construction and runtime; do not bypass that contract.
+                    agent_config.hermes = replace(self.config.hermes, model=model)
+                else:
+                    raise ValueError(
+                        "--model vyžaduje explicitního podporovaného agenta; "
+                        f"nalezeno {agent_name!r}"
+                    )
+            agent = build_agent(agent_name, agent_config)
         else:
             agent = build_failover_agent(
             self.config,

@@ -1073,7 +1073,15 @@ def _run_audit(
                 limited=True, retry_after_seconds=result.retry_after_seconds, error=result.error,
                 usage_events=audit_usage,
             )
-        return AuditOutcome([], "Audit selhal (chyba agenta), zkusím příště znovu.", True, new_session_id, saved, usage_events=audit_usage)
+        detail = result.error or "provider nevrátil bližší důvod"
+        logger.warning(
+            "Autonomní běh %s: iterace %s - auditní provider selhal: %s",
+            run_id, iteration, detail,
+        )
+        return AuditOutcome(
+            [], f"Audit selhal (chyba agenta): {detail}", True, new_session_id,
+            saved, error=detail, usage_events=audit_usage,
+        )
 
     parsed = _extract_json(result.output_text)
     if not parsed:

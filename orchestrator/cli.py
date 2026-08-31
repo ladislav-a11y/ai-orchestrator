@@ -125,6 +125,7 @@ def cmd_autonomous(args: argparse.Namespace) -> int:
             goal=args.goal,
             spec_text=spec_text,
             agent_name=args.agent,
+            model_override=args.model,
             test_command_override=args.test_command,
             max_iterations=args.max_iterations,
             auto_commit=_resolve_auto_commit(args),
@@ -313,6 +314,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_auto.add_argument("--run-id", help="Externí ID běhu předané nadřazeným orchestrátorem")
     p_auto.add_argument("--agent", help="Který agent se má použít (výchozí: default_agent z config.yaml)")
+    p_auto.add_argument(
+        "--model",
+        help="Přesný model předaný vybranému explicitnímu agentovi; bez volby se použije konfigurace agenta",
+    )
     p_auto.add_argument("--test-command", help="Přepíše testovací příkaz pro tento běh")
     p_auto.add_argument(
         "--implementation-only",

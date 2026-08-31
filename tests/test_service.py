@@ -174,6 +174,35 @@ def test_run_autonomous_completed_writes_log_and_outbox(tmp_path, monkeypatch):
     assert payload["next_step"] == ""
 
 
+def test_run_autonomous_model_override_reaches_explicit_agent_without_mutating_config(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_build_agent(name, config):
+        seen["name"] = name
+        seen["model"] = config.claude_code.model
+        return FakeAgent()
+
+    monkeypatch.setattr(service_module, "build_agent", fake_build_agent)
+    cfg = make_cfg(tmp_path)
+    service = OrchestratorService(cfg)
+
+    try:
+        _run_id, result = service.run_autonomous(
+            project_ref="station-agent",
+            goal="Priprav zakladni projekt",
+            spec_text="- [ ] Zaloz projekt",
+            agent_name="claude-code",
+            model_override="claude-opus-4-1",
+            max_iterations=3,
+        )
+    finally:
+        service.shutdown()
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert seen == {"name": "claude-code", "model": "claude-opus-4-1"}
+    assert cfg.claude_code.model == ""
+
+
 def test_run_autonomous_protocol_error_preserves_checkpoint_and_reports_waste_in_outbox(tmp_path, monkeypatch):
     """DoD points: a run that stops as PROTOCOL_ERROR must (1) keep the
     checkpoint/DoD progress already verified before the protocol errors
