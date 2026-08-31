@@ -8,6 +8,7 @@ from orchestrator.autonomous import (
     AUDIT_MARKER,
     AutonomousStatus,
     DOD_BATCH_SIZE,
+    HERMES_DOD_BATCH_SIZE,
     NO_PROGRESS_LIMIT,
     PROTOCOL_ERROR_STREAK_LIMIT,
     _extract_json,
@@ -1377,6 +1378,30 @@ def test_run_autonomous_requests_only_a_small_batch_not_the_whole_dod(tmp_path):
     assert result.iterations[0].requested_indices == list(range(DOD_BATCH_SIZE))
     # the prompt must not mention every single one of the total_items bodies
     assert result.iterations[0].prompt.count("bod ") <= DOD_BATCH_SIZE + 2
+
+
+def test_run_autonomous_uses_one_dod_item_while_hermes_is_active(tmp_path):
+    dod = parse_definition_of_done("\n".join(f"- [ ] bod {i}" for i in range(3)))
+
+    def executor(request):
+        return AgentRunResult(success=True, output_text='{"items": [], "notes": "bez zmeny"}')
+
+    hermes = FakeAgent(_confirming_audit_or(executor))
+    hermes.name = "hermes"
+    result = run_autonomous_loop(
+        run_id="hermes-batch",
+        project_path=tmp_path,
+        goal="maly ukol",
+        dod_items=dod,
+        config=Config(),
+        agent=hermes,
+        logger=LOGGER,
+        max_iterations=1,
+        auto_commit_requested=False,
+    )
+
+    assert len(result.iterations[0].requested_indices) == HERMES_DOD_BATCH_SIZE
+    assert result.iterations[0].requested_indices == [0]
 
 
 # -- cheap repair: malformed response gets one reprompt, not a fresh iteration

@@ -25,7 +25,20 @@ from orchestrator.config import HermesAgentConfig
 
 HERMES_PROVIDER = "nous"
 HERMES_FREE_MODEL = "upstage/solar-pro4:free"
+# A PM handoff is deliberately a small, bounded unit of work. The desktop
+# Hermes config is user-editable and may contain a very large max_turns value;
+# inheriting it made a single PM tick consume the whole provider timeout.
+HERMES_MAX_TURNS = 20
+# A headless PM handoff must fail over promptly when the local CLI, desktop
+# gateway, or Nous stream is wedged.  The per-provider config remains
+# user-visible, but production PM must not inherit a 10-minute desktop value.
+HERMES_TIMEOUT_CAP_SECONDS = 180
 _LIMIT_MARKERS = ("429", "quota", "rate limit", "resource_exhausted", "exhausted")
+_STREAM_FAILURE_MARKERS = (
+    "response truncated due to output length limit",
+    "stream repeatedly dropped mid tool-call",
+    "first response truncated due to output length limit",
+)
 
 
 def find_hermes_cli(explicit_path: str = "") -> tuple[Optional[str], str]:
@@ -99,6 +112,11 @@ def _read_usage(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _tail(value: object, limit: int = 4000) -> str:
+    text = str(value or "")
+    return text[-limit:]
+
+
 def _retry_after(text: str) -> Optional[float]:
     match = re.search(r"(?:retry|wait|za)\D+(\d+(?:\.\d+)?)\s*(seconds?|secs?|s|minutes?|mins?|m)", text, re.I)
     if not match:
@@ -137,6 +155,10 @@ class HermesAgent(Agent):
         self.config = config
         self._cli_path, self._detect_note = find_hermes_cli(config.cli_path)
 
+    @property
+    def _timeout_seconds(self) -> int:
+        return min(max(int(self.config.timeout_seconds), 1), HERMES_TIMEOUT_CAP_SECONDS)
+
     def is_available(self) -> tuple[bool, str]:
         if not self._cli_path:
             return False, self._detect_note
@@ -163,8 +185,13 @@ class HermesAgent(Agent):
         contract = (
             "\n\n--- ORCHESTRATOR HERMES CONTRACT ---\n"
             f"Pracovní adresář je přesně {project_path}. Prováděj skutečnou práci pomocí terminal nástrojů; "
-            "pouhý popis postupu není výsledek. Před finální odpovědí ověř skutečný stav a nikdy nehlaš success, "
-            "pokud příkaz nebo postcondition selhal. Výstup musí být pouze JSON požadovaný orchestrátorem."
+            "pouhý popis postupu není výsledek. Začni okamžitě kontrolou aktuálního stavu souborů a Git diffu, "
+            "potom vyber nejmenší konkrétní dosud nesplněnou část aktuálního DoD a skutečně ji implementuj. "
+            "V jednom běhu neopakuj hotovou práci ani jen nespekuluj; po změně proveď nejbližší relevantní ověření. "
+            "Před finální odpovědí ověř skutečný stav a nikdy nehlaš success, pokud příkaz nebo postcondition selhal. "
+            "Pracuj jen na jednom zadaném DoD bodu; používej nejvýše několik krátkých file/terminal akcí, "
+            "neprováděj úplnou testovací sadu ani nevypisuj celé soubory. Odpověď notes udrž do 1200 znaků. "
+            "Výstup musí být pouze JSON požadovaný orchestrátorem."
         )
         if request.output_schema is not None:
             contract += "\nJSON schema:\n" + json.dumps(request.output_schema, ensure_ascii=False, separators=(",", ":"))
@@ -187,10 +214,27 @@ class HermesAgent(Agent):
             # Hermes' terminal backend reads this variable; subprocess cwd alone
             # is insufficient on Windows and previously drifted to C:\\Users\\Admin.
             env["TERMINAL_CWD"] = str(project_path)
+            # Keep mutable desktop settings (max_turns, plugins, MCP, and
+            # system prompt) out of production PM handoffs. Credentials remain
+            # available from Hermes' auth store and .env.
+            env["HERMES_MAX_ITERATIONS"] = str(HERMES_MAX_TURNS)
             cmd = [
                 self._cli_path,
+                "--safe-mode",
                 "--provider", HERMES_PROVIDER,
                 "--model", HERMES_FREE_MODEL,
+                # PM iterations already carry a bounded, machine-readable
+                # contract.  Disable Hermes' default medium reasoning here:
+                # on the Nous free model it can consume the response budget
+                # before the first tool-call arguments are complete.
+                "--reasoning", "none",
+                # The full hermes-cli toolset eagerly discovers optional
+                # plugins and can stall headless PM runs before the first
+                # Nous request. An implementation handoff needs only file
+                # inspection/editing and terminal verification; web research
+                # is deliberately left to a separately scoped task.
+                "--toolsets", "file,terminal",
+                "--in", str(project_path),
                 "--no-restore-cwd",
                 "--usage-file", str(usage_path),
                 "-z", self._prompt(request, project_path),
@@ -204,14 +248,19 @@ class HermesAgent(Agent):
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    timeout=self.config.timeout_seconds,
+                    timeout=self._timeout_seconds,
                     check=False,
                 )
             except subprocess.TimeoutExpired as exc:
+                details = []
+                for label, value in (("stdout", exc.stdout), ("stderr", exc.stderr)):
+                    if value:
+                        details.append(f"{label}={_tail(value, 2000)}")
+                suffix = f"; {'; '.join(details)}" if details else ""
                 return AgentRunResult(
                     success=False,
                     output_text="",
-                    error=f"Hermes neodpověděl do {self.config.timeout_seconds}s (timeout): {exc}",
+                    error=f"Hermes neodpověděl do {self._timeout_seconds}s (timeout): {exc}{suffix}",
                     timed_out=True,
                 )
             except OSError as exc:
@@ -233,12 +282,71 @@ class HermesAgent(Agent):
         combined_error = stderr or stdout or f"exit code {proc.returncode}"
         provider = usage.get("provider")
         model = usage.get("model")
+
+        # Hermes writes an empty/partial usage report when one-shot startup
+        # or the provider call fails before a turn result exists.  Do not
+        # replace that actionable CLI error with the secondary Nous-only
+        # metadata error; doing so made every real Hermes failure look like a
+        # policy violation and prevented useful failover diagnostics.
+        if proc.returncode != 0:
+            limited = any(marker in combined_error.lower() for marker in _LIMIT_MARKERS)
+            return AgentRunResult(
+                success=False,
+                output_text=stdout,
+                error=combined_error,
+                raw_response={
+                    "cwd": str(project_path),
+                    "usage": usage,
+                    "provider": provider or HERMES_PROVIDER,
+                    "model": model or HERMES_FREE_MODEL,
+                    "postcondition_before": before_status,
+                    "postcondition_after": _git_status(project_path),
+                    "stderr": stderr,
+                },
+                input_tokens=_usage_int(usage, "input_tokens"),
+                output_tokens=_usage_int(usage, "output_tokens"),
+                total_tokens=_usage_int(usage, "total_tokens"),
+                limited=limited,
+                retry_after_seconds=_retry_after(combined_error) if limited else None,
+            )
+        if any(marker in combined_error.lower() for marker in _STREAM_FAILURE_MARKERS):
+            # Hermes' Nous stream can close while generating a large tool-call
+            # argument. The CLI then returns exit 0, no usage metadata, and a
+            # misleading truncation sentence. Mark this as a failover-worthy
+            # provider timeout so one bad stream cannot burn PM retries.
+            return AgentRunResult(
+                success=False,
+                output_text=stdout,
+                error=f"Hermes stream selhal před dokončením nástroje: {_tail(combined_error)}",
+                raw_response={
+                    "cwd": str(project_path),
+                    "usage": usage,
+                    "provider": provider or HERMES_PROVIDER,
+                    "model": model or HERMES_FREE_MODEL,
+                    "postcondition_before": before_status,
+                    "postcondition_after": _git_status(project_path),
+                    "stderr": stderr,
+                },
+                timed_out=True,
+            )
         if provider != HERMES_PROVIDER or model != HERMES_FREE_MODEL:
             return AgentRunResult(
                 success=False,
                 output_text=stdout,
-                error=f"Hermes porušil Nous-only kontrakt: usage provider={provider!r}, model={model!r}",
-                raw_response={"cwd": str(project_path), "usage": usage, "postcondition_before": before_status, "postcondition_after": _git_status(project_path)},
+                error=(
+                    "Hermes nevrátil ověřitelná usage metadata pro Nous-only kontrakt: "
+                    f"usage provider={provider!r}, model={model!r}; "
+                    f"stdout={_tail(stdout)}; stderr={_tail(stderr)}"
+                ),
+                raw_response={
+                    "cwd": str(project_path),
+                    "usage": usage,
+                    "provider": provider,
+                    "model": model,
+                    "postcondition_before": before_status,
+                    "postcondition_after": _git_status(project_path),
+                    "stderr": stderr,
+                },
             )
 
         schema_error = _validate_output_schema(stdout, request.output_schema)
@@ -260,8 +368,17 @@ class HermesAgent(Agent):
             "total_tokens": total_tokens,
             "cost_usd": usage.get("estimated_cost_usd"),
         }
+        # JSON-shape validation belongs to autonomous.py.  Returning
+        # success=False here for an exit-0 prose/partial response makes the
+        # FailoverAgent treat it as an ordinary provider error and prevents
+        # the autonomous loop from performing its single cheap repair attempt
+        # (and, after repeated protocol errors, its configured failover).
+        # Keep the schema diagnostic in ``error``/``raw_response`` while
+        # letting the orchestrator own the protocol decision.  Hard failures
+        # (non-zero exit, stream failure, and Nous/model mismatch) returned
+        # above remain failover-worthy immediately.
         return AgentRunResult(
-            success=proc.returncode == 0 and bool(stdout) and schema_error is None,
+            success=proc.returncode == 0 and bool(stdout),
             output_text=stdout,
             raw_response={
                 "cwd": str(project_path),

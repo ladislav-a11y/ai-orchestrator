@@ -11,10 +11,10 @@ default_agent: claude-code
 # Orchestrátor zkusí providery v tomto pořadí a při vyčerpání kvóty (LIMITED) nebo
 # nedostupnosti CLI automaticky přepne na dalšího.
 provider_order:
-  - claude-code
-  - antigravity
-  - codex
   - hermes
+  - antigravity
+  - claude-code
+  - codex
 
 
 # Kořen pracovního prostoru: hranice, mimo kterou orchestrátor (a jím řízený

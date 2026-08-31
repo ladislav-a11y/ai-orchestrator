@@ -177,6 +177,19 @@ this file, stop and ask - do not silently override safety rules.
      must fix the boundary mechanism, not append only the newly quoted command.
      Do not start another PM/audit tick after the same security class is rejected
      until the local category test passes and the contract wording remains true.
+11e. **Production Hermes handoffs are isolated and Nous-only.** The adapter must
+     pass the exact `provider=nous` and `model=upstage/solar-pro4:free`, use an
+     explicit absolute working directory, run in safe mode without plugins/MCP,
+     and enforce a small per-handoff iteration cap. The desktop Hermes app must
+     not run concurrently with a PM CLI handoff because shared gateway/session
+     locks can turn a provider failure into a full timeout. A Nous stream
+     truncation is likewise failover-worthy and must not be relabeled as a
+     missing usage/provider contract. The headless handoff timeout is capped
+     at 180 seconds regardless of the mutable desktop/provider config, so a
+     wedged CLI cannot consume an entire PM tick before failover. While Hermes
+     is active, autonomous.py must dispatch only one DoD item per iteration
+     and keep final notes short; full-suite verification belongs to the
+     orchestrator audit, not the Nous-free handoff.
 12. **A repeated protocol error must never be allowed to run indefinitely,
     even though it is excluded from the no-progress signature.** Rule 9
     correctly excludes a protocol error from `NO_PROGRESS_LIMIT` (an agent

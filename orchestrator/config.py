@@ -51,7 +51,7 @@ HERMES_FREE_MODEL = "upstage/solar-pro4:free"
 AVAILABLE_AGENTS = ["claude-code", "antigravity", "codex", "hermes"]
 
 # Default provider failover order for autonomous mode.
-DEFAULT_PROVIDER_ORDER = ["claude-code", "antigravity", "codex", "hermes"]
+DEFAULT_PROVIDER_ORDER = ["hermes", "antigravity", "claude-code", "codex"]
 
 
 

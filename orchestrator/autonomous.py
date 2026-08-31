@@ -119,6 +119,7 @@ PROTOCOL_ERROR_STREAK_LIMIT = 2
 # module docstring): asking for a 66-entry JSON response every iteration is
 # both expensive and fragile.
 DOD_BATCH_SIZE = 8
+HERMES_DOD_BATCH_SIZE = 1
 RUNTIME_CONTRACT_PATH = Path(__file__).resolve().parents[2] / "AI_PROJECT_RUNTIME.md"
 
 
@@ -595,6 +596,18 @@ def _select_batch(dod_items: list[DoDItem], batch_size: int = DOD_BATCH_SIZE) ->
     return [idx for idx, item in enumerate(dod_items) if not item.done][:batch_size]
 
 
+def _agent_batch_size(agent: Agent) -> int:
+    """Keep Nous-free Hermes handoffs to one concrete DoD item.
+
+    Hermes has a materially smaller practical tool-call/output budget than
+    the other production agents. The failover wrapper exposes its current
+    provider, so a later iteration can widen again after Hermes hands off to
+    another provider.
+    """
+    provider = getattr(agent, "active_provider_name", getattr(agent, "name", ""))
+    return HERMES_DOD_BATCH_SIZE if provider == "hermes" else DOD_BATCH_SIZE
+
+
 def _apply_dod_updates(
     dod_items: list[DoDItem], requested_indices: list[int], parsed: Optional[dict]
 ) -> tuple[str, bool, list[int]]:
@@ -756,7 +769,7 @@ def _dod_response_schema(requested_indices: list[int]) -> dict:
                     "additionalProperties": False,
                 },
             },
-            "notes": {"type": "string"},
+            "notes": {"type": "string", "maxLength": 1200},
         },
         "required": ["items", "notes"],
         "additionalProperties": False,
@@ -1447,7 +1460,8 @@ def run_autonomous_loop(
 
     for i in range(1, max_iterations + 1):
         project_status = _project_status_text(project_path)
-        requested_indices = _select_batch(dod_items)
+        batch_size = _agent_batch_size(agent)
+        requested_indices = _select_batch(dod_items, batch_size=batch_size)
         requested_indices = [
             index for index in requested_indices if index not in controller_gate_indices
         ]
@@ -1457,7 +1471,7 @@ def run_autonomous_loop(
             # next iteration actually calls the implementation agent with
             # the failing test output instead of burning every remaining
             # iteration on identical test-only retries.
-            requested_indices = list(range(min(DOD_BATCH_SIZE, len(dod_items))))
+            requested_indices = list(range(min(batch_size, len(dod_items))))
             for idx in requested_indices:
                 dod_items[idx].done = False
             logger.info(
