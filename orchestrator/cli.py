@@ -324,12 +324,17 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
             "projektu a zachovej jejich návaznosti. Rozděl velký požadavek na "
             "malé samostatné úkoly. Každý úkol musí mít "
             "unikátní číselnou prioritu v rozsahu 0 až 5.999999; vyšší číslo je "
-            "vyšší priorita. Opravy PM/orchestrátoru a potvrzené regrese mají "
+            "vyšší priorita, ale nesmí překročit naléhavost celého zdrojového "
+            "Inbox zadání bez konkrétního důvodu. Ke každé prioritě povinně "
+            "doplň priority_reason s konkrétním důvodem vycházejícím pouze ze "
+            "vstupu. Opravy PM/orchestrátoru a potvrzené regrese mají "
             "přednost před novými funkcemi. Zachovej výhradně informace ze vstupu, "
             "nevymýšlej projektovou identitu ani důkazy. U každého podúkolu "
             "uveď depends_on jako zero-based indexy přímých předpokladů. "
             "Závislosti musí tvořit acyklický graf; pokud jsou podúkoly "
             "nezávislé, vrať prázdné pole. Vrať pouze JSON ve tvaru "
+            "priority_reason u každého úkolu musí obsahovat konkrétní důvod "
+            "pro jeho prioritu. "
             "{\"tasks\":[{\"scope\":\"...\",\"task\":\"...\","
             "\"next_step\":\"...\",\"priority\":3.01,\"depends_on\":[]}]}\n\n"
             + json.dumps(payload, ensure_ascii=False)
@@ -353,12 +358,13 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                                         "task": {"type": "string", "minLength": 1},
                                         "next_step": {"type": "string", "minLength": 1},
                                         "priority": {"type": "number", "minimum": 0, "maximum": 5.999999},
+                                        "priority_reason": {"type": "string", "minLength": 1},
                                         "depends_on": {
                                             "type": "array",
                                             "items": {"type": "integer", "minimum": 0, "maximum": 31},
                                         },
                                     },
-                                    "required": ["scope", "task", "next_step", "priority", "depends_on"],
+                                    "required": ["scope", "task", "next_step", "priority", "priority_reason", "depends_on"],
                                     "additionalProperties": False,
                                 },
                             }
@@ -371,7 +377,15 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
         output = {
             "success": result.success,
             "provider": args.agent,
-            "model": getattr(getattr(safe_config, args.agent.replace("-", "_"), None), "model", None),
+            # The PM deliberately does not pass --model for provider-owned
+            # selection.  Report the model the provider actually returned;
+            # only fall back to configured argv state when the provider did
+            # not expose a receipt model (e.g. a mocked/legacy CLI).
+            "model": result.model or getattr(
+                getattr(safe_config, args.agent.replace("-", "_"), None),
+                "model",
+                None,
+            ),
             "output": result.output_text,
             "error": result.error,
             "unavailable": result.unavailable,
