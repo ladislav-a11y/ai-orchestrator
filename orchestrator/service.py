@@ -33,7 +33,7 @@ from orchestrator.autonomous_checkpoint import (
     save_checkpoint,
 )
 from orchestrator.claude_settings import ensure_project_claude_settings
-from orchestrator.config import Config, load_config
+from orchestrator.config import AVAILABLE_AGENTS, Config, load_config
 from orchestrator.git_utils import has_uncommitted_changes, is_git_repo
 from orchestrator.logging_config import setup_logging, write_autonomous_log, write_task_log
 from orchestrator.models import Task, TaskStatus
@@ -289,6 +289,7 @@ class OrchestratorService:
         auto_commit: Optional[bool] = None,
         implementation_only: bool = False,
         run_id: Optional[str] = None,
+        provider_order: Optional[list[str]] = None,
         _waiting_task: Optional[Task] = None,
     ) -> tuple[str, AutonomousResult]:
         """Run the autonomous implement -> test -> evaluate -> fix loop until
@@ -319,7 +320,25 @@ class OrchestratorService:
         if test_command is None:
             test_command = entry.test_command or self.config.testing.test_command or None
 
-        if agent_name:
+        if provider_order is not None:
+            normalized_provider_order = [name.strip() for name in provider_order if name.strip()]
+            if not normalized_provider_order:
+                raise ValueError("--provider-order musí obsahovat alespoň jednoho providera.")
+            if len(set(normalized_provider_order)) != len(normalized_provider_order):
+                raise ValueError("--provider-order nesmí obsahovat duplicity.")
+            unknown = [name for name in normalized_provider_order if name not in AVAILABLE_AGENTS]
+            if unknown:
+                raise ValueError(
+                    "--provider-order obsahuje neznámého providera: "
+                    + ", ".join(unknown)
+                )
+            provider_order = normalized_provider_order
+
+        # ``--agent auto`` is the explicit CLI spelling for a scoped failover
+        # run. It must not enter the single-agent branch, otherwise the
+        # supplied ``--provider-order`` is silently ignored and AO falls back
+        # to its canonical default order.
+        if agent_name and agent_name != "auto":
             agent_config = self.config
             if model_override:
                 model = model_override.strip()
@@ -344,10 +363,11 @@ class OrchestratorService:
             agent = build_agent(agent_name, agent_config)
         else:
             agent = build_failover_agent(
-            self.config,
-            logger=self.logger,
-            agent_builder=build_agent,
-        )
+                self.config,
+                provider_order=provider_order,
+                logger=self.logger,
+                agent_builder=build_agent,
+            )
         run_id = run_id or new_task_id()
 
         # Restore already-verified DoD progress from a previous, separate
@@ -548,10 +568,26 @@ class OrchestratorService:
         completed_indices = [index for index, item in enumerate(result.dod_items) if item.done]
         next_item = next((item.text for item in result.dod_items if not item.done), "")
         last_output = result.iterations[-1].agent_output if result.iterations else ""
+        # Usage events are the authoritative route: an iteration may only
+        # expose the final agent even when failover tried several providers.
         provider_sequence = []
+        for event in result.usage_events:
+            provider = event.get("provider")
+            if isinstance(provider, str) and provider and provider not in provider_sequence:
+                provider_sequence.append(provider)
         for iteration in result.iterations:
             if iteration.agent_name and iteration.agent_name not in provider_sequence:
                 provider_sequence.append(iteration.agent_name)
+        active_model = None
+        for event in reversed(result.usage_events):
+            if (
+                provider_sequence
+                and event.get("provider") == provider_sequence[-1]
+                and isinstance(event.get("model"), str)
+                and event["model"].strip()
+            ):
+                active_model = event["model"].strip()
+                break
         stop_reason = result.error
         if not stop_reason and result.status != AutonomousStatus.COMPLETED:
             stop_reason = result.status.value
@@ -608,6 +644,7 @@ class OrchestratorService:
             ),
             "provider_sequence": provider_sequence,
             "active_provider": provider_sequence[-1] if provider_sequence else None,
+            "active_model": active_model,
             # DoD (produkční incident cb501524e47e, 26.8.2026): jen na
             # WAITING_FOR_PROVIDER - jestli tento proces sám (trvalý worker)
             # čekající běh po resetu obnoví (True), nebo je nutné po

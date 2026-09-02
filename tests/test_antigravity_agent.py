@@ -142,6 +142,7 @@ def test_run_success(monkeypatch):
             "conversation_id": "conv-123",
             "status": "SUCCESS",
             "response": "hotovo",
+            "model": "agy-task-model",
             "usage": {
                 "input_tokens": 100,
                 "output_tokens": 20,
@@ -173,6 +174,7 @@ def test_run_success(monkeypatch):
     assert result.output_tokens == 20
     assert result.thinking_tokens == 5
     assert result.total_tokens == 125
+    assert result.model == "agy-task-model"
 
     # Explicitly verifies --add-dir in cmd and cwd passed to subprocess.run
     assert "--add-dir" in captured_call["cmd"]

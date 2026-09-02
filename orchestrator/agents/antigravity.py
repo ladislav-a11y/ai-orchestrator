@@ -135,6 +135,21 @@ def _detect_quota_limit(raw: dict, error_text: str) -> tuple[bool, Optional[floa
     return True, _extract_retry_after_seconds(raw, error_text)
 
 
+def _reported_model(raw: dict, usage: dict, configured_model: str = "") -> Optional[str]:
+    """Return the model confirmed by Antigravity, with config as fallback.
+
+    A configured model is safe to report because it is passed to the CLI.
+    When the provider chooses its own default and does not report it, keep
+    the value unknown instead of guessing from PM's catalog.
+    """
+    for source in (raw, usage):
+        for key in ("model", "model_id", "modelId"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return configured_model.strip() or None
+
+
 # Same contract as ClaudeCodeAgent's NO_COMMIT_INSTRUCTION - committing is
 # the orchestrator's job only, done through its own Git layer after tests
 # have been verified, never the agent's.
@@ -234,7 +249,7 @@ class AntigravityAgent(Agent):
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         available, note = self.is_available()
         if not available:
-            return AgentRunResult(success=False, output_text="", error=note)
+            return AgentRunResult(success=False, output_text="", error=note, model=self.config.model or None)
 
         prompt = request.prompt
         if request.context:
@@ -267,9 +282,10 @@ class AntigravityAgent(Agent):
                     + (f" stderr: {timeout_stderr}" if timeout_stderr else "")
                 ),
                 timed_out=True,
+                model=self.config.model or None,
             )
         except FileNotFoundError as e:
-            return AgentRunResult(success=False, output_text="", error=f"Nelze spustit CLI: {e}")
+            return AgentRunResult(success=False, output_text="", error=f"Nelze spustit CLI: {e}", model=self.config.model or None)
 
         raw: Optional[dict] = None
         try:
@@ -286,6 +302,7 @@ class AntigravityAgent(Agent):
                     f"Antigravity CLI nevrátilo platný JSON (exit kod {proc.returncode})"
                     + (f": {stderr}" if stderr else ".")
                 ),
+                model=self.config.model or None,
             )
 
         status = str(raw.get("status") or "").upper()
@@ -299,6 +316,7 @@ class AntigravityAgent(Agent):
             "thinking_tokens": usage.get("thinking_tokens"),
             "total_tokens": usage.get("total_tokens"),
         }
+        reported_model = _reported_model(raw, usage, self.config.model)
 
         if status != SUCCESS_STATUS:
             error_message = raw.get("error") or response_text or f"Antigravity CLI vrátilo stav '{status or 'UNKNOWN'}'."
@@ -312,6 +330,7 @@ class AntigravityAgent(Agent):
                     error=f"Antigravity CLI hlásí vyčerpání kvóty/limitu (LIMITED): {error_message}",
                     limited=True,
                     retry_after_seconds=retry_after_seconds,
+                    model=reported_model,
                     **token_fields,
                 )
             return AgentRunResult(
@@ -320,6 +339,7 @@ class AntigravityAgent(Agent):
                 raw_response=raw,
                 session_id=conversation_id,
                 error=f"Antigravity CLI vrátilo neúspěšný stav '{status or 'UNKNOWN'}': {error_message}",
+                model=reported_model,
                 **token_fields,
             )
 
@@ -329,5 +349,6 @@ class AntigravityAgent(Agent):
             raw_response=raw,
             session_id=conversation_id,
             error=None,
+            model=reported_model,
             **token_fields,
         )

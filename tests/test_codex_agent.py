@@ -85,6 +85,7 @@ def test_command_uses_exec_json_and_safe_sandbox():
     assert cmd[1] == "exec"
     assert "--json" in cmd
     assert "--sandbox" not in cmd
+    assert "--skip-git-repo-check" in cmd
     assert "--ask-for-approval" not in cmd
     assert "--ephemeral" not in cmd
     assert "--ignore-user-config" in cmd
@@ -142,6 +143,17 @@ def test_command_uses_read_only_sandbox_without_approve_for_me():
     assert cmd[cmd.index("--sandbox") + 1] == "read-only"
     assert "--approve-for-me" not in cmd
     assert "--ask-for-approval" not in cmd
+    assert "--skip-git-repo-check" in cmd
+
+
+def test_command_uses_skip_git_repo_check_for_workspace_write():
+    agent = CodexAgent(make_config(sandbox_mode="workspace-write"))
+    cmd = agent._build_command(
+        AgentRunRequest(project_path=Path("."), prompt="hello")
+    )
+    assert "--sandbox" not in cmd
+    assert "--skip-git-repo-check" in cmd
+    assert "--approve-for-me" in cmd
 
 
 def test_command_starts_fresh_session_when_session_id_present():
@@ -157,6 +169,7 @@ def test_command_starts_fresh_session_when_session_id_present():
     assert cmd[cmd.index("--cd") + 1] == "."
     assert "--ignore-user-config" in cmd
     assert "--sandbox" not in cmd
+    assert "--skip-git-repo-check" in cmd
     assert "--approve-for-me" in cmd
     assert "--ephemeral" not in cmd
 
@@ -166,7 +179,7 @@ def test_run_success(monkeypatch):
     monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
 
     fake_stdout = jsonl(
-        {"id": "sess-123", "msg": {"type": "task_started"}},
+        {"id": "sess-123", "model": "gpt-5.6", "msg": {"type": "task_started"}},
         {"id": "sess-123", "msg": {"type": "agent_message", "message": "pracuji"}},
         {
             "id": "sess-123",
@@ -198,6 +211,7 @@ def test_run_success(monkeypatch):
     assert result.output_tokens == 20
     assert result.thinking_tokens == 5
     assert result.total_tokens == 125
+    assert result.model == "gpt-5.6"
 
 
 def test_run_success_parses_current_codex_jsonl_schema(monkeypatch):

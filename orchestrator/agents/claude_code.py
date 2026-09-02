@@ -161,6 +161,29 @@ def _detect_quota_limit(raw: dict, error_text: str) -> tuple[bool, Optional[floa
     return True, _extract_retry_after_seconds(raw, error_text)
 
 
+def _reported_model(raw: dict, usage: dict) -> Optional[str]:
+    """Extract the model Claude actually reports for this CLI call.
+
+    Claude Code's JSON receipt has used both direct model fields and a
+    ``modelUsage`` map. The latter is the important case when PM deliberately
+    omits ``--model`` and lets Claude choose by task type. Never substitute a
+    configured catalog value here: missing provider evidence must remain
+    visibly unknown.
+    """
+    for source in (raw, usage):
+        for key in ("model", "model_id", "modelId"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    model_usage = raw.get("modelUsage")
+    if isinstance(model_usage, dict):
+        names = [str(name).strip() for name in model_usage if str(name).strip()]
+        if names:
+            return ", ".join(names)
+    return None
+
+
 def _version_key(folder_name: str) -> tuple:
     parts = re.split(r"[.\-]", folder_name)
     key = []
@@ -319,6 +342,7 @@ class ClaudeCodeAgent(Agent):
             result_text = raw.get("result", "")
             denials = raw.get("permission_denials") or []
             usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
+            reported_model = _reported_model(raw, usage)
             input_tokens = usage.get("input_tokens")
             output_tokens = usage.get("output_tokens")
             if not isinstance(input_tokens, int) or isinstance(input_tokens, bool):
@@ -376,6 +400,7 @@ class ClaudeCodeAgent(Agent):
                 breaker_saved_attempts=read_saved_attempts(request.project_path, response_session_id),
                 limited=limited,
                 retry_after_seconds=retry_after_seconds,
+                model=reported_model,
             )
 
         # Could not parse JSON - fall back to raw stdout/stderr.

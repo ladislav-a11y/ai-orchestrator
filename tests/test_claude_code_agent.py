@@ -64,6 +64,7 @@ def test_run_success(monkeypatch):
             "result": "hotovo",
             "session_id": "abc123",
             "total_cost_usd": 0.01,
+            "modelUsage": {"claude-sonnet-4-1": {"inputTokens": 48, "outputTokens": 12}},
             "usage": {
                 "input_tokens": 48,
                 "output_tokens": 12,
@@ -86,6 +87,32 @@ def test_run_success(monkeypatch):
     assert result.output_tokens == 12
     assert result.thinking_tokens == 5
     assert result.total_tokens == 60
+    assert result.model == "claude-sonnet-4-1"
+
+
+def test_run_reports_model_selected_by_claude_in_model_usage(monkeypatch):
+    agent = ClaudeCodeAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    fake_stdout = json.dumps(
+        {
+            "is_error": False,
+            "result": "hotovo",
+            "modelUsage": {
+                "claude-haiku-4-5": {"inputTokens": 10, "outputTokens": 20},
+            },
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+        }
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+
+    assert result.success is True
+    assert result.model == "claude-haiku-4-5"
 
 
 def test_run_ignores_missing_or_malformed_usage(monkeypatch):

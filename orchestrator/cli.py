@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 from orchestrator.autonomous import ABSOLUTE_MAX_ITERATIONS, AutonomousStatus, DEFAULT_MAX_ITERATIONS
+from orchestrator.agents.base import AgentRunRequest
+from orchestrator.agents.registry import build_agent
+from orchestrator.config import load_config
 from orchestrator.doctor import run_doctor
 from orchestrator.models import TaskStatus
 from orchestrator.service import OrchestratorService
@@ -131,6 +137,11 @@ def cmd_autonomous(args: argparse.Namespace) -> int:
             auto_commit=_resolve_auto_commit(args),
             implementation_only=args.implementation_only,
             run_id=args.run_id,
+            provider_order=(
+                [name.strip() for name in args.provider_order.split(",") if name.strip()]
+                if args.provider_order
+                else None
+            ),
         )
     except ValueError as e:
         print(f"Chyba: {e}")
@@ -268,6 +279,108 @@ def cmd_projects(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan_inbox(args: argparse.Namespace) -> int:
+    """Run one read-only provider turn to structure a human Inbox request."""
+    if args.agent == "hermes":
+        print(json.dumps({"success": False, "error": "Hermes nesmí provádět Inbox intake.", "unavailable": True}))
+        return 1
+    try:
+        payload = json.load(sys.stdin)
+        if not isinstance(payload, dict):
+            raise ValueError("Inbox planner input must be a JSON object")
+        config = load_config()
+        # Planning receives an empty disposable workspace. The provider can
+        # reason over the supplied card text but cannot mutate a project
+        # checkout. Provider-specific read-only modes add a second guard.
+        safe_config = replace(
+            config,
+            gemini=replace(config.gemini, approval_mode="plan"),
+            antigravity=replace(config.antigravity, mode="plan"),
+            codex=replace(config.codex, sandbox_mode="read-only"),
+        )
+        if args.model:
+            config_attr = {
+                "gemini": "gemini",
+                "antigravity": "antigravity",
+                "claude-code": "claude_code",
+                "codex": "codex",
+            }[args.agent]
+            safe_config = replace(
+                safe_config,
+                **{
+                    config_attr: replace(
+                        getattr(safe_config, config_attr), model=args.model
+                    )
+                },
+            )
+        agent = build_agent(args.agent, safe_config)
+        prompt = (
+            "Jsi AI planner pro Inbox AI Project Manageru. Neprováděj žádné změny "
+            "souborů, nepoužívej git a nic neimplementuj. Z lidského zadání níže "
+            "vytvoř atomické, logicky navazující pracovní karty pro Připraveno. "
+            "Rozděl velký požadavek na malé samostatné úkoly. Každý úkol musí mít "
+            "unikátní číselnou prioritu v rozsahu 0 až 5.999999; vyšší číslo je "
+            "vyšší priorita. Opravy PM/orchestrátoru a potvrzené regrese mají "
+            "přednost před novými funkcemi. Zachovej výhradně informace ze vstupu, "
+            "nevymýšlej projektovou identitu ani důkazy. U každého podúkolu "
+            "uveď depends_on jako zero-based indexy přímých předpokladů. "
+            "Závislosti musí tvořit acyklický graf; pokud jsou podúkoly "
+            "nezávislé, vrať prázdné pole. Vrať pouze JSON ve tvaru "
+            "{\"tasks\":[{\"scope\":\"...\",\"task\":\"...\","
+            "\"next_step\":\"...\",\"priority\":3.01,\"depends_on\":[]}]}\n\n"
+            + json.dumps(payload, ensure_ascii=False)
+        )
+        with tempfile.TemporaryDirectory(prefix="ai-orchestrator-inbox-plan-") as workspace:
+            result = agent.run(
+                AgentRunRequest(
+                    project_path=Path(workspace),
+                    prompt=prompt,
+                    output_schema={
+                        "type": "object",
+                        "properties": {
+                            "tasks": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 32,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "scope": {"type": "string", "minLength": 1},
+                                        "task": {"type": "string", "minLength": 1},
+                                        "next_step": {"type": "string", "minLength": 1},
+                                        "priority": {"type": "number", "minimum": 0, "maximum": 5.999999},
+                                        "depends_on": {
+                                            "type": "array",
+                                            "items": {"type": "integer", "minimum": 0, "maximum": 31},
+                                        },
+                                    },
+                                    "required": ["scope", "task", "next_step", "priority", "depends_on"],
+                                    "additionalProperties": False,
+                                },
+                            }
+                        },
+                        "required": ["tasks"],
+                        "additionalProperties": False,
+                    },
+                )
+            )
+        output = {
+            "success": result.success,
+            "provider": args.agent,
+            "model": getattr(getattr(safe_config, args.agent.replace("-", "_"), None), "model", None),
+            "output": result.output_text,
+            "error": result.error,
+            "unavailable": result.unavailable,
+            "limited": result.limited,
+            "timed_out": result.timed_out,
+        }
+        print(json.dumps(output, ensure_ascii=False))
+        return 0 if result.success else 1
+    except Exception as exc:  # noqa: BLE001 - CLI must return a safe JSON error
+        print(json.dumps({"success": False, "error": str(exc), "unavailable": False}, ensure_ascii=False))
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="orchestrator.py", description="Lokální AI orchestrátor")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -315,6 +428,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto.add_argument("--run-id", help="Externí ID běhu předané nadřazeným orchestrátorem")
     p_auto.add_argument("--agent", help="Který agent se má použít (výchozí: default_agent z config.yaml)")
     p_auto.add_argument(
+        "--provider-order",
+        help="Volitelné pořadí providerů pouze pro tento failover běh; výchozí AO pořadí se nemění",
+    )
+    p_auto.add_argument(
         "--model",
         help="Přesný model předaný vybranému explicitnímu agentovi; bez volby se použije konfigurace agenta",
     )
@@ -347,6 +464,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_projects = sub.add_parser("projects", help="Vypíše projekty zaregistrované v config.yaml")
     p_projects.set_defaults(func=cmd_projects)
+
+    p_plan = sub.add_parser("plan-inbox", help="AI read-only příprava lidského Inbox požadavku")
+    p_plan.add_argument("--agent", required=True, choices=["gemini", "antigravity", "claude-code", "codex"])
+    p_plan.add_argument("--model", help="Přesný model vybraného plánovacího providera")
+    p_plan.set_defaults(func=cmd_plan_inbox)
 
     return parser
 

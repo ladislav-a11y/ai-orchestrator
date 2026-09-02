@@ -174,6 +174,23 @@ def _extract_retry_after_seconds(raw: dict, text: str) -> Optional[float]:
     return None
 
 
+def _reported_model(events: list[dict], configured_model: str = "") -> Optional[str]:
+    """Extract model identity from Codex events without inventing one."""
+    names: list[str] = []
+    for event in events:
+        candidates = [event]
+        for key in ("usage", "model_usage"):
+            value = event.get(key)
+            if isinstance(value, dict):
+                candidates.append(value)
+        for source in candidates:
+            for key in ("model", "model_id", "modelId"):
+                value = source.get(key)
+                if isinstance(value, str) and value.strip() and value.strip() not in names:
+                    names.append(value.strip())
+    return ", ".join(names) if names else (configured_model.strip() or None)
+
+
 def _detect_quota_limit(raw: dict, error_text: str) -> tuple[bool, Optional[float]]:
     haystack = " ".join(str(part) for part in (raw.get("message"), error_text) if part).lower()
     if not any(marker in haystack for marker in QUOTA_LIMIT_MARKERS):
@@ -289,9 +306,14 @@ class CodexAgent(Agent):
             "--ignore-user-config",
         ]
         if self.config.sandbox_mode == "read-only":
-            cmd += ["--sandbox", "read-only"]
+            # PM may dispatch into a generated project directory that is not a
+            # Git checkout.  This flag only skips Codex's repository trust
+            # preflight; the explicit sandbox remains the safety boundary.
+            cmd += ["--sandbox", "read-only", "--skip-git-repo-check"]
         elif self.config.sandbox_mode == "workspace-write":
-            cmd += ["--approve-for-me"]
+            # Codex CLI makes --approve-for-me select workspace-write itself
+            # and rejects combining it with an explicit --sandbox flag.
+            cmd += ["--skip-git-repo-check", "--approve-for-me"]
         else:
             raise ValueError(f"Unsupported Codex sandbox mode: {self.config.sandbox_mode}")
         if self.config.model:
@@ -311,7 +333,7 @@ class CodexAgent(Agent):
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         available, note = self.is_available()
         if not available:
-            return AgentRunResult(success=False, output_text="", error=note)
+            return AgentRunResult(success=False, output_text="", error=note, model=self.config.model or None)
 
         prompt = request.prompt
         if request.context:
@@ -358,9 +380,10 @@ class CodexAgent(Agent):
                     + (f" stderr: {timeout_stderr}" if timeout_stderr else "")
                 ),
                 timed_out=True,
+                model=self.config.model or None,
             )
         except FileNotFoundError as e:
-            return AgentRunResult(success=False, output_text="", error=f"Nelze spustit CLI: {e}")
+            return AgentRunResult(success=False, output_text="", error=f"Nelze spustit CLI: {e}", model=self.config.model or None)
         finally:
             if output_schema_path is not None:
                 output_schema_path.unlink(missing_ok=True)
@@ -375,6 +398,7 @@ class CodexAgent(Agent):
                     f"Codex CLI nevrátilo platný JSON výstup (exit kod {proc.returncode})"
                     + (f": {stderr}" if stderr else ".")
                 ),
+                model=self.config.model or None,
             )
 
         error_event: Optional[dict] = None
@@ -432,6 +456,7 @@ class CodexAgent(Agent):
             "total_tokens": total_tokens,
         }
         raw_response = {"events": events}
+        reported_model = _reported_model(events, self.config.model)
 
         if error_event is not None:
             error_message = error_event.get("message") or "Codex CLI vrátilo chybu."
@@ -445,6 +470,7 @@ class CodexAgent(Agent):
                     error=f"Codex CLI hlásí vyčerpání kvóty/limitu (LIMITED): {error_message}",
                     limited=True,
                     retry_after_seconds=retry_after_seconds,
+                    model=reported_model,
                     **token_fields,
                 )
             return AgentRunResult(
@@ -453,6 +479,7 @@ class CodexAgent(Agent):
                 raw_response=raw_response,
                 session_id=session_id,
                 error=f"Codex CLI vrátilo chybu: {error_message}",
+                model=reported_model,
                 **token_fields,
             )
 
@@ -468,6 +495,7 @@ class CodexAgent(Agent):
                     f"neúplný výstup (exit kod {proc.returncode})"
                     + (f": {stderr}" if stderr else ".")
                 ),
+                model=reported_model,
                 **token_fields,
             )
 
@@ -477,6 +505,7 @@ class CodexAgent(Agent):
             raw_response=raw_response,
             session_id=session_id,
             error=None,
+            model=reported_model,
             **token_fields,
         )
 

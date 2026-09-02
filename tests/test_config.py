@@ -148,6 +148,7 @@ def test_gemini_defaults_to_explicit_free_tier_model_and_safe_approval_mode():
     cfg = load_config(EXAMPLE, create_if_missing=False)
     assert cfg.gemini.model == "gemini-2.5-flash"
     assert cfg.gemini.approval_mode == "auto_edit"
+    assert cfg.gemini.auth_mode == "api-key"
 
 
 def test_hermes_rejects_non_nous_model(tmp_path):

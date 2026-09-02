@@ -372,6 +372,7 @@ def _usage_from_result(result, provider: Optional[str], stage: str, iteration: i
     if not events:
         event = {
             "provider": provider or "unknown", "source": "reported",
+            "model": result.model,
             "input_tokens": result.input_tokens, "output_tokens": result.output_tokens,
             "thinking_tokens": result.thinking_tokens, "total_tokens": result.total_tokens,
             "cost_usd": result.cost_usd,
@@ -918,6 +919,20 @@ def _build_audit_prompt(
     for idx, item in enumerate(dod_items):
         lines.append(f"{idx}. {item.text}")
 
+    controller_gate_indices = _controller_audit_gate_indices(dod_items)
+    if controller_gate_indices:
+        lines += [
+            "",
+            "Controller-owned final audit gate:",
+            "Indexy " + ", ".join(str(index) for index in sorted(controller_gate_indices))
+            + " označují pouze povinnost ai-orchestratoru vydat finální accepted/rejected verdikt; "
+            "nejsou to další soubory nebo testy k ověřování.",
+            "Po vlastním ověření všech ostatních bodů musíš i pro tento index vrátit "
+            "accepted=true, pokud jsou všechny věcné body ověřené; použij konkrétní evidence "
+            "z vlastních testů/prohlídky. Pokud je věcný bod neověřen nebo selhal, odmítni tento "
+            "gate s odkazem na konkrétní odmítnutý index.",
+        ]
+
     lines += ["", "Aktuální stav projektu (git status --porcelain):", project_status]
 
     if test_command:
@@ -1029,6 +1044,63 @@ def _validate_audit_response(
     return False, rejected, evidence_lines
 
 
+# A valid audit response can still be unusable when the provider explicitly
+# says it did not inspect the checkout. Keep this detector narrow: only an
+# all-rejected response with multiple refusal/non-verification markers may
+# trigger a quality fallback. A concrete item-specific rejection remains the
+# independent verdict.
+_AUDIT_INADEQUATE_MARKERS = (
+    "nelze samostatně potvrdit",
+    "nelze samostatne potvrdit",
+    "nebylo ověřeno",
+    "nebylo overeno",
+    "nebylo provedeno",
+    "audit nebyl proveden",
+    "živé ověření nebylo provedeno",
+    "zive overeni nebylo provedeno",
+    "neprovedeno",
+    "neproveden",
+    "neprovedla",
+    "nemá přístup",
+    "nema pristup",
+    "agent nemá",
+    "agent nema",
+    "agent nemůže",
+    "agent nemuze",
+    "cannot confirm",
+    "cannot verify",
+    "cannot independently",
+    "not independently",
+    "not inspected",
+    "not verified",
+    "not performed",
+    "no live verification",
+    # Some providers describe a non-verdict as a review plan rather than an
+    # explicit refusal. Treat that wording as inadequate when every item is
+    # rejected, so the failover chain can obtain the actual independent audit.
+    "needs verification",
+    "pending audit verdict",
+)
+
+
+def _audit_needs_quality_fallback(
+    rejected_indices: list[int],
+    evidence_lines: list[str],
+    item_count: int,
+) -> bool:
+    """Detect a valid-looking audit that is only a generic refusal.
+
+    Legitimate concrete rejection is retained. The fallback is for the case
+    where every DoD item was rejected while the evidence says the audit was
+    not actually performed.
+    """
+    if item_count <= 0 or len(rejected_indices) != item_count:
+        return False
+    evidence = " ".join(evidence_lines).casefold()
+    matched = {marker for marker in _AUDIT_INADEQUATE_MARKERS if marker in evidence}
+    return len(matched) >= 2
+
+
 def _run_audit(
     agent: Agent,
     project_path: Path,
@@ -1123,6 +1195,137 @@ def _run_audit(
     notes = notes if isinstance(notes, str) else ""
     if evidence_lines:
         notes = (notes + " | " + " ; ".join(evidence_lines)).strip(" |")
+
+    # The final accepted/rejected gate is issued by ai-orchestrator itself,
+    # not audited as a separate implementation fact. If the provider has
+    # supplied concrete acceptance evidence for every substantive item but
+    # mechanically rejected only this controller-owned marker, the controller
+    # can close its own gate without reopening implementation work.
+    controller_gate_indices = _controller_audit_gate_indices(dod_items)
+    if controller_gate_indices and set(rejected).issubset(controller_gate_indices):
+        notes = (
+            f"{notes} | controller-owned gate resolved by ai-orchestrator from "
+            "evidence-backed acceptance of all substantive audit items"
+        ).strip(" |")
+        rejected = [index for index in rejected if index not in controller_gate_indices]
+
+    if _audit_needs_quality_fallback(rejected, evidence_lines, len(dod_items)):
+        fallback_reason = (
+            "audit vrátil zamítnutí všech bodů bez konkrétního ověření checkoutu"
+        )
+        force_quality_failover = getattr(agent, "force_failover_on_audit_quality", None)
+        if callable(force_quality_failover) and force_quality_failover(fallback_reason):
+            logger.warning(
+                "Autonomní běh %s: iterace %s - první auditní odpověď je věcně "
+                "nedostatečná, opakuji audit u dalšího providera.",
+                run_id, iteration,
+            )
+            fallback_result = agent.run(
+                AgentRunRequest(
+                    project_path=project_path,
+                    prompt=prompt,
+                    # Do not carry the first provider's audit session into the
+                    # independent fallback call.
+                    session_id=None,
+                    output_schema=audit_schema,
+                )
+            )
+            fallback_session_id = fallback_result.session_id
+            fallback_provider = getattr(
+                agent, "active_provider_name", getattr(agent, "name", None)
+            )
+            audit_usage.extend(
+                _usage_from_result(
+                    fallback_result, fallback_provider, "audit-fallback", iteration
+                )
+            )
+            if not fallback_result.success:
+                detail = fallback_result.error or "záložní auditní provider nevrátil bližší důvod"
+                if fallback_result.limited:
+                    return AuditOutcome(
+                        [],
+                        f"První audit byl věcně nedostatečný; záložní audit narazil na limit: {detail}",
+                        True,
+                        fallback_session_id or new_session_id,
+                        saved,
+                        limited=True,
+                        retry_after_seconds=fallback_result.retry_after_seconds,
+                        error=detail,
+                        usage_events=audit_usage,
+                    )
+                return AuditOutcome(
+                    [],
+                    f"První audit byl věcně nedostatečný; záložní audit selhal: {detail}",
+                    True,
+                    fallback_session_id or new_session_id,
+                    saved,
+                    error=detail,
+                    usage_events=audit_usage,
+                )
+
+            fallback_parsed = _extract_json(fallback_result.output_text)
+            if not fallback_parsed:
+                return AuditOutcome(
+                    [],
+                    "První audit byl věcně nedostatečný; záložní audit nevrátil JSON.",
+                    True,
+                    fallback_session_id or new_session_id,
+                    saved,
+                    error="záložní audit nevrátil JSON",
+                    usage_events=audit_usage,
+                )
+            fallback_protocol_error, fallback_rejected, fallback_evidence = _validate_audit_response(
+                fallback_parsed, expected_indices, len(dod_items),
+            )
+            if fallback_protocol_error:
+                return AuditOutcome(
+                    [],
+                    "První audit byl věcně nedostatečný; záložní audit porušil auditní JSON kontrakt.",
+                    True,
+                    fallback_session_id or new_session_id,
+                    saved,
+                    error="záložní audit porušil JSON kontrakt",
+                    usage_events=audit_usage,
+                )
+            fallback_notes = fallback_parsed.get("notes")
+            fallback_notes = fallback_notes if isinstance(fallback_notes, str) else ""
+            combined_evidence = [
+                f"první auditní provider: {fallback_reason}",
+                *fallback_evidence,
+            ]
+            fallback_notes = (fallback_notes + " | " + " ; ".join(combined_evidence)).strip(" |")
+            logger.info(
+                "Autonomní běh %s: iterace %s - záložní nezávislý audit dokončen, "
+                "zamítnuto %s bod(ů).",
+                run_id, iteration, len(fallback_rejected),
+            )
+            return AuditOutcome(
+                fallback_rejected,
+                fallback_notes,
+                False,
+                fallback_session_id or new_session_id,
+                saved,
+                usage_events=audit_usage,
+            )
+
+        # In a forced single-provider run, do not turn a generic refusal into
+        # a real rejection that would reopen implementation work. Without an
+        # actual independent verdict the run must stop fail-closed.
+        logger.warning(
+            "Autonomní běh %s: iterace %s - auditní odpověď je věcně nedostatečná "
+            "a není nakonfigurován dostupný auditní fallback.",
+            run_id, iteration,
+        )
+        return AuditOutcome(
+            [],
+            "Auditní odpověď byla formálně platná, ale neobsahovala konkrétní nezávislé "
+            "ověření; žádný auditní fallback není dostupný. | " + notes,
+            True,
+            new_session_id,
+            saved,
+            error="auditní odpověď bez konkrétního ověření",
+            usage_events=audit_usage,
+        )
     return AuditOutcome(rejected, notes, False, new_session_id, saved, usage_events=audit_usage)
 
 
@@ -1331,7 +1534,8 @@ def _commit_if_ready(
 
 _PYTHON_PROJECT_MARKERS = (
     "pyproject.toml", "setup.cfg", "setup.py", "pytest.ini", "tox.ini",
-    # A project with a "tests/" dir and a plain requirements.txt but no
+    # A project with a "tests/" dir or a root-level test_*.py file and a plain
+    # requirements.txt but no
     # packaging metadata file (this repo itself, ai-orchestrator, is one
     # such project) is still unambiguously a real Python test suite, not a
     # guess - without this marker, _detect_test_command returned None here
@@ -1340,6 +1544,9 @@ _PYTHON_PROJECT_MARKERS = (
     # instead of a real pass/fail), which is exactly the "unverified DoD
     # item" AGENTS.md rule 9 exists to prevent.
     "requirements.txt",
+    # Small generated Inbox projects may keep their first regression test at
+    # the repository root (for example test_inbox_import.py) rather than in a
+    # tests/ package. That is still an explicit pytest suite, not a guess.
 )
 
 
@@ -1355,6 +1562,14 @@ def _detect_test_command(project_path: Path) -> Optional[str]:
     autonomous loop, where silently never running tests would let a DoD item
     like "all tests pass" go forever unverified (see AGENTS.md rule 9).
     """
+    root_test_suite = any(project_path.glob("test_*.py")) or any(
+        project_path.glob("*_test.py")
+    )
+    # A root-level pytest file is an explicit enough signal on its own for a
+    # small generated checkout; larger projects still need both a tests/
+    # directory and a recognizable Python project marker.
+    if root_test_suite:
+        return "python -m pytest -q"
     if not (project_path / "tests").is_dir():
         return None
     if not any((project_path / marker).exists() for marker in _PYTHON_PROJECT_MARKERS):

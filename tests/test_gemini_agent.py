@@ -22,6 +22,11 @@ def test_rejects_yolo_approval_mode():
         GeminiAgent(GeminiAgentConfig(approval_mode="yolo"))
 
 
+def test_rejects_unknown_auth_mode():
+    with pytest.raises(ValueError, match="auth_mode"):
+        GeminiAgent(GeminiAgentConfig(auth_mode="unknown"))
+
+
 def test_build_command_uses_explicit_model_and_auto_edit_without_yolo():
     agent = make_agent()
     command = agent._build_command(AgentRunRequest(Path("."), "hello"))
@@ -29,7 +34,7 @@ def test_build_command_uses_explicit_model_and_auto_edit_without_yolo():
     assert command == [
         "gemini",
         "-p",
-        "hello",
+        "Read the complete task from stdin.",
         "--output-format",
         "json",
         "--approval-mode",
@@ -50,11 +55,18 @@ def test_run_success_parses_json_response(monkeypatch):
     def fake_run(command, **kwargs):
         captured["command"] = command
         captured["cwd"] = kwargs["cwd"]
+        captured["input"] = kwargs["input"]
+        captured["env"] = kwargs["env"]
+        captured["env_auth"] = {
+            key: kwargs["env"].get(key)
+            for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_GCA")
+        }
         return subprocess.CompletedProcess(
             command,
             returncode=0,
             stdout=json.dumps({
                 "response": "implemented",
+                "model": "gemini-2.5-flash",
                 "session_id": "gemini-session-1",
                 "stats": {"input_tokens": 10, "output_tokens": 4},
             }),
@@ -70,8 +82,37 @@ def test_run_success_parses_json_response(monkeypatch):
     assert result.input_tokens == 10
     assert result.output_tokens == 4
     assert result.total_tokens == 14
+    assert result.model == "gemini-2.5-flash"
     assert captured["command"][1] == "-p"
-    assert "do the work" in captured["command"][2]
+    assert "do the work" in captured["input"]
+    assert captured["command"][2] == "Read the complete task from stdin."
+    assert captured["env"]["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
+    assert captured["env_auth"]["GEMINI_API_KEY"]
+    assert captured["env_auth"]["GOOGLE_API_KEY"] is None
+    assert captured["env_auth"]["GOOGLE_GENAI_USE_GCA"] is None
+
+
+def test_oauth_mode_removes_api_keys_and_selects_gca(monkeypatch):
+    agent = make_agent(auth_mode="oauth-personal")
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(
+            command,
+            returncode=0,
+            stdout=json.dumps({"response": "implemented"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = agent.run(AgentRunRequest(Path("."), "do the work"))
+
+    assert result.success is True
+    assert captured["env"].get("GEMINI_API_KEY") is None
+    assert captured["env"].get("GOOGLE_API_KEY") is None
+    assert captured["env"]["GOOGLE_GENAI_USE_GCA"] == "true"
 
 
 def test_run_quota_error_is_limited(monkeypatch):
@@ -106,6 +147,27 @@ def test_run_unsupported_cli_account_is_unavailable_not_limited(monkeypatch):
             returncode=1,
             stdout="",
             stderr="Error authenticating: IneligibleTierError UNSUPPORTED_CLIENT",
+        ),
+    )
+
+    result = agent.run(AgentRunRequest(Path("."), "do the work"))
+
+    assert result.success is False
+    assert result.unavailable is True
+    assert result.limited is False
+
+
+def test_run_denied_api_project_is_unavailable_not_limited(monkeypatch):
+    agent = make_agent()
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            returncode=1,
+            stdout="",
+            stderr="PERMISSION_DENIED: Your project has been denied access.",
         ),
     )
 

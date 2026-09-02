@@ -13,6 +13,7 @@ from orchestrator.autonomous import (
     PROTOCOL_ERROR_STREAK_LIMIT,
     _extract_json,
     _build_audit_prompt,
+    _audit_needs_quality_fallback,
     _controller_audit_gate_indices,
     controller_finalization_from_spec,
     parse_definition_of_done,
@@ -153,6 +154,15 @@ def test_audit_prompt_includes_successful_test_output():
     )
 
     assert "324 passed, 4 skipped in 30.77s" in prompt
+
+
+def test_audit_prompt_explains_controller_owned_final_gate():
+    dod = parse_definition_of_done(
+        "- [x] implementation\n- [ ] ai-orchestrator vydá accepted / rejected verdikt"
+    )
+    prompt = _build_audit_prompt("cil", dod, "(čisté)", "pytest -q", True, "10 passed")
+    assert "Controller-owned final audit gate" in prompt
+    assert "accepted=true" in prompt
 
 
 def test_controller_owned_audit_gate_does_not_repeat_executor(tmp_path):
@@ -1252,6 +1262,34 @@ def test_run_autonomous_autodetects_pytest_for_requirements_txt_project(tmp_path
     assert result.iterations[0].test_output is not None
 
 
+def test_run_autonomous_autodetects_pytest_for_root_level_test_file(tmp_path):
+    """Generated Inbox checkouts may place their first test beside the code."""
+    (tmp_path / "requirements.txt").write_text("pytest\n", encoding="utf-8")
+    (tmp_path / "test_inbox_import.py").write_text("def test_smoke():\n    assert True\n", encoding="utf-8")
+
+    def run_fn(request):
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": false}], "notes": "zkousim"}',
+        )
+
+    result = run_autonomous_loop(
+        run_id="root-test-file",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=parse_definition_of_done("- [ ] neco co se nikdy neoznaci"),
+        config=Config(),
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=1,
+        auto_commit_requested=False,
+    )
+
+    assert isinstance(result.iterations[0].tests_passed, bool)
+    assert result.iterations[0].test_output is not None
+
+
 def test_run_autonomous_does_not_autodetect_for_non_python_project(tmp_path):
     def run_fn(request):
         return AgentRunResult(
@@ -1522,6 +1560,105 @@ def test_run_autonomous_audit_reopens_falsely_claimed_done_item(tmp_path):
     # not completed on the first iteration - the audit reopened it
     assert len(result.iterations) == 2
     assert result.dod_items[0].done is True
+
+
+def test_audit_quality_fallback_rechecks_generic_refusal_with_next_provider(tmp_path):
+    """A valid all-rejected refusal must not reopen implementation work.
+
+    The orchestrator must obtain a real independent verdict from the next
+    provider in the configured order; this is not an executor or PM verdict.
+    """
+    dod = parse_definition_of_done("- [ ] bod A")
+    audit_calls = {"n": 0}
+
+    class AuditFailoverFake(FakeAgent):
+        name = "hermes"
+
+        def __init__(self):
+            super().__init__(self._run)
+            self.active_provider_name = "hermes"
+            self.failover_reasons = []
+
+        def force_failover_on_audit_quality(self, reason):
+            self.failover_reasons.append(reason)
+            self.active_provider_name = "gemini"
+            return True
+
+        def _run(self, request):
+            if AUDIT_MARKER not in request.prompt:
+                return AgentRunResult(
+                    success=True,
+                    output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+                )
+            audit_calls["n"] += 1
+            if audit_calls["n"] == 1:
+                return AgentRunResult(
+                    success=True,
+                    output_text=_audit_response(
+                        request,
+                        accepted=False,
+                        index=0,
+                        evidence=(
+                            "nelze samostatně potvrdit; audit nebyl proveden a "
+                            "živé ověření nebylo provedeno"
+                        ),
+                    ),
+                )
+            return AgentRunResult(
+                success=True,
+                output_text=_audit_response(
+                    request, evidence="module.py:10 a test_live_audit: potvrzeno"
+                ),
+            )
+
+    agent = AuditFailoverFake()
+    result = run_autonomous_loop(
+        run_id="audit-quality-fallback",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=dod,
+        config=Config(),
+        agent=agent,
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=1,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert audit_calls["n"] == 2
+    assert agent.failover_reasons == [
+        "audit vrátil zamítnutí všech bodů bez konkrétního ověření checkoutu"
+    ]
+    assert result.iterations[0].audit_rejected_indices == []
+
+
+def test_audit_quality_detector_keeps_concrete_rejection_authoritative():
+    assert _audit_needs_quality_fallback(
+        [0], ["0:REJECT module.py:10 - chybí povinná validace"], 1
+    ) is False
+
+
+def test_audit_quality_detector_recognizes_agent_cannot_confirm_refusal():
+    assert _audit_needs_quality_fallback(
+        [0, 1],
+        [
+            "0:REJECT agent nemůže samostatně potvrdit auditní bod",
+            "1:REJECT živé ověření nebylo provedeno",
+        ],
+        2,
+    ) is True
+
+
+def test_audit_quality_detector_recognizes_review_plan_without_verdict():
+    assert _audit_needs_quality_fallback(
+        [0, 1],
+        [
+            "0:REJECT needs verification - reading relevant files",
+            "1:REJECT pending audit verdict",
+        ],
+        2,
+    ) is True
 
 
 def test_strict_audit_requires_evidence_for_every_dod_index(tmp_path):

@@ -4,7 +4,8 @@ The adapter uses the locally installed Gemini CLI with an explicit model and
 the narrow ``auto_edit`` approval mode. It deliberately never passes
 ``--yolo`` or any equivalent permission-bypass flag. ``--skip-trust`` only
 acknowledges the explicitly selected workspace for headless operation; it does
-not grant additional tool permissions. Gemini CLI's JSON output
+not grant additional tool permissions. The full prompt is sent on stdin rather
+than argv because Windows has a command-line length limit. Gemini CLI's JSON output
 is normalized into the common AgentRunResult contract so failover and the
 autonomous runner can treat quota, timeout, and malformed output distinctly.
 """
@@ -12,6 +13,7 @@ autonomous runner can treat quota, timeout, and malformed output distinctly.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -23,6 +25,7 @@ from orchestrator.config import GeminiAgentConfig
 
 FORBIDDEN_FLAGS = ("--yolo", "-y")
 ALLOWED_APPROVAL_MODES = {"default", "auto_edit", "plan"}
+ALLOWED_AUTH_MODES = {"api-key", "oauth-personal"}
 QUOTA_LIMIT_MARKERS = (
     "resource_exhausted",
     "quota has been exceeded",
@@ -43,6 +46,8 @@ AUTH_UNAVAILABLE_MARKERS = (
     "unauthenticated",
     "login required",
     "not logged in",
+    "permission_denied",
+    "project has been denied access",
 )
 
 
@@ -114,6 +119,20 @@ def _usage(raw: dict[str, Any]) -> dict[str, Optional[int]]:
     return values
 
 
+def _reported_model(raw: dict[str, Any], configured_model: str) -> Optional[str]:
+    """Return the model reported by Gemini, or the model explicitly passed."""
+    candidates = [raw]
+    stats = raw.get("stats")
+    if isinstance(stats, dict):
+        candidates.append(stats)
+    for source in candidates:
+        for key in ("model", "model_id", "modelId"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return configured_model.strip() or None
+
+
 class GeminiAgent(Agent):
     """Gemini CLI adapter using an explicit model and non-yolo approval mode."""
 
@@ -125,6 +144,11 @@ class GeminiAgent(Agent):
                 f"GeminiAgent odmítá approval_mode={config.approval_mode!r}; "
                 f"povolené jsou {sorted(ALLOWED_APPROVAL_MODES)} a nikdy yolo."
             )
+        if config.auth_mode not in ALLOWED_AUTH_MODES:
+            raise ValueError(
+                f"GeminiAgent odmítá auth_mode={config.auth_mode!r}; "
+                f"povolené jsou {sorted(ALLOWED_AUTH_MODES)}."
+            )
         self.config = config
         self._cli_path, self._detect_note = find_gemini_cli(config.cli_path)
 
@@ -133,7 +157,7 @@ class GeminiAgent(Agent):
             return False, self._detect_note
         try:
             proc = subprocess.run(
-                [self._cli_path, "--version"],
+                [*self._command_prefix(), "--version"],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -147,12 +171,37 @@ class GeminiAgent(Agent):
             return False, f"Gemini --version selhalo (kód {proc.returncode}): {proc.stderr.strip()}"
         return True, f"{proc.stdout.strip()} ({self._detect_note})"
 
+    def _command_prefix(self) -> list[str]:
+        """Return a directly executable Gemini command on Windows.
+
+        npm installs ``gemini.CMD`` as a wrapper that launches Node through
+        another shell process. On Windows that wrapper can outlive Python's
+        ``subprocess`` timeout and leave a headless request hanging. When the
+        package entrypoint is available, invoke Node and the bundled script
+        directly; tests and non-Windows installations keep the normal CLI
+        path unchanged.
+        """
+        if self._cli_path and os.name == "nt":
+            cli_path = Path(self._cli_path)
+            if cli_path.suffix.lower() in {".cmd", ".bat"}:
+                node_path = shutil.which("node")
+                script_path = cli_path.parent / "node_modules" / "@google" / "gemini-cli" / "bundle" / "gemini.js"
+                if node_path and script_path.is_file():
+                    return [node_path, str(script_path)]
+        return [self._cli_path]
+
     def _build_command(self, request: AgentRunRequest) -> list[str]:
         assert self._cli_path
         command = [
-            self._cli_path,
+            *self._command_prefix(),
             "-p",
-            request.prompt,
+            # A non-empty headless prompt is required by the Windows Gemini
+            # CLI wrapper. Gemini appends stdin to this prompt, so the full
+            # autonomous request still travels through stdin and cannot hit
+            # the Windows command-line length limit. An empty -p value is
+            # parsed as interactive mode by the current CLI and can leave a
+            # child process waiting forever outside subprocess' timeout.
+            "Read the complete task from stdin.",
             "--output-format",
             "json",
             "--approval-mode",
@@ -168,7 +217,7 @@ class GeminiAgent(Agent):
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         available, note = self.is_available()
         if not available:
-            return AgentRunResult(success=False, output_text="", error=note)
+            return AgentRunResult(success=False, output_text="", error=note, model=self.config.model or None)
 
         prompt = request.prompt
         if request.context:
@@ -186,15 +235,35 @@ class GeminiAgent(Agent):
             output_schema=request.output_schema,
         )
         command = self._build_command(effective)
+        # Keep both explicit mechanisms: --skip-trust is supported by current
+        # Gemini CLI versions, while the environment variable also makes the
+        # intended headless workspace policy visible to versions that use the
+        # documented environment switch. Neither grants extra tool access.
+        env = os.environ.copy()
+        env["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
+        # Gemini CLI selects API-key auth whenever GEMINI_API_KEY is present,
+        # even when settings.json selects OAuth.  Make the selected mode
+        # explicit in the child environment, without copying credentials or
+        # mutating the user's profile.  The default api-key mode is the free
+        # AI Studio path; oauth-personal is available as an explicit option.
         try:
+            env.pop("GEMINI_CLI_HOME", None)
+            if self.config.auth_mode == "oauth-personal":
+                env.pop("GEMINI_API_KEY", None)
+                env.pop("GOOGLE_API_KEY", None)
+                env["GOOGLE_GENAI_USE_GCA"] = "true"
+            else:
+                env.pop("GOOGLE_GENAI_USE_GCA", None)
             proc = subprocess.run(
                 command,
                 cwd=str(request.project_path),
+                input=prompt,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 timeout=self.config.timeout_seconds,
+                env=env,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
@@ -207,9 +276,10 @@ class GeminiAgent(Agent):
                     + (f" stderr: {detail}" if detail else "")
                 ),
                 timed_out=True,
+                model=self.config.model or None,
             )
         except OSError as exc:
-            return AgentRunResult(success=False, output_text="", error=f"Nelze spustit Gemini CLI: {exc}")
+            return AgentRunResult(success=False, output_text="", error=f"Nelze spustit Gemini CLI: {exc}", model=self.config.model or None)
 
         stdout = proc.stdout.strip()
         stderr = proc.stderr.strip()
@@ -223,6 +293,7 @@ class GeminiAgent(Agent):
                 error=f"Gemini CLI nevrátilo platný JSON (exit kód {proc.returncode}): {error}",
                 limited=_quota_error(error),
                 unavailable=_auth_unavailable(error),
+                model=self.config.model or None,
             )
         if not isinstance(raw, dict):
             return AgentRunResult(success=False, output_text="", error="Gemini CLI vrátilo JSON jiné než object")
@@ -230,7 +301,7 @@ class GeminiAgent(Agent):
         response = _response_text(raw)
         error = raw.get("error") if isinstance(raw.get("error"), str) else stderr
         usage = _usage(raw)
-        fields = {**usage, "raw_response": raw, "session_id": raw.get("session_id") or raw.get("sessionId")}
+        fields = {**usage, "raw_response": raw, "session_id": raw.get("session_id") or raw.get("sessionId"), "model": _reported_model(raw, self.config.model)}
         if proc.returncode != 0 or error:
             message = error or response or f"Gemini CLI vrátilo exit kód {proc.returncode}"
             limited = _quota_error(message)

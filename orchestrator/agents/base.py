@@ -83,6 +83,10 @@ class AgentRunResult:
     # Seconds to wait before retrying, when the provider's own response
     # includes that information. None if unknown/not provided.
     retry_after_seconds: Optional[float] = None
+    # Model identity reported by the provider for this physical call. The PM
+    # must not infer it from a configured catalog when the provider chose the
+    # model itself; this is evidence from the provider receipt.
+    model: Optional[str] = None
 
 
 class Agent(ABC):

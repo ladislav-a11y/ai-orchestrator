@@ -125,10 +125,11 @@ class HermesAgentConfig:
 @dataclass
 class GeminiAgentConfig:
     cli_path: str = ""  # empty = auto-detect ("gemini" in PATH)
-    # Explicit model keeps headless PM runs deterministic. Gemini CLI uses
-    # the configured GEMINI_API_KEY; the model itself is the free-tier
-    # capable Gemini 2.5 Flash endpoint.
+    # Explicit model keeps headless PM runs deterministic. The API-key mode
+    # uses GEMINI_API_KEY and is the default free-tier path; OAuth can be
+    # selected explicitly when a valid personal Gemini CLI login is available.
     model: str = GEMINI_FREE_MODEL
+    auth_mode: str = "api-key"
     # auto_edit approves file edits but does not enable yolo/all-tools mode.
     approval_mode: str = "auto_edit"
     timeout_seconds: int = 600
@@ -342,6 +343,7 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
     gemini = GeminiAgentConfig(
         cli_path=gemini_raw.get("cli_path", ""),
         model=str(gemini_raw.get("model", GEMINI_FREE_MODEL)),
+        auth_mode=str(gemini_raw.get("auth_mode", "api-key")),
         approval_mode=str(gemini_raw.get("approval_mode", "auto_edit")),
         timeout_seconds=int(gemini_raw.get("timeout_seconds", 600)),
     )

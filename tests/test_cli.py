@@ -12,6 +12,7 @@ the way a real subprocess invocation would.
 """
 
 import json
+import io
 import re
 from pathlib import Path
 
@@ -116,6 +117,55 @@ def test_autonomous_cli_accepts_model_override():
     ])
 
     assert args.model == "claude-opus-4-1"
+
+
+def test_plan_inbox_schema_uses_codex_compatible_json_schema(monkeypatch, capsys):
+    seen = {}
+
+    class PlanningAgent(Agent):
+        name = "codex"
+
+        def is_available(self):
+            return True, "planner test agent"
+
+        def run(self, request):
+            seen["schema"] = request.output_schema
+            return AgentRunResult(
+                success=True,
+                output_text=json.dumps({
+                    "tasks": [{
+                        "scope": "oprava",
+                        "task": "Opravit station agenta.",
+                        "next_step": "Prověřit reprodukci.",
+                        "priority": 5.01,
+                        "depends_on": [],
+                    }]
+                }),
+            )
+
+    monkeypatch.setattr(cli, "build_agent", lambda name, config: PlanningAgent())
+    monkeypatch.setattr(cli, "load_config", lambda: Config())
+    monkeypatch.setattr(
+        cli.sys,
+        "stdin",
+        io.StringIO(json.dumps({"card": {"name": "oprava station agent"}})),
+    )
+
+    assert cli.main(["plan-inbox", "--agent", "codex"]) == 0
+    assert "uniqueItems" not in seen["schema"]["properties"]["tasks"]["items"]["properties"]["depends_on"]
+    json.loads(capsys.readouterr().out)
+
+
+def test_autonomous_cli_accepts_scoped_provider_order():
+    args = cli.build_parser().parse_args([
+        "autonomous",
+        "--project", "station-agent",
+        "--goal", "cil",
+        "--agent", "auto",
+        "--provider-order", "hermes,antigravity,claude-code,codex",
+    ])
+
+    assert args.provider_order == "hermes,antigravity,claude-code,codex"
 
 
 def test_autonomous_cli_reports_missing_live_evidence(tmp_path, monkeypatch, capsys):

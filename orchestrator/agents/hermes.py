@@ -200,10 +200,10 @@ class HermesAgent(Agent):
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         project_path = Path(request.project_path).resolve()
         if not project_path.is_dir():
-            return AgentRunResult(success=False, output_text="", error=f"Hermes pracovní adresář neexistuje: {project_path}")
+            return AgentRunResult(success=False, output_text="", error=f"Hermes pracovní adresář neexistuje: {project_path}", model=HERMES_FREE_MODEL)
         available, note = self.is_available()
         if not available:
-            return AgentRunResult(success=False, output_text="", error=note)
+            return AgentRunResult(success=False, output_text="", error=note, model=HERMES_FREE_MODEL)
 
         before_status = _git_status(project_path)
         response_path = project_path / "response.txt"
@@ -262,9 +262,10 @@ class HermesAgent(Agent):
                     output_text="",
                     error=f"Hermes neodpověděl do {self._timeout_seconds}s (timeout): {exc}{suffix}",
                     timed_out=True,
+                    model=HERMES_FREE_MODEL,
                 )
             except OSError as exc:
-                return AgentRunResult(success=False, output_text="", error=f"Nelze spustit Hermes CLI: {exc}")
+                return AgentRunResult(success=False, output_text="", error=f"Nelze spustit Hermes CLI: {exc}", model=HERMES_FREE_MODEL)
             usage = _read_usage(usage_path)
 
         # The CLI writes response.txt as a convenience copy of stdout.  Do not
@@ -308,6 +309,7 @@ class HermesAgent(Agent):
                 total_tokens=_usage_int(usage, "total_tokens"),
                 limited=limited,
                 retry_after_seconds=_retry_after(combined_error) if limited else None,
+                model=HERMES_FREE_MODEL,
             )
         if any(marker in combined_error.lower() for marker in _STREAM_FAILURE_MARKERS):
             # Hermes' Nous stream can close while generating a large tool-call
@@ -328,6 +330,7 @@ class HermesAgent(Agent):
                     "stderr": stderr,
                 },
                 timed_out=True,
+                model=HERMES_FREE_MODEL,
             )
         if provider != HERMES_PROVIDER or model != HERMES_FREE_MODEL:
             return AgentRunResult(
@@ -347,6 +350,7 @@ class HermesAgent(Agent):
                     "postcondition_after": _git_status(project_path),
                     "stderr": stderr,
                 },
+                model=model,
             )
 
         schema_error = _validate_output_schema(stdout, request.output_schema)
@@ -399,4 +403,5 @@ class HermesAgent(Agent):
             usage_events=[usage_event],
             limited=limited,
             retry_after_seconds=_retry_after(combined_error) if limited else None,
+            model=HERMES_FREE_MODEL,
         )

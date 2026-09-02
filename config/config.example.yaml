@@ -125,8 +125,12 @@ hermes:
 gemini:
   cli_path: ""
   model: gemini-2.5-flash
+  # api-key = free AI Studio key from GEMINI_API_KEY; oauth-personal is opt-in.
+  auth_mode: api-key
   approval_mode: auto_edit
-  timeout_seconds: 600
+  # Fail fast when Google rejects the project/model; do not hold the PM
+  # implementation slot for the generic ten-minute provider timeout.
+  timeout_seconds: 60
 
 # Git integrace.
 git:

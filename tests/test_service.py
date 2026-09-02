@@ -203,6 +203,72 @@ def test_run_autonomous_model_override_reaches_explicit_agent_without_mutating_c
     assert cfg.claude_code.model == ""
 
 
+def test_run_autonomous_passes_scoped_provider_order_to_failover(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_build_failover(config, provider_order=None, **kwargs):
+        seen["provider_order"] = provider_order
+        return FakeAgent()
+
+    monkeypatch.setattr(service_module, "build_failover_agent", fake_build_failover)
+    service = OrchestratorService(make_cfg(tmp_path))
+    try:
+        _run_id, result = service.run_autonomous(
+            project_ref="station-agent",
+            goal="Priprav zakladni projekt",
+            spec_text="- [ ] Zaloz projekt",
+            provider_order=["hermes", "antigravity", "claude-code", "codex"],
+            max_iterations=3,
+        )
+    finally:
+        service.shutdown()
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert seen["provider_order"] == ["hermes", "antigravity", "claude-code", "codex"]
+
+
+def test_auto_agent_does_not_ignore_scoped_provider_order(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_build_failover(config, provider_order=None, **kwargs):
+        seen["provider_order"] = provider_order
+        return FakeAgent()
+
+    monkeypatch.setattr(service_module, "build_failover_agent", fake_build_failover)
+    service = OrchestratorService(make_cfg(tmp_path))
+    try:
+        _run_id, result = service.run_autonomous(
+            project_ref="station-agent",
+            goal="audit",
+            spec_text="- [ ] Ověřit změnu",
+            agent_name="auto",
+            provider_order=["codex", "antigravity"],
+            max_iterations=1,
+        )
+    finally:
+        service.shutdown()
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert seen["provider_order"] == ["codex", "antigravity"]
+
+
+def test_run_autonomous_rejects_invalid_scoped_provider_order(tmp_path):
+    service = OrchestratorService(make_cfg(tmp_path))
+    try:
+        try:
+            service.run_autonomous(
+                project_ref="station-agent",
+                goal="Priprav zakladni projekt",
+                spec_text="- [ ] Zaloz projekt",
+                provider_order=["hermes", "hermes"],
+            )
+            assert False, "expected ValueError"
+        except ValueError as exc:
+            assert "duplicity" in str(exc)
+    finally:
+        service.shutdown()
+
+
 def test_run_autonomous_protocol_error_preserves_checkpoint_and_reports_waste_in_outbox(tmp_path, monkeypatch):
     """DoD points: a run that stops as PROTOCOL_ERROR must (1) keep the
     checkpoint/DoD progress already verified before the protocol errors

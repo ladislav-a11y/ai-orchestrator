@@ -43,6 +43,11 @@ class ProviderStatus:
     # configured financial cap for this job.
     budget_exceeded: bool = False
     budget_exceeded_reason: Optional[str] = None
+    # Per-run marker for a structurally valid response that did not contain an
+    # actual, specific independent audit (for example a generic refusal to
+    # inspect the checkout). This is not a quota or protocol failure.
+    audit_inadequate: bool = False
+    audit_inadequate_reason: Optional[str] = None
 
 
 def _format_duration(seconds: float) -> str:
@@ -169,6 +174,44 @@ class FailoverAgent(Agent):
         )
         return False
 
+    def force_failover_on_audit_quality(self, reason: str) -> bool:
+        """Advance past an auditor that returned no usable audit evidence.
+
+        This is a per-run content-quality decision. It is used only when the
+        autonomous audit detector finds a generic refusal/non-verification;
+        concrete item-specific rejections remain authoritative.
+        """
+        provider_name = self.active_provider_name
+        order_names = [getattr(p, "name", str(p)) for p in self.providers]
+        self._provider_statuses[provider_name] = ProviderStatus(
+            name=provider_name,
+            available=True,
+            audit_inadequate=True,
+            audit_inadequate_reason=reason,
+        )
+
+        next_index = self._active_provider_index + 1
+        if next_index < len(self.providers):
+            next_name = order_names[next_index]
+            self.logger.warning(
+                "Provider '%s' vrátil formálně platný, ale věcně nedostatečný audit "
+                "(%s). Přepínám audit na providera '%s'.",
+                provider_name, reason, next_name,
+            )
+            notify(
+                f"[AI Orchestrator] Auditní odpověď providera {provider_name} je "
+                f"věcně nedostatečná; přepínám audit na {next_name}. Důvod: {reason}"
+            )
+            self._active_provider_index = next_index
+            return True
+
+        self.logger.warning(
+            "Provider '%s' vrátil věcně nedostatečný audit (%s). Žádný další provider "
+            "v pořadí %s nezbývá.",
+            provider_name, reason, order_names,
+        )
+        return False
+
     def _describe_status_for_notify(self, name: str) -> str:
         """One human-readable line per provider for the "all exhausted"
         Slack notification - see DoD requirement (produkční incident
@@ -188,6 +231,8 @@ class FailoverAgent(Agent):
             return f"{name}: PROTOCOL_ERROR ({status.protocol_incompatible_reason})"
         if status.budget_exceeded:
             return f"{name}: BUDGET_EXCEEDED ({status.budget_exceeded_reason})"
+        if status.audit_inadequate:
+            return f"{name}: AUDIT_INADEQUATE ({status.audit_inadequate_reason})"
         if not status.available:
             return f"{name}: nedostupný ({status.unavailable_reason})"
         return f"{name}: stav neznámý"
@@ -208,6 +253,9 @@ class FailoverAgent(Agent):
                 continue
             if status and status.budget_exceeded:
                 notes.append(f"{p_name} (BUDGET_EXCEEDED)")
+                continue
+            if status and status.audit_inadequate:
+                notes.append(f"{p_name} (AUDIT_INADEQUATE)")
                 continue
             if status and not status.available:
                 notes.append(f"{p_name} (nedostupný: {status.unavailable_reason or 'neznámý důvod'})")
@@ -250,6 +298,14 @@ class FailoverAgent(Agent):
             if status and status.budget_exceeded:
                 self.logger.info(
                     "Provider '%s' je v tomto běhu již označen jako BUDGET_EXCEEDED, přeskakuji.",
+                    provider_name,
+                )
+                self._active_provider_index += 1
+                continue
+            if status and status.audit_inadequate:
+                self.logger.info(
+                    "Provider '%s' je v tomto běhu již označen jako věcně nedostatečný "
+                    "pro audit, přeskakuji.",
                     provider_name,
                 )
                 self._active_provider_index += 1
@@ -310,6 +366,7 @@ class FailoverAgent(Agent):
             event = {
                 "provider": provider_name,
                 "source": "reported",
+                "model": result.model,
                 "input_tokens": result.input_tokens,
                 "output_tokens": result.output_tokens,
                 "thinking_tokens": result.thinking_tokens,

@@ -311,6 +311,31 @@ def test_force_failover_on_protocol_error_returns_false_on_last_provider():
     assert agent.force_failover_on_protocol_error("nevraci platny JSON kontrakt") is False
 
 
+def test_force_failover_on_audit_quality_advances_and_skips_provider(caplog):
+    caplog.set_level(logging.INFO)
+    p1 = MockAgent("hermes", available=True)
+    p2 = MockAgent("gemini", available=True)
+
+    agent = FailoverAgent([p1, p2])
+    assert agent.force_failover_on_audit_quality("audit bez konkrétního ověření") is True
+    assert agent.active_provider_name == "gemini"
+    assert agent._describe_status_for_notify("hermes").startswith("hermes: AUDIT_INADEQUATE")
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="audit"))
+    assert result.output_text == "result from gemini"
+    assert len(p1.run_calls) == 0
+    assert len(p2.run_calls) == 1
+    assert "věcně nedostatečný audit" in caplog.text
+
+
+def test_force_failover_on_audit_quality_returns_false_on_last_provider():
+    p1 = MockAgent("hermes", available=True)
+    agent = FailoverAgent([p1])
+
+    assert agent.force_failover_on_audit_quality("audit bez konkrétního ověření") is False
+    assert agent.active_provider_name == "hermes"
+
+
 # -- 4c. force_failover_on_budget_exceeded() advances past the active provider
 # (per-job provider-specific financial cap, see autonomous.py's
 # _provider_budget_usd - mirrors force_failover_on_protocol_error above).
@@ -646,9 +671,11 @@ def test_failover_preserves_usage_from_limited_provider_before_fallback():
     limited = MockAgent("p1", available=True, run_fn=lambda request: AgentRunResult(
         success=False, output_text="", error="429", limited=True,
         input_tokens=40, output_tokens=2, total_tokens=42,
+        model="model-p1",
     ))
     success = MockAgent("p2", available=True, run_fn=lambda request: AgentRunResult(
         success=True, output_text="ok", input_tokens=10, output_tokens=3, total_tokens=13,
+        model="model-p2",
     ))
 
     result = FailoverAgent([limited, success]).run(
@@ -656,4 +683,5 @@ def test_failover_preserves_usage_from_limited_provider_before_fallback():
     )
 
     assert [event["provider"] for event in result.usage_events] == ["p1", "p2"]
+    assert [event["model"] for event in result.usage_events] == ["model-p1", "model-p2"]
     assert sum(event["total_tokens"] for event in result.usage_events) == 55
