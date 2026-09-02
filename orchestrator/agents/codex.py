@@ -234,6 +234,23 @@ def find_codex_cli(explicit_path: str = "") -> tuple[Optional[str], str]:
     )
 
 
+def _codex_command_prefix(cli_path: str) -> list[str]:
+    """Build a Windows-safe command prefix for the installed Codex CLI.
+
+    The npm-generated ``codex.cmd`` shim can fail under the service/launcher
+    environment even though its Node entrypoint is healthy. Calling Node with
+    the installed ``codex.js`` directly avoids that wrapper-specific failure
+    and keeps the exact same CLI installation and user configuration.
+    """
+    path = Path(cli_path)
+    if path.suffix.casefold() in {".cmd", ".bat"}:
+        node = shutil.which("node")
+        entrypoint = path.parent / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+        if node and entrypoint.is_file():
+            return [node, str(entrypoint)]
+    return [cli_path]
+
+
 def _iter_events(stdout: str):
     """Parse `codex exec --json` output: one JSON object per line.
 
@@ -275,17 +292,18 @@ class CodexAgent(Agent):
         if not self._cli_path:
             return False, self._detect_note
         try:
+            command = _codex_command_prefix(self._cli_path)
             proc = subprocess.run(
-                [self._cli_path, "--version"],
+                [*command, "--version"],
                 capture_output=True,
                 text=True,
                 timeout=15,
             )
         except Exception as e:  # pragma: no cover - defensive
-            return False, f"nepodařilo se spustit '{self._cli_path} --version': {e}"
+            return False, f"nepodařilo se spustit '{' '.join(command)} --version': {e}"
         if proc.returncode != 0:
             return False, f"'{self._cli_path} --version' selhalo (kod {proc.returncode}): {proc.stderr.strip()}"
-        return True, f"{proc.stdout.strip()} ({self._detect_note})"
+        return True, f"{proc.stdout.strip()} ({self._detect_note}; launcher={' '.join(command)})"
 
     def _build_command(
         self,
@@ -293,7 +311,7 @@ class CodexAgent(Agent):
         output_schema_path: Optional[Path] = None,
     ) -> list[str]:
         assert self._cli_path
-        cmd = [self._cli_path, "exec"]
+        cmd = [*_codex_command_prefix(self._cli_path), "exec"]
         # Codex CLI 0.149.0 reproducibly loses the usable shell permission
         # context on `exec resume`: even read-only `git status` is rejected
         # as "blocked by policy". Until resume can preserve/reapply the
