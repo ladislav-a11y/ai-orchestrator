@@ -321,12 +321,29 @@ class ClaudeCodeAgent(Agent):
                 errors="replace",
                 timeout=self.config.timeout_seconds,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
+            timeout_output = e.stdout or e.output or b""
+            timeout_stderr = e.stderr or b""
+            if isinstance(timeout_output, bytes):
+                timeout_output = timeout_output.decode("utf-8", errors="replace")
+            if isinstance(timeout_stderr, bytes):
+                timeout_stderr = timeout_stderr.decode("utf-8", errors="replace")
+            timeout_text = "\n".join(
+                part.strip() for part in (timeout_output, timeout_stderr) if part and part.strip()
+            )
+            limited, retry_after_seconds = _detect_quota_limit({}, timeout_text)
+            error = (
+                f"Claude Code hlásí vyčerpání kvóty/limitu (LIMITED): {timeout_text}"
+                if limited
+                else f"Claude Code neodpověděl do {self.config.timeout_seconds}s (timeout)."
+            )
             return AgentRunResult(
                 success=False,
-                output_text="",
-                error=f"Claude Code neodpověděl do {self.config.timeout_seconds}s (timeout).",
+                output_text=timeout_output.strip(),
+                error=error,
+                limited=limited,
                 timed_out=True,
+                retry_after_seconds=retry_after_seconds,
             )
         except FileNotFoundError as e:
             return AgentRunResult(success=False, output_text="", error=f"Nelze spustit CLI: {e}")

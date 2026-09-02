@@ -22,7 +22,7 @@ from orchestrator.service import OrchestratorService
 def _audit_response(request):
     indices = [int(value) for value in re.findall(r"(?m)^(\d+)\. ", request.prompt)]
     return json.dumps({
-        "items": [{"index": value, "accepted": True, "evidence": "audit evidence"} for value in indices],
+        "items": [{"index": value, "accepted": True, "evidence": f"{request.project_path.name}: audit evidence"} for value in indices],
         "notes": "audit passed",
     })
 

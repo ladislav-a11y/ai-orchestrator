@@ -1104,6 +1104,40 @@ def _audit_needs_quality_fallback(
     return len(matched) >= 2
 
 
+_AUDIT_SCOPE_STOPWORDS = {
+    "projekt", "project", "implementovat", "implementace", "implementační",
+    "aktuální", "aktuálním", "checkout", "chování", "zachovat", "rozsah",
+    "diagnostikovat", "skutečnou", "příčinu", "proč", "nejde", "spustit",
+    "without", "changes", "current", "project", "implementation", "preserve",
+}
+
+
+def _audit_evidence_has_project_scope(
+    goal: str, project_path: Path, evidence_lines: list[str]
+) -> bool:
+    """Reject a formally valid audit that only proves generic safety.
+
+    The audit response is otherwise structurally valid even when every line
+    discusses an unrelated generic check (for example PTT/rotator safety).
+    Require at least one concrete scope marker from the goal or checkout name
+    in the evidence before an accepted/rejected verdict can be trusted.
+    """
+    evidence = " ".join(evidence_lines).casefold()
+    path_name = project_path.name.casefold()
+    path_markers = {
+        path_name,
+        path_name.replace("-", " "),
+        path_name.replace("-", "_"),
+    }
+    goal_markers = {
+        token
+        for token in re.findall(r"[a-zá-ž0-9][a-zá-ž0-9_-]{3,}", (goal or "").casefold())
+        if token not in _AUDIT_SCOPE_STOPWORDS
+    }
+    markers = path_markers | goal_markers
+    return any(marker and marker in evidence for marker in markers)
+
+
 def _run_audit(
     agent: Agent,
     project_path: Path,
@@ -1212,9 +1246,12 @@ def _run_audit(
         ).strip(" |")
         rejected = [index for index in rejected if index not in controller_gate_indices]
 
-    if _audit_needs_quality_fallback(rejected, evidence_lines, len(dod_items)):
+    missing_scope = not _audit_evidence_has_project_scope(goal, project_path, evidence_lines)
+    if _audit_needs_quality_fallback(rejected, evidence_lines, len(dod_items)) or missing_scope:
         fallback_reason = (
             "audit vrátil zamítnutí všech bodů bez konkrétního ověření checkoutu"
+            if not missing_scope
+            else "auditní evidence neobsahuje konkrétní důkaz vztahující se k cíli projektu"
         )
         force_quality_failover = getattr(agent, "force_failover_on_audit_quality", None)
         if callable(force_quality_failover) and force_quality_failover(fallback_reason):
@@ -1288,6 +1325,16 @@ def _run_audit(
                     fallback_session_id or new_session_id,
                     saved,
                     error="záložní audit porušil JSON kontrakt",
+                    usage_events=audit_usage,
+                )
+            if not _audit_evidence_has_project_scope(goal, project_path, fallback_evidence):
+                return AuditOutcome(
+                    [],
+                    "Záložní audit také neobsahoval konkrétní důkaz vztahující se k cíli projektu.",
+                    True,
+                    fallback_session_id or new_session_id,
+                    saved,
+                    error="auditní evidence bez relevance k cíli projektu",
                     usage_events=audit_usage,
                 )
             fallback_notes = fallback_parsed.get("notes")
@@ -1613,6 +1660,15 @@ def run_autonomous_loop(
             "aby orchestr?tor nep?ibral ciz? rozpracovan? zm?ny.",
             run_id,
         )
+    initial_status_porcelain: Optional[str] = None
+    if is_git_repo(project_path):
+        try:
+            initial_status_porcelain = status_porcelain(project_path)
+        except Exception as exc:  # noqa: BLE001 - the audit still fails closed later
+            logger.warning(
+                "Autonomní běh %s: počáteční git status nelze zachytit: %s",
+                run_id, exc,
+            )
     if not test_command:
         detected = _detect_test_command(project_path)
         if detected:
@@ -1845,6 +1901,34 @@ def run_autonomous_loop(
                 "přeskakuji volání agenta a rovnou ověřuji testy/audit",
                 run_id, i, max_iterations,
             )
+
+        # A successful JSON claim is not implementation evidence. When a
+        # Git-backed implementation batch leaves the checkout byte-for-byte
+        # at the same status as at run start, do not let a repair response or
+        # stale dirty tree turn that claim into completed work.
+        if requested_indices and initial_status_porcelain is not None:
+            try:
+                current_status_porcelain = status_porcelain(project_path)
+            except Exception as exc:  # noqa: BLE001 - fail closed below
+                current_status_porcelain = initial_status_porcelain
+                notes = f"{notes} [git status po implementaci nelze ověřit: {exc}]".strip()
+            if current_status_porcelain == initial_status_porcelain:
+                claimed_indices = [
+                    index for index in requested_indices
+                    if 0 <= index < len(dod_items) and dod_items[index].done
+                ]
+                if claimed_indices:
+                    for index in claimed_indices:
+                        dod_items[index].done = False
+                    notes = (
+                        f"{notes} [implementační claim odmítnut: checkout se od začátku běhu "
+                        f"nezměnil pro indexy {claimed_indices}]"
+                    ).strip()
+                    logger.warning(
+                        "Autonomní běh %s: agent označil indexy %s jako hotové, ale Git status "
+                        "se od startu nezměnil; reopenuji implementaci.",
+                        run_id, claimed_indices,
+                    )
 
         # Agent claim and local tests cannot close an integration item.
         _enforce_live_evidence(dod_items)

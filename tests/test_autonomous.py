@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from pathlib import Path
 
 from orchestrator.agents.base import Agent, AgentRunResult
 from orchestrator.autonomous import (
@@ -13,6 +14,7 @@ from orchestrator.autonomous import (
     PROTOCOL_ERROR_STREAK_LIMIT,
     _extract_json,
     _build_audit_prompt,
+    _audit_evidence_has_project_scope,
     _audit_needs_quality_fallback,
     _controller_audit_gate_indices,
     controller_finalization_from_spec,
@@ -28,6 +30,8 @@ def _audit_response(request, *, accepted=True, index=None, evidence="audit evide
     indices = [int(value) for value in re.findall(r"(?m)^(\d+)\. ", request.prompt)]
     if index is not None:
         indices = [index]
+    if evidence == "audit evidence":
+        evidence = f"{request.project_path.name}: audit evidence"
     return json.dumps({
         "items": [
             {"index": value, "accepted": accepted, "evidence": evidence}
@@ -476,6 +480,7 @@ def test_run_autonomous_does_not_commit_preexisting_dirty_tree(git_repo):
     dod = parse_definition_of_done("- [ ] Over stav")
 
     def executor(request):
+        (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
         return AgentRunResult(
             success=True,
             output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
@@ -509,7 +514,6 @@ def test_run_autonomous_accumulates_breaker_saved_attempts_across_calls(git_repo
     # via AgentRunResult.breaker_saved_attempts - run_autonomous_loop must
     # sum this across every agent.run() call (executor + audit here) onto
     # the final AutonomousResult, same as it does for DoD/test tracking.
-    (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
     dod = parse_definition_of_done("- [ ] Priprav feature.txt")
 
     def run_fn(request):
@@ -519,6 +523,7 @@ def test_run_autonomous_accumulates_breaker_saved_attempts_across_calls(git_repo
                 output_text=_audit_response(request),
                 breaker_saved_attempts=5,
             )
+        (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
         return AgentRunResult(
             success=True,
             output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
@@ -548,10 +553,10 @@ def test_run_autonomous_completed_without_commit_when_run_did_not_request_it(git
     # The run itself did not request a commit (auto_commit_requested=False,
     # e.g. no --commit flag / auto_commit param passed) and the global config
     # default is also off - the ban on unsolicited commits must hold.
-    (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
     dod = parse_definition_of_done("- [ ] Priprav feature.txt")
 
     def executor(request):
+        (git_repo / "feature.txt").write_text("nova funkce\n", encoding="utf-8")
         return AgentRunResult(
             success=True,
             output_text='{"items": [{"index": 0, "done": true}]}',
@@ -1532,7 +1537,7 @@ def test_run_autonomous_audit_reopens_falsely_claimed_done_item(tmp_path):
             if audit_calls["n"] == 1:
                 return AgentRunResult(
                     success=True,
-                    output_text=_audit_response(request, accepted=False, index=0, evidence="bod A ve skutecnosti chybi"),
+                    output_text=_audit_response(request, accepted=False, index=0, evidence=f"{request.project_path.name}: bod A ve skutecnosti chybi"),
                 )
             return AgentRunResult(success=True, output_text=_audit_response(request))
         return AgentRunResult(
@@ -1615,7 +1620,7 @@ def test_audit_quality_fallback_rechecks_generic_refusal_with_next_provider(tmp_
     result = run_autonomous_loop(
         run_id="audit-quality-fallback",
         project_path=tmp_path,
-        goal="cil",
+        goal="audit",
         dod_items=dod,
         config=Config(),
         agent=agent,
@@ -1658,6 +1663,19 @@ def test_audit_quality_detector_recognizes_review_plan_without_verdict():
             "1:REJECT pending audit verdict",
         ],
         2,
+    ) is True
+
+
+def test_audit_evidence_must_name_the_project_scope():
+    assert _audit_evidence_has_project_scope(
+        "Diagnostikovat Station Agent a opravit jeho spuštění",
+        Path("D:/orchestrator/station-agent"),
+        ["0:OK tests/test_rig_safety.py: PTT guard je bezpečný"],
+    ) is False
+    assert _audit_evidence_has_project_scope(
+        "Diagnostikovat Station Agent a opravit jeho spuštění",
+        Path("D:/orchestrator/station-agent"),
+        ["0:OK station_agent/cli.py: aplikace se spustí v mock režimu"],
     ) is True
 
 

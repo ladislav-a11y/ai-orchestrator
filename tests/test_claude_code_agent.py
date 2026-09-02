@@ -278,6 +278,29 @@ def test_run_timeout(monkeypatch):
     assert result.timed_out is True
 
 
+
+def test_run_timeout_with_weekly_limit_output_maps_to_limited(monkeypatch):
+    agent = ClaudeCodeAgent(make_config(timeout_seconds=1))
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    message = "You've hit your weekly limit - resets Sep 7, 10:56am"
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 1, output=message, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="udelej neco")
+    )
+
+    assert result.success is False
+    assert result.limited is True
+    assert result.retry_after_seconds is not None
+    assert "weekly limit" in result.error.lower()
+
+
+
 def test_run_plaintext_weekly_limit_on_stdout_maps_to_limited(monkeypatch):
     agent = ClaudeCodeAgent(make_config())
     monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
