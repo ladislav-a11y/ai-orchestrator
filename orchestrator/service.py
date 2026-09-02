@@ -628,6 +628,9 @@ class OrchestratorService:
                 "total": result.usage_total,
                 "note": "Hodnoty se source=reported pocházejí z metadata provideru; null znamená, že údaj nebyl dostupný.",
             },
+            # Durable per-provider state. PM uses this to gate every limited
+            # provider on later workflow steps, not only the last active one.
+            "provider_statuses": result.provider_statuses,
             # Stable handoff contract consumed by AI Project Manager.
             "done": result.status == AutonomousStatus.COMPLETED,
             "checkpoint": {

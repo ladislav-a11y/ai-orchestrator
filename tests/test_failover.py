@@ -276,6 +276,24 @@ def test_failover_all_exhausted_notification_handles_unknown_retry(monkeypatch):
     assert "Čas žádného resetu/retry není u žádného providera znám." in sent[0]
 
 
+def test_provider_status_snapshot_contains_every_provider_and_absolute_retry_at():
+    p1 = MockAgent("claude-code", available=True, run_fn=lambda request: AgentRunResult(
+        success=False, output_text="", error="rate limit", limited=True,
+        retry_after_seconds=60,
+    ))
+    p2 = MockAgent("codex", available=True)
+
+    agent = FailoverAgent([p1, p2])
+    agent.run(AgentRunRequest(project_path=Path("."), prompt="vytvor feature"))
+
+    snapshot = agent.provider_status_snapshot()
+    assert set(snapshot) == {"claude-code", "codex"}
+    assert snapshot["claude-code"]["state"] == "LIMITED"
+    assert snapshot["claude-code"]["retry_after_seconds"] == 60
+    assert snapshot["claude-code"]["retry_at"].endswith("+00:00")
+    assert snapshot["codex"]["state"] == "NOT_ATTEMPTED"
+
+
 # -- 4b. force_failover_on_protocol_error() advances past the active provider
 
 def test_force_failover_on_protocol_error_advances_and_skips_next_run(caplog):

@@ -72,6 +72,11 @@ souboru):
 - `provider_sequence` (list[str]) - unikátní jména providerů (`claude-code`,
   `antigravity`, `codex`), ve kterém byli v tomto běhu skutečně použiti (v
   pořadí prvního použití) - ukazuje, jestli/kam proběhl fallback.
+- `provider_statuses` (object) - stav každého providera v tomto failover
+  pořadí. Každá položka obsahuje `state`, `retry_after_seconds`, absolutní
+  UTC `retry_at` (u `LIMITED`, pokud jej provider oznámil) a bezpečný
+  `reason`. `NOT_ATTEMPTED` není potvrzení dostupnosti. PM musí převzít každý
+  `LIMITED` záznam, ne pouze nejbližší společný retry.
 - `active_provider` (str|null) - poslední použitý provider z
   `provider_sequence` (ten, který běh buď dokončil, nebo na kterém čeká).
 - `dod_items` (list) - kompletní Definition of Done se stavem. Každý záznam

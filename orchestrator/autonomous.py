@@ -320,6 +320,9 @@ class AutonomousResult:
     usage_events: list[dict] = field(default_factory=list)
     usage_by_provider: dict[str, dict] = field(default_factory=dict)
     usage_total: dict = field(default_factory=dict)
+    # Per-provider availability/limit receipt from FailoverAgent. Sequence
+    # records who was called; this preserves every provider's retry deadline.
+    provider_statuses: dict[str, dict] = field(default_factory=dict)
 
 
 # -- Definition of Done parsing ---------------------------------------------
@@ -1649,6 +1652,8 @@ def run_autonomous_loop(
 
     def snapshot(status: AutonomousStatus, **extra) -> AutonomousResult:
         usage_by_provider, usage_total = _usage_summary(usage_events)
+        status_snapshot = getattr(agent, "provider_status_snapshot", None)
+        provider_statuses = status_snapshot() if callable(status_snapshot) else {}
         return AutonomousResult(
             status=status, iterations=list(iterations), dod_items=dod_items,
             audit_repair_attempted=any(it.audit_repair_attempted for it in iterations),
@@ -1657,6 +1662,7 @@ def run_autonomous_loop(
             protocol_error_wasted_prompt_chars=protocol_error_wasted_chars,
             usage_events=list(usage_events), usage_by_provider=usage_by_provider,
             usage_total=usage_total,
+            provider_statuses=provider_statuses,
             **extra,
         )
 

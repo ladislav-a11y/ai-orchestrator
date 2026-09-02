@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult
@@ -28,6 +29,10 @@ class ProviderStatus:
     limited: bool = False
     limited_error: Optional[str] = None
     retry_after_seconds: Optional[float] = None
+    # Absolute UTC deadline captured when the provider reported its limit.
+    # This survives the end of the AO process and avoids reconstructing a
+    # deadline from a stale relative duration in the PM.
+    retry_at: Optional[str] = None
     # Set by force_failover_on_protocol_error() - a provider that repeatedly
     # fails to return the required JSON contract (see autonomous.py's
     # PROTOCOL_ERROR_STREAK_LIMIT), not a quota/rate limit. Kept distinct
@@ -80,6 +85,51 @@ class FailoverAgent(Agent):
         self._sessions: dict[str, str] = {}
         self._active_provider_index: int = 0
         self._last_notified_provider: Optional[str] = None
+
+    def provider_status_snapshot(self) -> dict[str, dict]:
+        """Return a durable status row for every provider in this run.
+
+        Unvisited providers are explicitly marked ``NOT_ATTEMPTED`` rather
+        than being presented as healthy. Limited providers carry both the
+        relative value and an absolute UTC ``retry_at`` deadline.
+        """
+        snapshot: dict[str, dict] = {}
+        for provider in self.providers:
+            name = getattr(provider, "name", str(provider))
+            status = self._provider_statuses.get(name)
+            if status is None:
+                snapshot[name] = {
+                    "state": "NOT_ATTEMPTED",
+                    "retry_after_seconds": None,
+                    "retry_at": None,
+                    "reason": None,
+                }
+                continue
+            if status.limited:
+                state = "LIMITED"
+            elif status.protocol_incompatible:
+                state = "PROTOCOL_ERROR"
+            elif status.budget_exceeded:
+                state = "BUDGET_EXCEEDED"
+            elif status.audit_inadequate:
+                state = "AUDIT_INADEQUATE"
+            elif status.available:
+                state = "AVAILABLE"
+            else:
+                state = "UNAVAILABLE"
+            snapshot[name] = {
+                "state": state,
+                "retry_after_seconds": status.retry_after_seconds,
+                "retry_at": status.retry_at,
+                "reason": (
+                    status.limited_error
+                    or status.unavailable_reason
+                    or status.protocol_incompatible_reason
+                    or status.budget_exceeded_reason
+                    or status.audit_inadequate_reason
+                ),
+            }
+        return snapshot
 
     @property
     def active_agent(self) -> Agent:
@@ -438,12 +488,22 @@ class FailoverAgent(Agent):
                     if result.retry_after_seconds is not None
                     else ""
                 )
+                retry_at = None
+                if result.retry_after_seconds is not None:
+                    try:
+                        retry_at = (
+                            datetime.now(timezone.utc)
+                            + timedelta(seconds=max(0.0, float(result.retry_after_seconds)))
+                        ).isoformat()
+                    except (TypeError, ValueError, OverflowError):
+                        retry_at = None
                 self._provider_statuses[provider_name] = ProviderStatus(
                     name=provider_name,
                     available=True,
                     limited=True,
                     limited_error=result.error,
                     retry_after_seconds=result.retry_after_seconds,
+                    retry_at=retry_at,
                 )
 
                 next_index = self._active_provider_index + 1
