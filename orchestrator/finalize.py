@@ -28,7 +28,13 @@ def _result(status: str, **fields) -> dict:
 
 
 def _blocked(reason: str, **fields) -> dict:
-    return _result("blocked", committed=False, clean=False, error=reason, **fields)
+    # committed/clean default to False (the common case: blocked before
+    # anything happened), but several call sites block AFTER a real commit
+    # already landed (e.g. push authorization/failure) and must report that
+    # truthfully - an explicit field always overrides the default instead of
+    # colliding with it as a duplicate keyword argument.
+    merged = {"committed": False, "clean": False, **fields}
+    return _result("blocked", error=reason, **merged)
 
 
 def _safe_paths(paths: Sequence[str]) -> list[str]:

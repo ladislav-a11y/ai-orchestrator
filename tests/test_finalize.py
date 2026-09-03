@@ -77,6 +77,32 @@ def test_finalize_auto_scopes_to_dirty_status_when_no_paths_configured():
         assert sorted(committed_files) == ["new_file.txt", "tracked.txt"]
 
 
+def test_finalize_reports_committed_when_blocked_on_push_allowlist():
+    """Regression: _blocked() used to hardcode committed=False/clean=False,
+    so a caller reporting a real commit that then got blocked on push
+    authorization (committed=True passed explicitly) crashed with
+    ``TypeError: _result() got multiple values for keyword argument
+    'committed'`` instead of returning a clean, parseable result. This is
+    not a corner case - it is the first block a REAL commit ever hits, so
+    the exception must never reach the caller as a raw traceback (see
+    incident: Station Agent - oprava P5, 2026-09-03, where this exact crash
+    was the caller-visible "controller finalization" error)."""
+    with _temporary_repo() as path:
+        (path / "tracked.txt").write_text("after", encoding="utf-8")
+        _git(path, "remote", "add", "origin", "https://example.invalid/not-allowed.git")
+        result = finalize_repository(
+            path, Config(), "run-4", goal="push scope",
+            paths=["tracked.txt"], push_requested=True,
+            allowed_remote="https://example.invalid/actually-allowed.git",
+        )
+
+        assert result["status"] == "blocked"
+        assert result["committed"] is True
+        assert result["clean"] is True
+        assert "push allowlist" in result["error"]
+        assert _git(path, "log", "-1", "--pretty=%s").stdout.strip() != "initial"
+
+
 def test_finalize_blocks_when_worktree_contains_path_outside_scope():
     with _temporary_repo() as path:
         (path / "tracked.txt").write_text("after", encoding="utf-8")
