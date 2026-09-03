@@ -1906,7 +1906,26 @@ def run_autonomous_loop(
         # Git-backed implementation batch leaves the checkout byte-for-byte
         # at the same status as at run start, do not let a repair response or
         # stale dirty tree turn that claim into completed work.
-        if requested_indices and initial_status_porcelain is not None:
+        #
+        # This check only holds when the run started from a CLEAN tree: any
+        # diff from a clean start unambiguously proves this run touched
+        # something. When the tree was already dirty at start
+        # (preexisting_dirty - see above, e.g. an earlier resumed iteration's
+        # real, already-verified work that this process never committed
+        # because --no-commit/preexisting_dirty forbids it), "status
+        # unchanged since this run's own start" no longer means "no work was
+        # done" - it just as plausibly means the work was already fully done
+        # by a PREVIOUS iteration/run and this one correctly found nothing
+        # left to change. Incident: card P5.20 (Station Agent - oprava P5,
+        # 2026-09-03) had this reopen a verified, test-passing, independently
+        # cross-checked implementation 8+ times in a row across separate
+        # resumed runs, because each fresh process re-snapshots its own
+        # "initial" status instead of comparing against the true starting
+        # point of the overall (checkpointed) task. Other safeguards -
+        # tests_passed, the independent audit's per-item re-verification,
+        # and the monotonic done-merge that lets a REAL audit reopen a false
+        # claim - remain in place either way.
+        if requested_indices and initial_status_porcelain is not None and not preexisting_dirty:
             try:
                 current_status_porcelain = status_porcelain(project_path)
             except Exception as exc:  # noqa: BLE001 - fail closed below

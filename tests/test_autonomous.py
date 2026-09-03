@@ -508,6 +508,52 @@ def test_run_autonomous_does_not_commit_preexisting_dirty_tree(git_repo):
     assert (git_repo / "preexisting.txt").exists()
 
 
+def test_run_autonomous_accepts_done_claim_with_no_new_changes_on_preexisting_dirty_tree(git_repo):
+    """Incident: card P5.20 (Station Agent - oprava P5, 2026-09-03). A
+    checkpoint-resumed run starts from an already-dirty tree containing real,
+    previously-verified implementation work from an earlier iteration/run
+    that could never be committed (--no-commit is always on for this
+    dispatch, see AGENTS.md rule 11). When the CURRENT run's executor
+    correctly finds nothing left to change - because the work is already
+    complete - the checkout's status is identical to this run's own start,
+    which used to be indistinguishable from "the agent lied about being
+    done" and reopened the item every single time (8+ times in production).
+    The status-unchanged reject must only fire for a run that started
+    CLEAN, where any diff unambiguously proves real work; a preexisting-dirty
+    start must rely on tests_passed + the independent audit instead."""
+    (git_repo / "preexisting.txt").write_text("uz hotova prace z drivejsi iterace\n", encoding="utf-8")
+    dod = parse_definition_of_done("- [ ] Over stav")
+
+    def executor(request):
+        # Deliberately makes no further changes - the fix already exists in
+        # preexisting.txt from a previous (unrepresented, never-committed)
+        # iteration of this same checkpointed task.
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "jiz hotovo"}',
+        )
+
+    cfg = Config()
+
+    result = run_autonomous_loop(
+        run_id="resumed-dirty-tree-test",
+        project_path=git_repo,
+        goal="Over stav",
+        dod_items=dod,
+        config=cfg,
+        agent=FakeAgent(_confirming_audit_or(executor)),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=2,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert result.dod_items[0].done is True
+    assert "checkout se od začátku běhu nezměnil" not in (result.iterations[0].note or "")
+    assert len(result.iterations) == 1
+
+
 def test_run_autonomous_accumulates_breaker_saved_attempts_across_calls(git_repo):
     # The PreToolUse circuit breaker (orchestrator/hooks/test_command_guard.py)
     # reports how many repeated test-invocation attempts it short-circuited
