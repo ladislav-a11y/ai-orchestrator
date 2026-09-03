@@ -54,6 +54,29 @@ def test_finalize_commits_explicit_scope_and_leaves_clean_worktree():
         assert _git(path, "status", "--porcelain").stdout == ""
 
 
+def test_finalize_auto_scopes_to_dirty_status_when_no_paths_configured():
+    """Most projects never get a curated finalize-paths allowlist (see
+    scripts/run-ai-project-manager.ps1's $finalizePaths - historically only
+    ever set up for the self-modifying "AI Project Manager" project itself).
+    An empty ``paths`` must not mean "block forever" for every other,
+    ordinary target project (incident: Station Agent - oprava P5,
+    2026-09-03) - it must fall back to exactly what is dirty right now,
+    still staged path-by-path, never ``git add -A``."""
+    with _temporary_repo() as path:
+        (path / "tracked.txt").write_text("after", encoding="utf-8")
+        (path / "new_file.txt").write_text("brand new", encoding="utf-8")
+        result = finalize_repository(path, Config(), "run-3", goal="auto scope")
+
+        assert result["status"] == "completed", result.get("error")
+        assert result["committed"] is True
+        assert result["clean"] is True
+        assert _git(path, "status", "--porcelain").stdout == ""
+        committed_files = _git(
+            path, "show", "--name-only", "--pretty=", "HEAD"
+        ).stdout.split()
+        assert sorted(committed_files) == ["new_file.txt", "tracked.txt"]
+
+
 def test_finalize_blocks_when_worktree_contains_path_outside_scope():
     with _temporary_repo() as path:
         (path / "tracked.txt").write_text("after", encoding="utf-8")

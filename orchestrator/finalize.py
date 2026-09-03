@@ -68,17 +68,33 @@ def finalize_repository(
     push_requested: bool = False,
     allowed_remote: Optional[str] = None,
 ) -> dict:
-    """Finalize only the explicitly supplied worktree paths.
+    """Finalize the explicitly supplied worktree paths, or every currently
+    dirty path when the caller configured none.
 
-    This is intentionally separate from the agent loop.  The caller must
-    supply the paths already inspected by the Project Manager; this function
-    never uses ``git add -A`` and never offers force-push or history rewrite.
+    This is intentionally separate from the agent loop.  When the caller
+    supplies ``paths`` (a curated, per-project allowlist - see
+    ``AI_ORCHESTRATOR_FINALIZE_PATHS``), that list is a hard scope: any
+    other dirty path blocks the whole finalization. Most projects never get
+    such a curated list (it exists mainly for a project that can modify its
+    own controller code, e.g. AI Project Manager's self-update - a real
+    self-referential risk ordinary target projects do not carry), so an
+    empty ``paths`` does not mean "nothing is safe to commit" - it means
+    "no human pre-typed a filename list for this project". In that case the
+    scope is derived from the actual ``git status --porcelain`` right
+    before committing instead of blocking every ordinary project's
+    finalization forever. Either way this function never uses
+    ``git add -A`` (paths are always staged one by one, explicitly) and
+    never offers force-push or history rewrite; the real boundary on which
+    repository may be touched at all remains the caller's own
+    project-path allowlist and workspace root, backed by the unconditional
+    tests + independent-audit gate before a card may reach Hotovo.
     """
     project_path = Path(project_path).resolve()
     try:
         safe_paths = _safe_paths(paths)
     except ValueError as exc:
         return _blocked(str(exc))
+    explicit_scope = bool(safe_paths)
 
     repo = _git(project_path, ["rev-parse", "--show-toplevel"])
     if repo.returncode != 0 or Path(repo.stdout.strip()).resolve() != project_path:
@@ -109,15 +125,19 @@ def finalize_repository(
     committed = False
     head = _git(project_path, ["rev-parse", "HEAD"]).stdout.strip()
     if dirty:
-        if not safe_paths:
-            return _blocked("dirty worktree has no explicit finalize paths", branch=branch)
         dirty_paths = _status_paths(before.stdout)
-        outside_scope = [path for path in dirty_paths if path not in safe_paths]
-        if outside_scope:
-            return _blocked(
-                "dirty worktree contains paths outside the explicit finalize scope",
-                dirty_paths=dirty_paths, outside_scope=outside_scope, branch=branch,
-            )
+        if explicit_scope:
+            outside_scope = [path for path in dirty_paths if path not in safe_paths]
+            if outside_scope:
+                return _blocked(
+                    "dirty worktree contains paths outside the explicit finalize scope",
+                    dirty_paths=dirty_paths, outside_scope=outside_scope, branch=branch,
+                )
+        else:
+            try:
+                safe_paths = _safe_paths(dirty_paths)
+            except ValueError as exc:
+                return _blocked(str(exc), branch=branch)
         staged = _git(project_path, ["add", "--", *safe_paths])
         if staged.returncode != 0:
             return _blocked(f"git add of explicit finalize paths failed: {staged.stderr}", branch=branch)
