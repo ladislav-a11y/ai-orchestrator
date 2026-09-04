@@ -2,7 +2,7 @@
 
 In autonomous development mode, users should not need to know which provider
 currently has available quota. FailoverAgent tries providers in a configured
-order (default: hermes -> gemini -> antigravity -> claude-code -> codex), skips locally
+ order (default: gemini -> antigravity -> claude-code -> codex), skips locally
 unavailable providers, and automatically fails over to the next provider
 when a provider returns AgentRunResult(limited=True) due to quota/rate/session
 limits, times out, or reports an unavailable local/account runtime.
@@ -587,7 +587,7 @@ def build_failover_agent(
         from orchestrator.agents.registry import build_agent as agent_builder
 
     order = provider_order or config.provider_order or [
-        "hermes", "gemini", "antigravity", "claude-code", "codex"
+        "gemini", "antigravity", "claude-code", "codex"
     ]
     providers = [agent_builder(name, config) for name in order]
     return FailoverAgent(providers=providers, logger=logger)

@@ -349,10 +349,6 @@ class OrchestratorService:
                     agent_config.antigravity = replace(self.config.antigravity, model=model)
                 elif agent_name == "codex":
                     agent_config.codex = replace(self.config.codex, model=model)
-                elif agent_name == "hermes":
-                    # HermesAgent validates the Nous-only model again at
-                    # construction and runtime; do not bypass that contract.
-                    agent_config.hermes = replace(self.config.hermes, model=model)
                 elif agent_name == "gemini":
                     agent_config.gemini = replace(self.config.gemini, model=model)
                 else:

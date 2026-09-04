@@ -331,13 +331,13 @@ def test_force_failover_on_protocol_error_returns_false_on_last_provider():
 
 def test_force_failover_on_audit_quality_advances_and_skips_provider(caplog):
     caplog.set_level(logging.INFO)
-    p1 = MockAgent("hermes", available=True)
+    p1 = MockAgent("antigravity", available=True)
     p2 = MockAgent("gemini", available=True)
 
     agent = FailoverAgent([p1, p2])
     assert agent.force_failover_on_audit_quality("audit bez konkrétního ověření") is True
     assert agent.active_provider_name == "gemini"
-    assert agent._describe_status_for_notify("hermes").startswith("hermes: AUDIT_INADEQUATE")
+    assert agent._describe_status_for_notify("antigravity").startswith("antigravity: AUDIT_INADEQUATE")
 
     result = agent.run(AgentRunRequest(project_path=Path("."), prompt="audit"))
     assert result.output_text == "result from gemini"
@@ -347,11 +347,11 @@ def test_force_failover_on_audit_quality_advances_and_skips_provider(caplog):
 
 
 def test_force_failover_on_audit_quality_returns_false_on_last_provider():
-    p1 = MockAgent("hermes", available=True)
+    p1 = MockAgent("antigravity", available=True)
     agent = FailoverAgent([p1])
 
     assert agent.force_failover_on_audit_quality("audit bez konkrétního ověření") is False
-    assert agent.active_provider_name == "hermes"
+    assert agent.active_provider_name == "antigravity"
 
 
 # -- 4c. force_failover_on_budget_exceeded() advances past the active provider

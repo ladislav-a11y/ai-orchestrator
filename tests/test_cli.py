@@ -162,10 +162,10 @@ def test_autonomous_cli_accepts_scoped_provider_order():
         "--project", "station-agent",
         "--goal", "cil",
         "--agent", "auto",
-        "--provider-order", "hermes,antigravity,claude-code,codex",
+        "--provider-order", "gemini,antigravity,claude-code,codex",
     ])
 
-    assert args.provider_order == "hermes,antigravity,claude-code,codex"
+    assert args.provider_order == "gemini,antigravity,claude-code,codex"
 
 
 def test_autonomous_cli_reports_missing_live_evidence(tmp_path, monkeypatch, capsys):

@@ -1,7 +1,7 @@
 # ai-orchestrator
 
-Lokální AI orchestrátor pro Windows 11. Řídí AI agenty (Claude Code, Gemini,
-OpenAI Codex a Hermes), kteří pracují na tvých projektech - spustí agenta na
+Lokální AI orchestrátor pro Windows 11. Řídí AI agenty (Claude Code, Gemini a
+OpenAI Codex), kteří pracují na tvých projektech - spustí agenta na
 zadaný úkol, spustí testy, a pokud vše projde a ty to povolíš, vytvoří Git
 commit. Nic se neděje bez tvého vědomí a nic se nikdy neposílá na internet
 mimo volání samotného AI modelu.
@@ -77,8 +77,8 @@ provést člověk (nebo CI) s přístupem k reálnému, přihlášenému Codex C
 
 ### Gemini CLI jako free-tier provider
 
-Gemini je v automatickém pořadí hned za Hermesem a používá výhradně explicitní
-model `gemini-2.5-flash`. Headless adapter vyžaduje JSON výstup, režim
+Gemini používá v automatickém pořadí výhradně explicitní model
+`gemini-2.5-flash`. Headless adapter vyžaduje JSON výstup, režim
 `auto_edit` a `--skip-trust` pouze pro zvolený pracovní adresář; nikdy
 nepoužívá `--yolo` ani tichý přechod na jiný model. Ověření instalace bez
 spuštění modelu:
@@ -202,7 +202,7 @@ Běh skončí jedním z těchto stavů:
   vytvoří se Git commit. Pokud testy neprošly, commit se **nikdy** nevytvoří -
   ani s `--commit`.
 - **waiting_for_provider** - všichni nakonfigurovaní provideři (viz
-  `provider_order`, výchozí hermes → gemini → antigravity → claude-code → codex)
+  `provider_order`, výchozí gemini → antigravity → claude-code → codex)
   jsou LIMITED
   nebo lokálně nedostupní. Běh se **neukončí jako chyba** - uloží se do fronty
   jako čekající task s `retry_after_seconds` a Definition of Done checkpointem

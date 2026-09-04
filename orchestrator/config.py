@@ -44,15 +44,13 @@ ANTIGRAVITY_ALLOWED_MODES = {"accept-edits", "plan", ""}
 # read-only/inspection run.
 CODEX_ALLOWED_SANDBOX_MODES = {"read-only", "workspace-write"}
 
-HERMES_PROVIDER = "nous"
-HERMES_FREE_MODEL = "upstage/solar-pro4:free"
 GEMINI_FREE_MODEL = "gemini-2.5-flash"
 
 # Supported provider implementations in the orchestrator registry.
-AVAILABLE_AGENTS = ["claude-code", "antigravity", "codex", "hermes", "gemini"]
+AVAILABLE_AGENTS = ["claude-code", "antigravity", "codex", "gemini"]
 
 # Default provider failover order for autonomous mode.
-DEFAULT_PROVIDER_ORDER = ["hermes", "gemini", "antigravity", "claude-code", "codex"]
+DEFAULT_PROVIDER_ORDER = ["gemini", "antigravity", "claude-code", "codex"]
 
 
 
@@ -114,15 +112,6 @@ class CodexAgentConfig:
 
 
 @dataclass
-class HermesAgentConfig:
-    cli_path: str = ""  # empty = auto-detect Hermes CLI
-    # Hard policy: only the Nous free model is accepted by load_config and
-    # HermesAgent. No provider/model fallback is allowed for Hermes.
-    model: str = HERMES_FREE_MODEL
-    timeout_seconds: int = 600
-
-
-@dataclass
 class GeminiAgentConfig:
     cli_path: str = ""  # empty = auto-detect ("gemini" in PATH)
     # Explicit model keeps headless PM runs deterministic. The API-key mode
@@ -175,7 +164,6 @@ class Config:
     claude_code: ClaudeCodeAgentConfig = field(default_factory=ClaudeCodeAgentConfig)
     antigravity: AntigravityAgentConfig = field(default_factory=AntigravityAgentConfig)
     codex: CodexAgentConfig = field(default_factory=CodexAgentConfig)
-    hermes: HermesAgentConfig = field(default_factory=HermesAgentConfig)
     gemini: GeminiAgentConfig = field(default_factory=GeminiAgentConfig)
     git: GitConfig = field(default_factory=GitConfig)
     testing: TestingConfig = field(default_factory=TestingConfig)
@@ -325,20 +313,6 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         timeout_seconds=int(codex_raw.get("timeout_seconds", 600)),
     )
 
-    hermes_raw = raw.get("hermes") or {}
-    hermes_model = str(hermes_raw.get("model", HERMES_FREE_MODEL))
-    hermes_provider = str(hermes_raw.get("provider", HERMES_PROVIDER)).strip().lower()
-    if hermes_provider != HERMES_PROVIDER or hermes_model != HERMES_FREE_MODEL:
-        raise ValueError(
-            "Hermes smí používat pouze provider=nous a model=upstage/solar-pro4:free; "
-            f"nalezeno provider={hermes_provider!r}, model={hermes_model!r}."
-        )
-    hermes = HermesAgentConfig(
-        cli_path=hermes_raw.get("cli_path", ""),
-        model=hermes_model,
-        timeout_seconds=int(hermes_raw.get("timeout_seconds", 600)),
-    )
-
     gemini_raw = raw.get("gemini") or {}
     gemini = GeminiAgentConfig(
         cli_path=gemini_raw.get("cli_path", ""),
@@ -408,7 +382,6 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         claude_code=claude_code,
         antigravity=antigravity,
         codex=codex,
-        hermes=hermes,
         gemini=gemini,
         git=git,
         testing=testing,

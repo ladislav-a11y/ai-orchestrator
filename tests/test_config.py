@@ -141,7 +141,7 @@ def test_project_inside_workspace_root_subdir_accepted(tmp_path):
 
 def test_default_provider_order():
     cfg = load_config(EXAMPLE, create_if_missing=False)
-    assert cfg.provider_order == ["hermes", "gemini", "antigravity", "claude-code", "codex"]
+    assert cfg.provider_order == ["gemini", "antigravity", "claude-code", "codex"]
 
 
 def test_gemini_defaults_to_explicit_free_tier_model_and_safe_approval_mode():
@@ -149,13 +149,6 @@ def test_gemini_defaults_to_explicit_free_tier_model_and_safe_approval_mode():
     assert cfg.gemini.model == "gemini-2.5-flash"
     assert cfg.gemini.approval_mode == "auto_edit"
     assert cfg.gemini.auth_mode == "api-key"
-
-
-def test_hermes_rejects_non_nous_model(tmp_path):
-    path = tmp_path / "config.yaml"
-    path.write_text("hermes:\n  provider: opencode-free\n  model: laguna-s-2.1-free\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="provider=nous"):
-        load_config(path, create_if_missing=False)
 
 
 def test_custom_provider_order_parsed(tmp_path):

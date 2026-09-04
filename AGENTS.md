@@ -168,29 +168,7 @@ this file, stop and ask - do not silently override safety rules.
      item because the orchestrator runs and evaluates the configured test
      command after implementation. This prevents an agent from repeatedly
      leaving an impossible test item open and exhausting the iteration cap.
-11d. **Security-boundary repairs must be deterministic, not an endless pattern chase.**
-     `poc/hermes_agent/security.py` uses an explicit read-only command allowlist
-     plus fail-closed syntax classification; it must reject command-shaped
-     inputs outside that allowlist, including interpreter execution, mutation,
-     redirection, module-loading, and encoded-command forms. A new audit finding
-     must first become a category-level regression test and the implementation
-     must fix the boundary mechanism, not append only the newly quoted command.
-     Do not start another PM/audit tick after the same security class is rejected
-     until the local category test passes and the contract wording remains true.
-11e. **Production Hermes handoffs are isolated and Nous-only.** The adapter must
-     pass the exact `provider=nous` and `model=upstage/solar-pro4:free`, use an
-     explicit absolute working directory, run in safe mode without plugins/MCP,
-     and enforce a small per-handoff iteration cap. The desktop Hermes app must
-     not run concurrently with a PM CLI handoff because shared gateway/session
-     locks can turn a provider failure into a full timeout. A Nous stream
-     truncation is likewise failover-worthy and must not be relabeled as a
-     missing usage/provider contract. The headless handoff timeout is capped
-     at 180 seconds regardless of the mutable desktop/provider config, so a
-     wedged CLI cannot consume an entire PM tick before failover. While Hermes
-     is active, autonomous.py must dispatch only one DoD item per iteration
-     and keep final notes short; full-suite verification belongs to the
-     orchestrator audit, not the Nous-free handoff.
-11f. **Production Gemini handoffs use the explicit free-tier-capable model and
+11d. **Production Gemini handoffs use the explicit free-tier-capable model and
      safe approval mode.** The adapter must invoke the installed `gemini` CLI
      headlessly with `--output-format json`, `--model gemini-2.5-flash`,
      `--approval-mode auto_edit`, and explicit `--skip-trust` for the selected
@@ -291,6 +269,13 @@ this file, stop and ask - do not silently override safety rules.
     commit. If the check reports a pre-existing violation in an unrelated
     dirty file, record it as pre-existing and do not silently modify that
     file as part of the current task.
+17. **Tests must use the target repository's real Windows interpreter.** When
+    `<project>\\.venv\\Scripts\\python.exe` exists, invoke it by its absolute
+    path and put its `Scripts` directory first on `PATH` for test subprocesses.
+    Never treat the system `python` command or a WindowsApps alias as a valid
+    project environment without verifying its resolved executable path; an
+    alias failure can masquerade as an implementation regression before the
+    tested code even runs.
 
 ## When adding a new agent/provider (e.g. OpenAI Codex)
 

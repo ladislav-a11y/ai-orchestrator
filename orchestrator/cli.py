@@ -281,9 +281,6 @@ def cmd_projects(args: argparse.Namespace) -> int:
 
 def cmd_plan_inbox(args: argparse.Namespace) -> int:
     """Run one read-only provider turn to structure a human Inbox request."""
-    if args.agent == "hermes":
-        print(json.dumps({"success": False, "error": "Hermes nesmí provádět Inbox intake.", "unavailable": True}))
-        return 1
     try:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):

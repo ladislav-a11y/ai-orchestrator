@@ -9,7 +9,6 @@ from orchestrator.autonomous import (
     AUDIT_MARKER,
     AutonomousStatus,
     DOD_BATCH_SIZE,
-    HERMES_DOD_BATCH_SIZE,
     NO_PROGRESS_LIMIT,
     PROTOCOL_ERROR_STREAK_LIMIT,
     _extract_json,
@@ -207,12 +206,21 @@ def test_controller_owned_audit_gate_does_not_repeat_executor(tmp_path):
     assert all(item.done for item in result.dod_items)
 
 
-def test_czech_independent_audit_gate_is_controller_owned():
+def test_explicit_accepted_rejected_gate_is_controller_owned():
     items = parse_definition_of_done(
-        "- [ ] implementace\n- [ ] plné testy a nezávislý audit projdou"
+        "- [ ] implementace\n- [ ] ai-orchestrator vydá accepted / rejected verdict"
     )
 
     assert _controller_audit_gate_indices(items) == {1}
+
+
+def test_substantive_independent_audit_is_not_controller_owned():
+    items = parse_definition_of_done(
+        "- [ ] implementace\n"
+        "- [ ] Independent audit ověří aplikaci vlastním runtime scénářem"
+    )
+
+    assert _controller_audit_gate_indices(items) == set()
 
 
 def test_controller_finalization_is_extracted_only_for_audit_specs():
@@ -252,7 +260,9 @@ def test_controller_finalization_audit_skips_provider_when_proof_is_current(git_
         run_id="controller-finalization-audit",
         project_path=git_repo,
         goal="audit",
-        dod_items=parse_definition_of_done("- [x] hotovo"),
+        dod_items=parse_definition_of_done(
+            "- [x] ai-orchestrator vydá accepted / rejected verdict"
+        ),
         config=Config(),
         agent=FakeAgent(provider_must_not_run),
         logger=LOGGER,
@@ -266,6 +276,63 @@ def test_controller_finalization_audit_skips_provider_when_proof_is_current(git_
     assert result.iterations[0].audit_performed is True
     assert result.iterations[0].audit_rejected_indices == []
     assert calls == []
+
+
+def test_controller_finalization_does_not_bypass_substantive_audit(git_repo, tmp_path):
+    import subprocess
+
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=git_repo, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "HEAD"], cwd=git_repo, check=True, capture_output=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=git_repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=git_repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    proof = {
+        "status": "completed", "done": True, "committed": False,
+        "clean": True, "tests_passed": True, "pushed": True,
+        "commit_hash": head, "remote_commit": head,
+        "branch": branch, "remote": str(remote),
+    }
+    calls = []
+
+    def provider_must_run(request):
+        calls.append(request)
+        if AUDIT_MARKER in request.prompt:
+            return AgentRunResult(success=True, output_text=_audit_response(request))
+        (request.project_path / "implementation.marker").write_text("done\n", encoding="utf-8")
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 1, "done": true}], "notes": "implementace hotova"}',
+        )
+
+    result = run_autonomous_loop(
+        run_id="controller-finalization-substantive-audit",
+        project_path=git_repo,
+        goal="audit",
+        dod_items=parse_definition_of_done(
+            "- [x] implementace\n"
+            "- [ ] Independent audit ověří aplikaci vlastním runtime scénářem\n"
+            "- [ ] ai-orchestrator vydá accepted / rejected verdict"
+        ),
+        config=Config(),
+        agent=FakeAgent(provider_must_run),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=1,
+        auto_commit_requested=False,
+        controller_finalization=proof,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert result.iterations[0].audit_performed is True
+    assert result.iterations[0].audit_rejected_indices == []
+    assert len(calls) == 2
+    assert AUDIT_MARKER not in calls[0].prompt
+    assert AUDIT_MARKER in calls[1].prompt
 
 
 # -- Definition of Done parsing ----------------------------------------------
@@ -1470,30 +1537,6 @@ def test_run_autonomous_requests_only_a_small_batch_not_the_whole_dod(tmp_path):
     assert result.iterations[0].prompt.count("bod ") <= DOD_BATCH_SIZE + 2
 
 
-def test_run_autonomous_uses_one_dod_item_while_hermes_is_active(tmp_path):
-    dod = parse_definition_of_done("\n".join(f"- [ ] bod {i}" for i in range(3)))
-
-    def executor(request):
-        return AgentRunResult(success=True, output_text='{"items": [], "notes": "bez zmeny"}')
-
-    hermes = FakeAgent(_confirming_audit_or(executor))
-    hermes.name = "hermes"
-    result = run_autonomous_loop(
-        run_id="hermes-batch",
-        project_path=tmp_path,
-        goal="maly ukol",
-        dod_items=dod,
-        config=Config(),
-        agent=hermes,
-        logger=LOGGER,
-        max_iterations=1,
-        auto_commit_requested=False,
-    )
-
-    assert len(result.iterations[0].requested_indices) == HERMES_DOD_BATCH_SIZE
-    assert result.iterations[0].requested_indices == [0]
-
-
 # -- cheap repair: malformed response gets one reprompt, not a fresh iteration
 
 
@@ -1624,11 +1667,11 @@ def test_audit_quality_fallback_rechecks_generic_refusal_with_next_provider(tmp_
     audit_calls = {"n": 0}
 
     class AuditFailoverFake(FakeAgent):
-        name = "hermes"
+        name = "antigravity"
 
         def __init__(self):
             super().__init__(self._run)
-            self.active_provider_name = "hermes"
+            self.active_provider_name = "antigravity"
             self.failover_reasons = []
 
         def force_failover_on_audit_quality(self, reason):

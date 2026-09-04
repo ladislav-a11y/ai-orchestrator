@@ -11,7 +11,6 @@ default_agent: claude-code
 # Orchestrátor zkusí providery v tomto pořadí a při vyčerpání kvóty (LIMITED) nebo
 # nedostupnosti CLI automaticky přepne na dalšího.
 provider_order:
-  - hermes
   - gemini
   - antigravity
   - claude-code
@@ -110,14 +109,6 @@ codex:
   # providera v rámci jednoho běhu), ne CLI "codex". null = bez limitu.
   max_budget_usd: null
   # Po kolika sekundách bez odpovědi orchestrátor běh Codexu ukončí.
-  timeout_seconds: 600
-
-# Nastavení Hermes Agentu. Hermes je záměrně Nous-only: žádný jiný provider
-# ani model nesmí být použit jako jeho fallback.
-hermes:
-  cli_path: ""
-  provider: nous
-  model: upstage/solar-pro4:free
   timeout_seconds: 600
 
 # Nastavení Gemini CLI. Gemini je headless provider s explicitním modelem

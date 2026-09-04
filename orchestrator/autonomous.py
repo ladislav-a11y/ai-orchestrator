@@ -119,7 +119,6 @@ PROTOCOL_ERROR_STREAK_LIMIT = 2
 # module docstring): asking for a 66-entry JSON response every iteration is
 # both expensive and fragile.
 DOD_BATCH_SIZE = 8
-HERMES_DOD_BATCH_SIZE = 1
 RUNTIME_CONTRACT_PATH = Path(__file__).resolve().parents[2] / "AI_PROJECT_RUNTIME.md"
 
 
@@ -135,12 +134,12 @@ AUDIT_MARKER = "AUDITORSKÁ KONTROLA"
 # Some Trello cards include the final controller/audit gate in their visible
 # DoD (for example, "ai-orchestrator vydá accepted/rejected verdikt").  That
 # is evidence owned by this orchestrator, not implementation work an executor
-# can complete.  Keep the item in the final audit contract, but do not ask an
-# executor to repeat the implementation loop just to claim it.
+# can complete. Keep only that explicit verdict item in the final audit
+# contract; a substantive item that merely says "independent audit" still
+# requires the independent per-DoD audit and must never be bypassed.
 _CONTROLLER_AUDIT_GATE_RE = re.compile(
     r"accepted\s*/\s*rejected.*(?:ai[- ]orchestrator|audit)"
-    r"|(?:ai[- ]orchestrator|audit).*accepted\s*/\s*rejected"
-    r"|(?:nezávisl|independent)\w*\s+audit",
+    r"|(?:ai[- ]orchestrator|audit).*accepted\s*/\s*rejected",
     re.IGNORECASE,
 )
 
@@ -601,15 +600,8 @@ def _select_batch(dod_items: list[DoDItem], batch_size: int = DOD_BATCH_SIZE) ->
 
 
 def _agent_batch_size(agent: Agent) -> int:
-    """Keep Nous-free Hermes handoffs to one concrete DoD item.
-
-    Hermes has a materially smaller practical tool-call/output budget than
-    the other production agents. The failover wrapper exposes its current
-    provider, so a later iteration can widen again after Hermes hands off to
-    another provider.
-    """
-    provider = getattr(agent, "active_provider_name", getattr(agent, "name", ""))
-    return HERMES_DOD_BATCH_SIZE if provider == "hermes" else DOD_BATCH_SIZE
+    """Return the bounded DoD batch size for the active agent."""
+    return DOD_BATCH_SIZE
 
 
 def _apply_dod_updates(
@@ -2040,7 +2032,11 @@ def run_autonomous_loop(
             ).strip()
         elif implementation_done and tests_ok and not protocol_error:
             audit_performed = True
-            if controller_finalization is not None:
+            controller_only_audit = (
+                bool(dod_items)
+                and controller_gate_indices == set(range(len(dod_items)))
+            )
+            if controller_finalization is not None and controller_only_audit:
                 audit = _run_controller_audit(
                     project_path, dod_items, controller_gate_indices, controller_finalization,
                     tests_passed, run_id, logger,
@@ -2118,7 +2114,7 @@ def run_autonomous_loop(
                 previous_notes = (
                     f"{previous_notes} [audit] Auditor přijal všechny body: {audit.notes}"
                 ).strip()
-                for idx in controller_gate_indices:
+                for idx in range(len(dod_items)):
                     dod_items[idx].done = True
                 all_done = all(item.done for item in dod_items)
                 committed, commit_hash, commit_error = _commit_if_ready(

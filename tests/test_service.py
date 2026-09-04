@@ -217,14 +217,14 @@ def test_run_autonomous_passes_scoped_provider_order_to_failover(tmp_path, monke
             project_ref="station-agent",
             goal="Priprav zakladni projekt",
             spec_text="- [ ] Zaloz projekt",
-            provider_order=["hermes", "antigravity", "claude-code", "codex"],
+            provider_order=["gemini", "antigravity", "claude-code", "codex"],
             max_iterations=3,
         )
     finally:
         service.shutdown()
 
     assert result.status == AutonomousStatus.COMPLETED
-    assert seen["provider_order"] == ["hermes", "antigravity", "claude-code", "codex"]
+    assert seen["provider_order"] == ["gemini", "antigravity", "claude-code", "codex"]
 
 
 def test_auto_agent_does_not_ignore_scoped_provider_order(tmp_path, monkeypatch):
@@ -260,7 +260,7 @@ def test_run_autonomous_rejects_invalid_scoped_provider_order(tmp_path):
                 project_ref="station-agent",
                 goal="Priprav zakladni projekt",
                 spec_text="- [ ] Zaloz projekt",
-                provider_order=["hermes", "hermes"],
+                provider_order=["codex", "codex"],
             )
             assert False, "expected ValueError"
         except ValueError as exc:

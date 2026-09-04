@@ -7,7 +7,7 @@ uživatel
     |
 orchestrátor
     |
-implementační agent   (ClaudeCodeAgent, GeminiAgent, HermesAgent, CodexAgent)
+implementační agent   (ClaudeCodeAgent, GeminiAgent, CodexAgent)
     |
 testy                 (volitelný test_command daného projektu)
     |
