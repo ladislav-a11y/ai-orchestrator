@@ -734,7 +734,12 @@ def _build_audit_repair_prompt(
         json.dumps(
             {
                 "items": [
-                    {"index": i, "accepted": True, "evidence": "kratky dulez pro index i"}
+                    {
+                        "index": i,
+                        "accepted": True,
+                        "method": "jak jsi bod overil (runtime/artefakt/git/test)",
+                        "evidence": "kratky dulez pro index i",
+                    }
                     for i in range(len(dod_items))
                 ],
                 "notes": "strucne zduvodneni",
@@ -743,8 +748,8 @@ def _build_audit_repair_prompt(
             indent=2,
         ),
         "",
-        "Každý index musí mít právě jeden záznam s 'accepted' (bool) a 'evidence' "
-        "(konkretni soubor/symbol/test/live vystup).",
+        "Každý index musí mít právě jeden záznam s 'accepted' (bool), 'method' (jaké ověření "
+        "jsi použil) a 'evidence' (konkretni soubor/symbol/test/live vystup).",
         f"Počet bodů k ověření: {len(dod_items)}.",
     ]
     if previous_test_output:
@@ -795,9 +800,10 @@ def _audit_response_schema(item_count: int) -> dict:
                     "properties": {
                         "index": {"type": "integer", "enum": indices},
                         "accepted": {"type": "boolean"},
+                        "method": {"type": "string"},
                         "evidence": {"type": "string"},
                     },
-                    "required": ["index", "accepted", "evidence"],
+                    "required": ["index", "accepted", "method", "evidence"],
                     "additionalProperties": False,
                 },
             },
@@ -946,18 +952,32 @@ def _build_audit_prompt(
 
     lines += [
         "",
-        "Nezávisle over každý bod (přečti relevantní soubory/diff, nespoléhej na poznámky "
-        "z předchozích iterací) - NEIMPLEMENTUJ nic nového, nic neměň. Pokud najdeš bod, který "
-        "ve skutečnosti splněný není, uveď jeho index.",
+        "Pro KAŽDÝ bod si sám urči, jaký druh ověření je pro jeho povahu skutečně vypovídající "
+        "- neexistuje jedna univerzální metoda pro všechny body:",
+        "- Je-li bod o chování aplikace/služby, ověř ji za běhu (runtime/live spuštění, "
+        "end-to-end scénář) - samotné přečtení kódu nestačí.",
+        "- Je-li bod o artefaktu (soubor, dokument, konfigurační šablona), ověř jeho existenci "
+        "a skutečný obsah, ne jen že commit/PR existuje.",
+        "- Je-li bod o integraci, konfiguraci, Gitu nebo CI, ověř skutečný aktuální stav (git "
+        "log/diff/status, obsah konfigurace, výstup CI) - ne popis v poznámkách nebo tvrzení "
+        "implementačního agenta.",
+        "Nezávisle over každý bod (přečti relevantní soubory/diff, případně spusť ověřovací "
+        "krok, nespoléhej na poznámky z předchozích iterací) - NEIMPLEMENTUJ nic nového, nic "
+        "neměň. Pokud najdeš bod, který ve skutečnosti splněný není, uveď jeho index. Pokud bod "
+        "nelze žádnou dostupnou metodou nezávisle ověřit (aplikace se nedá spustit, artefakt "
+        "neexistuje, integrace není dostupná), NIKDY ho neoznačuj jako accepted=true - "
+        "neověřitelný bod zůstává accepted=false.",
         "",
         "Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný "
         "markdown blok, žádný text před ani za ním) přesně v tomto tvaru:",
-        '{"items":[{"index":0,"accepted":false,"evidence":"soubor/test/live vystup"}],'
-        '"notes":"strucne zduvodneni"}',
-        "Pole items musí obsahovat právě jeden záznam pro KAŽDÝ index. Evidence musí být konkrétní "
-        "a dohledatelná (soubor+symbol, test, nebo live výstup); samotné tvrzení implementačního "
-        "agenta ani obecné 'testy prošly' není důkaz splnění daného bodu. Pokud důkaz chybí, nastav "
-        "accepted=false.",
+        '{"items":[{"index":0,"accepted":false,"method":"runtime|artefakt|integrace/config/git/ci|test",'
+        '"evidence":"soubor/test/live vystup"}],"notes":"strucne zduvodneni"}',
+        "Pole items musí obsahovat právě jeden záznam pro KAŽDÝ index. 'method' stručně "
+        "pojmenovává, jakým způsobem jsi bod ověřil (např. 'runtime: spuštěno X', 'artefakt: "
+        "obsah souboru Y', 'git: stav HEAD/diff', 'test: pytest test_z'). Evidence musí být "
+        "konkrétní a dohledatelná (soubor+symbol, test, nebo live výstup); samotné tvrzení "
+        "implementačního agenta ani obecné 'testy prošly' není důkaz splnění daného bodu. Pokud "
+        "důkaz chybí nebo bod nelze ověřit, nastav accepted=false.",
     ]
     return "\n".join(lines)
 
@@ -993,9 +1013,14 @@ def _validate_audit_response(
     """Validate an already-parsed audit JSON against the strict contract.
 
     Accepts only the structured format
-    (``{"items": [{"index":..., "accepted":..., "evidence":...}]}``).
+    (``{"items": [{"index":..., "accepted":..., "method":..., "evidence":...}]}``).
     The former flat format is rejected because it cannot carry evidence for
-    every index and would weaken the independent-audit boundary.
+    every index and would weaken the independent-audit boundary. ``method``
+    is required separately from ``evidence`` so the auditor must name *how*
+    it verified the item (runtime/live/E2E for an application, existence and
+    content inspection for an artifact, actual state for an integration,
+    config, Git or CI item) rather than folding that into free-form prose
+    that validation cannot enforce is present.
 
     Returns (protocol_error, rejected_indices, evidence_lines). When
     protocol_error is True the response is structurally broken and must not
@@ -1021,6 +1046,7 @@ def _validate_audit_response(
             return True, [], []
         idx = item.get("index")
         accepted = item.get("accepted")
+        method = item.get("method")
         evidence = item.get("evidence")
         if (
             not isinstance(idx, int)
@@ -1028,6 +1054,8 @@ def _validate_audit_response(
             or idx not in expected_indices
             or idx in seen
             or not isinstance(accepted, bool)
+            or not isinstance(method, str)
+            or not method.strip()
             or not isinstance(evidence, str)
             or not evidence.strip()
         ):
@@ -1035,7 +1063,9 @@ def _validate_audit_response(
         seen.add(idx)
         if not accepted:
             rejected.append(idx)
-        evidence_lines.append(f"{idx}:{'OK' if accepted else 'REJECT'} {evidence.strip()}")
+        evidence_lines.append(
+            f"{idx}:{'OK' if accepted else 'REJECT'} [{method.strip()}] {evidence.strip()}"
+        )
 
     if seen != expected_indices:
         missing = sorted(expected_indices - seen)
@@ -1600,12 +1630,34 @@ _PYTHON_PROJECT_MARKERS = (
 )
 
 
+def _project_test_python(project_path: Path) -> str:
+    """Resolve the interpreter a detected test command should run under.
+
+    Prefers the target project's own virtualenv over a bare ``python``,
+    which would otherwise resolve via whatever process invokes the test
+    command - for the controller finalizer that invoking process is a
+    different project entirely (e.g. AI Project Manager's own tick), so a
+    bare ``python`` silently ran the finalized project's tests with the
+    wrong interpreter/dependencies instead of failing loudly. Falls back to
+    bare ``python`` for a project with no local ``.venv`` (e.g. a small
+    generated Inbox checkout with no isolated environment of its own).
+    """
+    for candidate in (
+        project_path / ".venv" / "Scripts" / "python.exe",
+        project_path / ".venv" / "bin" / "python",
+    ):
+        if candidate.is_file():
+            return f'"{candidate}"'
+    return "python"
+
+
 def _detect_test_command(project_path: Path) -> Optional[str]:
     """Best-effort fallback test command, used only when autonomous mode was
     not given one (no --test-command, no project/testing config in
     config.yaml). Deliberately narrow: only ever suggests
-    "python -m pytest -q", and only when the project looks like an actual
-    Python project with a real test suite (a "tests/" directory alongside a
+    "<python> -m pytest -q" (see _project_test_python for interpreter
+    resolution), and only when the project looks like an actual Python
+    project with a real test suite (a "tests/" directory alongside a
     recognizable Python project marker file) - never invented for a project
     type this cannot recognize. A plain one-off `run` task is unaffected and
     keeps skipping tests when none is configured; this only applies to the
@@ -1619,12 +1671,12 @@ def _detect_test_command(project_path: Path) -> Optional[str]:
     # small generated checkout; larger projects still need both a tests/
     # directory and a recognizable Python project marker.
     if root_test_suite:
-        return "python -m pytest -q"
+        return f"{_project_test_python(project_path)} -m pytest -q"
     if not (project_path / "tests").is_dir():
         return None
     if not any((project_path / marker).exists() for marker in _PYTHON_PROJECT_MARKERS):
         return None
-    return "python -m pytest -q"
+    return f"{_project_test_python(project_path)} -m pytest -q"
 
 
 def run_autonomous_loop(

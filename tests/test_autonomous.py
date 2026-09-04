@@ -17,6 +17,7 @@ from orchestrator.autonomous import (
     _audit_evidence_has_project_scope,
     _audit_needs_quality_fallback,
     _controller_audit_gate_indices,
+    _validate_audit_response,
     controller_finalization_from_spec,
     parse_definition_of_done,
     run_autonomous_loop,
@@ -26,7 +27,7 @@ from orchestrator.config import Config, GitConfig
 LOGGER = logging.getLogger("test")
 
 
-def _audit_response(request, *, accepted=True, index=None, evidence="audit evidence"):
+def _audit_response(request, *, accepted=True, index=None, evidence="audit evidence", method="static: kontrola projektu"):
     indices = [int(value) for value in re.findall(r"(?m)^(\d+)\. ", request.prompt)]
     if index is not None:
         indices = [index]
@@ -34,7 +35,7 @@ def _audit_response(request, *, accepted=True, index=None, evidence="audit evide
         evidence = f"{request.project_path.name}: audit evidence"
     return json.dumps({
         "items": [
-            {"index": value, "accepted": accepted, "evidence": evidence}
+            {"index": value, "accepted": accepted, "method": method, "evidence": evidence}
             for value in indices
         ],
         "notes": "audit ok",
@@ -1735,7 +1736,7 @@ def test_strict_audit_requires_evidence_for_every_dod_index(tmp_path):
             return AgentRunResult(
                 success=True,
                 output_text=(
-                    '{"items":[{"index":0,"accepted":true,'
+                    '{"items":[{"index":0,"accepted":true,"method":"test: pytest test_a",'
                     '"evidence":"module.py:10 + test_a"}],"notes":"neuplne"}'
                 ),
             )
@@ -1764,6 +1765,58 @@ def test_strict_audit_requires_evidence_for_every_dod_index(tmp_path):
     assert result.iterations[-1].audit_protocol_error is True
     assert "missing=[1]" in result.iterations[-1].note
     assert '"index":0' in result.iterations[-1].note
+
+
+def test_audit_response_without_method_fails_closed():
+    """The auditor must name *how* it verified each item, not just claim a
+    verdict with prose evidence - an item without an explicit method is a
+    protocol error, the same as one missing evidence entirely."""
+    protocol_error, rejected, evidence_lines = _validate_audit_response(
+        {"items": [{"index": 0, "accepted": True, "evidence": "module.py:10"}], "notes": "n"},
+        {0},
+        1,
+    )
+    assert protocol_error is True
+    assert rejected == []
+
+
+def test_audit_response_evidence_line_carries_method_and_verdict():
+    """Per-DoD output must expose index + OK/REJECT + the concrete method
+    used, not just a free-form evidence blob - this is what lets a caller
+    (and Trello) see *how* each item was independently proven or refuted."""
+    protocol_error, rejected, evidence_lines = _validate_audit_response(
+        {
+            "items": [
+                {"index": 0, "accepted": True, "method": "runtime: spusteno `make run`", "evidence": "vypis OK"},
+                {"index": 1, "accepted": False, "method": "artefakt: soubor chybi", "evidence": "config.yaml neexistuje"},
+            ],
+            "notes": "n",
+        },
+        {0, 1},
+        2,
+    )
+    assert protocol_error is False
+    assert rejected == [1]
+    assert evidence_lines == [
+        "0:OK [runtime: spusteno `make run`] vypis OK",
+        "1:REJECT [artefakt: soubor chybi] config.yaml neexistuje",
+    ]
+
+
+def test_audit_prompt_instructs_category_specific_verification_method():
+    """The auditor must derive its own verification method per DoD item
+    based on the item's nature instead of applying one uniform check to
+    every item (application -> runtime/live/E2E, artifact -> existence and
+    content, integration/config/Git/CI -> actual current state)."""
+    dod = parse_definition_of_done("- [ ] bod A")
+    prompt = _build_audit_prompt("cil", dod, "(čisté)", None, None, None)
+
+    assert "runtime" in prompt
+    assert "end-to-end" in prompt or "E2E" in prompt
+    assert "artefakt" in prompt
+    assert "git" in prompt.lower()
+    assert '"method"' in prompt
+    assert "neověřitelný bod zůstává accepted=false" in prompt
 
 
 def test_run_autonomous_waits_when_provider_is_limited(tmp_path):
