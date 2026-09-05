@@ -138,6 +138,9 @@ def test_plan_inbox_schema_uses_codex_compatible_json_schema(monkeypatch, capsys
                         "task": "Opravit station agenta.",
                         "next_step": "Prověřit reprodukci.",
                         "priority": 5.01,
+                        "priority_reason": "Potvrzená regrese.",
+                        "work_type": "implementation",
+                        "split_reason": "Jeden koherentní výsledek opravy.",
                         "depends_on": [],
                     }]
                 }),

@@ -314,7 +314,18 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
         prompt = (
             "Jsi AI planner pro Inbox AI Project Manageru. Neprováděj žádné změny "
             "souborů, nepoužívej git a nic neimplementuj. Z lidského zadání níže "
-            "vytvoř atomické, logicky navazující pracovní karty pro Připraveno. "
+            "vytvoř pracovní karty pro Připraveno, přičemž každá karta musí "
+            "představovat jeden koherentní implementační výsledek. Implementaci, "
+            "konfiguraci, integraci, potřebné testy a dokumentaci nerozděluj jen "
+            "podle souboru, vrstvy nebo workflow fáze. Standardní nezávislý audit "
+            "ai-orchestratoru, testování, live evidence a verdikt "
+            "accepted/rejected patří do auditní fáze téže karty, nevytvářej pro "
+            "ně samostatnou kartu a nikdy nepoužívej work_type audit. "
+            "Rozdělení použij jen pro odlišný samostatný výsledek, jinou "
+            "projektovou identitu nebo skutečný technický předpoklad; pokud "
+            "rozdělíš, vysvětli to v split_reason a uveď přímé závislosti v "
+            "depends_on. Pokud rozdělení není nutné, vrať jednu kartu a "
+            "split_reason vysvětli, proč jde o jeden koherentní výsledek. "
             "Všechny karty z tohoto jediného vstupu tvoří jeden Inbox batch a "
             "jeden projekt; nikdy do něj nemíchej jiný projekt nebo jinou Inbox "
             "kartu. Rozdělení smí popsat pouze samostatné pracovní kroky stejného "
@@ -330,10 +341,16 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
             "uveď depends_on jako zero-based indexy přímých předpokladů. "
             "Závislosti musí tvořit acyklický graf; pokud jsou podúkoly "
             "nezávislé, vrať prázdné pole. Vrať pouze JSON ve tvaru "
+            "work_type musí být jedna z hodnot implementation, research, "
+            "configuration, integration nebo tests; tests použij samostatně "
+            "jen pokud vstup výslovně požaduje samostatný testovací výsledek "
+            "nebo jde o skutečný předpoklad. split_reason nesmí být prázdný. "
             "priority_reason u každého úkolu musí obsahovat konkrétní důvod "
             "pro jeho prioritu. "
             "{\"tasks\":[{\"scope\":\"...\",\"task\":\"...\","
-            "\"next_step\":\"...\",\"priority\":3.01,\"depends_on\":[]}]}\n\n"
+            "\"next_step\":\"...\",\"priority\":3.01,"
+            "\"priority_reason\":\"...\",\"work_type\":\"implementation\","
+            "\"split_reason\":\"...\",\"depends_on\":[]}]}\n\n"
             + json.dumps(payload, ensure_ascii=False)
         )
         with tempfile.TemporaryDirectory(prefix="ai-orchestrator-inbox-plan-") as workspace:
@@ -356,12 +373,21 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                                         "next_step": {"type": "string", "minLength": 1},
                                         "priority": {"type": "number", "minimum": 0, "maximum": 5.999999},
                                         "priority_reason": {"type": "string", "minLength": 1},
+                                        "work_type": {
+                                            "type": "string",
+                                            "enum": ["implementation", "research", "configuration", "integration", "tests"],
+                                        },
+                                        "split_reason": {"type": "string", "minLength": 1},
                                         "depends_on": {
                                             "type": "array",
                                             "items": {"type": "integer", "minimum": 0, "maximum": 31},
                                         },
                                     },
-                                    "required": ["scope", "task", "next_step", "priority", "priority_reason", "depends_on"],
+                                    "required": [
+                                        "scope", "task", "next_step", "priority",
+                                        "priority_reason", "work_type", "split_reason",
+                                        "depends_on",
+                                    ],
                                     "additionalProperties": False,
                                 },
                             }
