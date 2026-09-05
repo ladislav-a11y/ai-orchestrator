@@ -18,6 +18,17 @@ from orchestrator.models import TaskStatus
 from orchestrator.service import OrchestratorService
 
 
+_INBOX_PLANNING_RECIPE_PATH = Path(__file__).with_name("inbox_planning_recipe.md")
+
+
+def _load_inbox_planning_recipe() -> str:
+    """Load the versioned AI planning recipe and fail closed if unavailable."""
+    recipe = _INBOX_PLANNING_RECIPE_PATH.read_text(encoding="utf-8").strip()
+    if not recipe:
+        raise ValueError("Inbox planning recipe is empty")
+    return recipe
+
+
 def _print_doctor(report) -> int:
     print("== ai-orchestrator doctor ==")
     for check in report.checks:
@@ -285,6 +296,7 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise ValueError("Inbox planner input must be a JSON object")
+        recipe = _load_inbox_planning_recipe()
         config = load_config()
         # Planning receives an empty disposable workspace. The provider can
         # reason over the supplied card text but cannot mutate a project
@@ -313,44 +325,12 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
         agent = build_agent(args.agent, safe_config)
         prompt = (
             "Jsi AI planner pro Inbox AI Project Manageru. Neprováděj žádné změny "
-            "souborů, nepoužívej git a nic neimplementuj. Z lidského zadání níže "
-            "vytvoř pracovní karty pro Připraveno, přičemž každá karta musí "
-            "představovat jeden koherentní implementační výsledek. Implementaci, "
-            "konfiguraci, integraci, potřebné testy a dokumentaci nerozděluj jen "
-            "podle souboru, vrstvy nebo workflow fáze. Standardní nezávislý audit "
-            "ai-orchestratoru, testování, live evidence a verdikt "
-            "accepted/rejected patří do auditní fáze téže karty, nevytvářej pro "
-            "ně samostatnou kartu a nikdy nepoužívej work_type audit. "
-            "Rozdělení použij jen pro odlišný samostatný výsledek, jinou "
-            "projektovou identitu nebo skutečný technický předpoklad; pokud "
-            "rozdělíš, vysvětli to v split_reason a uveď přímé závislosti v "
-            "depends_on. Pokud rozdělení není nutné, vrať jednu kartu a "
-            "split_reason vysvětli, proč jde o jeden koherentní výsledek. "
-            "Všechny karty z tohoto jediného vstupu tvoří jeden Inbox batch a "
-            "jeden projekt; nikdy do něj nemíchej jiný projekt nebo jinou Inbox "
-            "kartu. Rozdělení smí popsat pouze samostatné pracovní kroky stejného "
-            "projektu a zachovej jejich návaznosti. Rozděl velký požadavek na "
-            "malé samostatné úkoly. Každý úkol musí mít "
-            "unikátní číselnou prioritu v rozsahu 0 až 5.999999; vyšší číslo je "
-            "vyšší priorita, ale nesmí překročit naléhavost celého zdrojového "
-            "Inbox zadání bez konkrétního důvodu. Ke každé prioritě povinně "
-            "doplň priority_reason s konkrétním důvodem vycházejícím pouze ze "
-            "vstupu. Opravy PM/orchestrátoru a potvrzené regrese mají "
-            "přednost před novými funkcemi. Zachovej výhradně informace ze vstupu, "
-            "nevymýšlej projektovou identitu ani důkazy. U každého podúkolu "
-            "uveď depends_on jako zero-based indexy přímých předpokladů. "
-            "Závislosti musí tvořit acyklický graf; pokud jsou podúkoly "
-            "nezávislé, vrať prázdné pole. Vrať pouze JSON ve tvaru "
-            "work_type musí být jedna z hodnot implementation, research, "
-            "configuration, integration nebo tests; tests použij samostatně "
-            "jen pokud vstup výslovně požaduje samostatný testovací výsledek "
-            "nebo jde o skutečný předpoklad. split_reason nesmí být prázdný. "
-            "priority_reason u každého úkolu musí obsahovat konkrétní důvod "
-            "pro jeho prioritu. "
-            "{\"tasks\":[{\"scope\":\"...\",\"task\":\"...\","
-            "\"next_step\":\"...\",\"priority\":3.01,"
-            "\"priority_reason\":\"...\",\"work_type\":\"implementation\","
-            "\"split_reason\":\"...\",\"depends_on\":[]}]}\n\n"
+            "souborů, nepoužívej git a nic neimplementuj. Následující verzovaný "
+            "recept je závazný. Před vrácením výsledku proveď jeho vlastní "
+            "kontrolní seznam a vrať pouze JSON odpovídající poskytnutému output "
+            "schema.\n\n--- ZÁVAZNÝ RECEPT ---\n"
+            + recipe
+            + "\n--- KONEC RECEPTU ---\n\n--- VSTUP ---\n"
             + json.dumps(payload, ensure_ascii=False)
         )
         with tempfile.TemporaryDirectory(prefix="ai-orchestrator-inbox-plan-") as workspace:
@@ -368,6 +348,7 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                                 "items": {
                                     "type": "object",
                                     "properties": {
+                                        "project_key": {"type": "string", "minLength": 1},
                                         "scope": {"type": "string", "minLength": 1},
                                         "task": {"type": "string", "minLength": 1},
                                         "next_step": {"type": "string", "minLength": 1},
@@ -384,7 +365,7 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                                         },
                                     },
                                     "required": [
-                                        "scope", "task", "next_step", "priority",
+                                        "project_key", "scope", "task", "next_step", "priority",
                                         "priority_reason", "work_type", "split_reason",
                                         "depends_on",
                                     ],

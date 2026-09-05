@@ -130,10 +130,12 @@ def test_plan_inbox_schema_uses_codex_compatible_json_schema(monkeypatch, capsys
 
         def run(self, request):
             seen["schema"] = request.output_schema
+            seen["prompt"] = request.prompt
             return AgentRunResult(
                 success=True,
                 output_text=json.dumps({
                     "tasks": [{
+                        "project_key": "Station Agent",
                         "scope": "oprava",
                         "task": "Opravit station agenta.",
                         "next_step": "Prověřit reprodukci.",
@@ -156,7 +158,27 @@ def test_plan_inbox_schema_uses_codex_compatible_json_schema(monkeypatch, capsys
 
     assert cli.main(["plan-inbox", "--agent", "codex"]) == 0
     assert "uniqueItems" not in seen["schema"]["properties"]["tasks"]["items"]["properties"]["depends_on"]
+    assert "project_key" in seen["schema"]["properties"]["tasks"]["items"]["required"]
+    assert "AI intake musí lidské zadání rozložit na logicky navazující atomické úlohy" in seen["prompt"]
+    assert "Může jít o libovolnou aplikaci nebo kombinaci aplikací" in seen["prompt"]
+    assert "AI Orchestrator vlastní adaptéry providerů" in seen["prompt"]
+    assert "AI Project Manager vlastní Trello workflow" in seen["prompt"]
+    assert "jsou hranice čtyři" in seen["prompt"]
     json.loads(capsys.readouterr().out)
+
+
+def test_plan_inbox_fails_closed_when_recipe_is_missing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_INBOX_PLANNING_RECIPE_PATH", tmp_path / "missing.md")
+    monkeypatch.setattr(
+        cli.sys,
+        "stdin",
+        io.StringIO(json.dumps({"card": {"name": "nová aplikace"}})),
+    )
+
+    assert cli.main(["plan-inbox", "--agent", "codex"]) == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["success"] is False
+    assert "missing.md" in output["error"]
 
 
 def test_autonomous_cli_accepts_scoped_provider_order():
