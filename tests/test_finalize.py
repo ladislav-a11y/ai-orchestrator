@@ -115,3 +115,25 @@ def test_finalize_blocks_when_worktree_contains_path_outside_scope():
         assert result["committed"] is False
         assert "unapproved.txt" in result["outside_scope"]
         assert _git(path, "log", "-1", "--pretty=%s").stdout.strip() == "initial"
+
+
+def test_finalize_accepts_explicit_directory_scope_and_stages_dirty_paths():
+    with _temporary_repo() as path:
+        _git(path, "config", "core.autocrlf", "false")
+        source = path / "src"
+        source.mkdir()
+        (source / "tracked.py").write_text("before\n", encoding="utf-8", newline="\n")
+        _git(path, "add", "src/tracked.py")
+        _git(path, "commit", "-m", "add source")
+
+        (source / "tracked.py").write_text("after\n", encoding="utf-8", newline="\n")
+        (source / "new.py").write_text("new\n", encoding="utf-8", newline="\n")
+        result = finalize_repository(
+            path, Config(), "run-directory-scope", paths=["src/"]
+        )
+
+        assert result["status"] == "completed", result.get("error")
+        committed_files = _git(
+            path, "show", "--name-only", "--pretty=", "HEAD"
+        ).stdout.split()
+        assert sorted(committed_files) == ["src/new.py", "src/tracked.py"]

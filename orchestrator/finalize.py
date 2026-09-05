@@ -64,6 +64,20 @@ def _status_paths(status_output: str) -> list[str]:
     return paths
 
 
+def _path_in_scope(path: str, scopes: Sequence[str]) -> bool:
+    """Return whether a dirty path matches an exact path or directory scope."""
+    normalized = str(path).replace("\\", "/")
+    for scope in scopes:
+        candidate = str(scope).replace("\\", "/")
+        if candidate.endswith("/"):
+            root = candidate.rstrip("/")
+            if normalized == root or normalized.startswith(f"{root}/"):
+                return True
+        elif normalized == candidate:
+            return True
+    return False
+
+
 def finalize_repository(
     project_path: Path,
     config: Config,
@@ -133,7 +147,9 @@ def finalize_repository(
     if dirty:
         dirty_paths = _status_paths(before.stdout)
         if explicit_scope:
-            outside_scope = [path for path in dirty_paths if path not in safe_paths]
+            outside_scope = [
+                path for path in dirty_paths if not _path_in_scope(path, safe_paths)
+            ]
             if outside_scope:
                 return _blocked(
                     "dirty worktree contains paths outside the explicit finalize scope",
@@ -144,7 +160,11 @@ def finalize_repository(
                 safe_paths = _safe_paths(dirty_paths)
             except ValueError as exc:
                 return _blocked(str(exc), branch=branch)
-        staged = _git(project_path, ["add", "--", *safe_paths])
+        stage_paths = (
+            [path for path in dirty_paths if _path_in_scope(path, safe_paths)]
+            if explicit_scope else safe_paths
+        )
+        staged = _git(project_path, ["add", "--", *stage_paths])
         if staged.returncode != 0:
             return _blocked(f"git add of explicit finalize paths failed: {staged.stderr}", branch=branch)
         staged_check = _git(project_path, ["diff", "--cached", "--check"])
