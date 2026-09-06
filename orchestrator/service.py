@@ -192,6 +192,8 @@ class OrchestratorService:
         test_command_override: Optional[str] = None,
         auto_commit: Optional[bool] = None,
         source: str = "cli",
+        requested_model: Optional[str] = None,
+        selection_reason: Optional[str] = None,
     ) -> Task:
         entry = self.config.resolve_project(project_ref)
         project_dir = Path(entry.path)
@@ -222,6 +224,15 @@ class OrchestratorService:
             max_fix_attempts=self.config.testing.max_fix_attempts,
             auto_commit_requested=self.config.git.auto_commit if auto_commit is None else auto_commit,
             source=source,
+            requested_model=requested_model,
+            # Opaque, machine-passable reason for the actual provider
+            # selection this task represents (see PROVIDER_MODEL_ROUTING_
+            # RESEARCH.md ch.6 point 4) - never interpreted by this
+            # orchestrator. A caller-supplied reason always wins; otherwise
+            # record whether the provider was explicitly named or fell back
+            # to Config.default_agent, so the outbox receipt never has to
+            # reconstruct that distinction after the fact.
+            selection_reason=selection_reason or ("explicit_agent" if agent_name else "default_agent"),
         )
         self.queue.add(task)
         self.logger.info("Task %s zařazen do fronty (projekt=%s, zdroj=%s)", task.id, entry.name, source)
@@ -664,8 +675,12 @@ class OrchestratorService:
         """Read *.json task files from inbox/, enqueue them, move to inbox/processed/.
 
         Expected file shape: {"project": "...", "prompt": "...", "agent": "...",
-        "test_command": "...", "auto_commit": true}. Only "project" and "prompt"
-        are required. Files are moved, never deleted.
+        "test_command": "...", "auto_commit": true, "requested_model": "...",
+        "selection_reason": "..."}. Only "project" and "prompt" are required.
+        "requested_model"/"selection_reason" are passed through unvalidated
+        to AgentRunRequest (see orchestrator/agents/base.py) - this
+        orchestrator never checks them against a model catalog. Files are
+        moved, never deleted.
         """
         inbox_dir = self.config.inbox_dir
         processed_dir = inbox_dir / "processed"
@@ -682,6 +697,8 @@ class OrchestratorService:
                     test_command_override=spec.get("test_command"),
                     auto_commit=spec.get("auto_commit"),
                     source="inbox",
+                    requested_model=spec.get("requested_model"),
+                    selection_reason=spec.get("selection_reason"),
                 )
                 created.append(task)
                 f.rename(processed_dir / f.name)

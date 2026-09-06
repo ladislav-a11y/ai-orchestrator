@@ -56,6 +56,20 @@ class Task:
     cost_usd: Optional[float] = None
     source: str = "cli"  # cli | api | inbox
 
+    # Explicit per-task model/provider selection contract (see
+    # orchestrator/agents/base.py's AgentRunRequest.requested_model/
+    # selection_reason and PROVIDER_MODEL_ROUTING_RESEARCH.md ch.6). Caller
+    # (API/CLI/Inbox) may set requested_model/selection_reason before the
+    # task runs; run_task() fills model/model_source/selection_reason from
+    # the agent's actual AgentRunResult afterwards, so the outbox receipt for
+    # a plain run/import-inbox task carries the same active_provider(agent)/
+    # active_model(model)/selection_reason triple the autonomous outbox
+    # already exposes, closing the asymmetry described there.
+    requested_model: Optional[str] = None
+    selection_reason: Optional[str] = None
+    model: Optional[str] = None
+    model_source: Optional[str] = None
+
     # Count of tool calls the agent wanted to make but were denied by the
     # permission system, and the denied actions themselves (see
     # AgentRunResult in orchestrator/agents/base.py) - accumulated across

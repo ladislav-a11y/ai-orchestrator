@@ -174,6 +174,102 @@ def test_command_starts_fresh_session_when_session_id_present():
     assert "--ephemeral" not in cmd
 
 
+def test_build_command_uses_requested_model_override_not_config():
+    agent = CodexAgent(make_config(model="gpt-5.6"))
+    cmd = agent._build_command(
+        AgentRunRequest(project_path=Path("."), prompt="hello", requested_model="gpt-6-preview")
+    )
+    assert cmd[cmd.index("--model") + 1] == "gpt-6-preview"
+
+
+def test_build_command_falls_back_to_configured_model_without_override():
+    agent = CodexAgent(make_config(model="gpt-5.6"))
+    cmd = agent._build_command(AgentRunRequest(project_path=Path("."), prompt="hello"))
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.6"
+
+
+def test_run_model_source_is_requested_when_provider_does_not_confirm(monkeypatch):
+    agent = CodexAgent(make_config(model="gpt-5.6"))
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = jsonl(
+        {"id": "sess-123", "msg": {"type": "task_started"}},
+        {"id": "sess-123", "msg": {"type": "task_complete", "last_agent_message": "hotovo"}},
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="udelej neco", requested_model="gpt-6-preview")
+    )
+    assert result.model == "gpt-6-preview"
+    assert result.model_source == "requested"
+
+
+def test_run_model_source_is_configured_without_override(monkeypatch):
+    agent = CodexAgent(make_config(model="gpt-5.6"))
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = jsonl(
+        {"id": "sess-123", "msg": {"type": "task_started"}},
+        {"id": "sess-123", "msg": {"type": "task_complete", "last_agent_message": "hotovo"}},
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.model == "gpt-5.6"
+    assert result.model_source == "configured"
+
+
+def test_run_echoes_selection_reason_into_result(monkeypatch):
+    agent = CodexAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = jsonl(
+        {"id": "sess-123", "msg": {"type": "task_started"}},
+        {"id": "sess-123", "msg": {"type": "task_complete", "last_agent_message": "hotovo"}},
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="udelej neco", selection_reason="explicit_agent")
+    )
+    assert result.selection_reason == "explicit_agent"
+
+
+def test_run_rejects_invalid_requested_model_safely(monkeypatch):
+    agent = CodexAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = jsonl(
+        {"id": "sess-err", "msg": {"type": "task_started"}},
+        {"id": "sess-err", "msg": {"type": "error", "message": "unknown model 'not-a-real-model'"}},
+    )
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[cmd.index("--model") + 1] == "not-a-real-model"
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="udelej neco", requested_model="not-a-real-model")
+    )
+    assert result.success is False
+    assert "not-a-real-model" in result.error
+
+
 def test_run_success(monkeypatch):
     agent = CodexAgent(make_config())
     monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))

@@ -133,6 +133,113 @@ def test_command_optional_session_and_model():
     assert cmd[cmd.index("--model") + 1] == "gemini-2.5-pro"
 
 
+def test_build_command_uses_requested_model_override_not_config():
+    agent = AntigravityAgent(make_config(model="gemini-2.5-pro"))
+    cmd = agent._build_command(
+        AgentRunRequest(project_path=Path("."), prompt="hello", requested_model="gemini-3.0-preview")
+    )
+    assert cmd[cmd.index("--model") + 1] == "gemini-3.0-preview"
+
+
+def test_build_command_falls_back_to_configured_model_without_override():
+    agent = AntigravityAgent(make_config(model="gemini-2.5-pro"))
+    cmd = agent._build_command(AgentRunRequest(project_path=Path("."), prompt="hello"))
+    assert cmd[cmd.index("--model") + 1] == "gemini-2.5-pro"
+
+
+def test_run_model_source_is_requested_when_provider_does_not_confirm(monkeypatch):
+    # No "model" field in the CLI's own response - the value sent via the
+    # requested override is still safe to report, tagged as unconfirmed.
+    agent = AntigravityAgent(make_config(model="gemini-2.5-pro"))
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = json.dumps({"conversation_id": "c1", "status": "SUCCESS", "response": "hotovo"})
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="udelej neco", requested_model="gemini-3.0-preview")
+    )
+    assert result.model == "gemini-3.0-preview"
+    assert result.model_source == "requested"
+
+
+def test_run_model_source_is_configured_without_override(monkeypatch):
+    agent = AntigravityAgent(make_config(model="gemini-2.5-pro"))
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = json.dumps({"conversation_id": "c1", "status": "SUCCESS", "response": "hotovo"})
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.model == "gemini-2.5-pro"
+    assert result.model_source == "configured"
+
+
+def test_run_model_source_reported_wins_over_requested(monkeypatch):
+    agent = AntigravityAgent(make_config(model="gemini-2.5-pro"))
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = json.dumps(
+        {"conversation_id": "c1", "status": "SUCCESS", "response": "hotovo", "model": "gemini-3.0-actual"}
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="udelej neco", requested_model="gemini-3.0-preview")
+    )
+    assert result.model == "gemini-3.0-actual"
+    assert result.model_source == "reported"
+
+
+def test_run_echoes_selection_reason_into_result(monkeypatch):
+    agent = AntigravityAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    fake_stdout = json.dumps({"conversation_id": "c1", "status": "SUCCESS", "response": "hotovo"})
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="udelej neco", selection_reason="default_agent")
+    )
+    assert result.selection_reason == "default_agent"
+
+
+def test_run_rejects_invalid_requested_model_safely(monkeypatch):
+    agent = AntigravityAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = json.dumps(
+        {"conversation_id": "c1", "status": "ERROR", "response": "", "error": "unknown model 'not-a-real-model'"}
+    )
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[cmd.index("--model") + 1] == "not-a-real-model"
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="udelej neco", requested_model="not-a-real-model")
+    )
+    assert result.success is False
+    assert "not-a-real-model" in result.error
+
+
 def test_run_success(monkeypatch):
     agent = AntigravityAgent(make_config())
     monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))

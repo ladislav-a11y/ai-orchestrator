@@ -135,19 +135,29 @@ def _detect_quota_limit(raw: dict, error_text: str) -> tuple[bool, Optional[floa
     return True, _extract_retry_after_seconds(raw, error_text)
 
 
-def _reported_model(raw: dict, usage: dict, configured_model: str = "") -> Optional[str]:
-    """Return the model confirmed by Antigravity, with config as fallback.
+def _reported_model(
+    raw: dict, usage: dict, effective_model: str = "", requested: bool = False
+) -> tuple[Optional[str], Optional[str]]:
+    """Return (model, model_source) confirmed by Antigravity, with the model
+    actually sent to the CLI as fallback.
 
-    A configured model is safe to report because it is passed to the CLI.
-    When the provider chooses its own default and does not report it, keep
-    the value unknown instead of guessing from PM's catalog.
+    A model actually passed to the CLI is safe to report even when
+    unconfirmed - ``model_source`` distinguishes "requested" (this call's
+    ``AgentRunRequest.requested_model`` override) from "configured" (the
+    static config.yaml value) from "reported" (the provider confirmed it
+    itself). When the provider chooses its own default and does not report
+    it, and nothing was explicitly sent either, keep the value unknown
+    instead of guessing from PM's catalog.
     """
     for source in (raw, usage):
         for key in ("model", "model_id", "modelId"):
             value = source.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()
-    return configured_model.strip() or None
+                return value.strip(), "reported"
+    effective_model = effective_model.strip()
+    if effective_model:
+        return effective_model, ("requested" if requested else "configured")
+    return None, None
 
 
 # Same contract as ClaudeCodeAgent's NO_COMMIT_INSTRUCTION - committing is
@@ -221,6 +231,14 @@ class AntigravityAgent(Agent):
             return False, f"'{self._cli_path} --version' selhalo (kod {proc.returncode}): {proc.stderr.strip()}"
         return True, f"{proc.stdout.strip()} ({self._detect_note})"
 
+    def _effective_model(self, request: AgentRunRequest) -> tuple[str, bool]:
+        """Return (model_to_pass, was_explicitly_requested) - see
+        ClaudeCodeAgent._effective_model for the shared rationale."""
+        requested = (request.requested_model or "").strip()
+        if requested:
+            return requested, True
+        return self.config.model, False
+
     def _build_command(self, request: AgentRunRequest) -> list[str]:
         assert self._cli_path
         cmd = [
@@ -238,8 +256,9 @@ class AntigravityAgent(Agent):
 
         if self.config.mode:
             cmd += ["--mode", self.config.mode]
-        if self.config.model:
-            cmd += ["--model", self.config.model]
+        effective_model, _ = self._effective_model(request)
+        if effective_model:
+            cmd += ["--model", effective_model]
 
         for forbidden in FORBIDDEN_FLAGS:
             assert forbidden not in cmd, "safety invariant violated: forbidden flag in command"
@@ -247,9 +266,16 @@ class AntigravityAgent(Agent):
         return cmd
 
     def run(self, request: AgentRunRequest) -> AgentRunResult:
+        effective_model, model_requested = self._effective_model(request)
+        model_source = "requested" if model_requested else ("configured" if effective_model else None)
+
         available, note = self.is_available()
         if not available:
-            return AgentRunResult(success=False, output_text="", error=note, model=self.config.model or None)
+            return AgentRunResult(
+                success=False, output_text="", error=note,
+                model=effective_model or None, model_source=model_source,
+                selection_reason=request.selection_reason,
+            )
 
         prompt = request.prompt
         if request.context:
@@ -259,6 +285,7 @@ class AntigravityAgent(Agent):
             project_path=request.project_path,
             prompt=prompt,
             session_id=request.session_id,
+            requested_model=request.requested_model,
         )
         cmd = self._build_command(effective_request)
 
@@ -282,10 +309,16 @@ class AntigravityAgent(Agent):
                     + (f" stderr: {timeout_stderr}" if timeout_stderr else "")
                 ),
                 timed_out=True,
-                model=self.config.model or None,
+                model=effective_model or None,
+                model_source=model_source,
+                selection_reason=request.selection_reason,
             )
         except FileNotFoundError as e:
-            return AgentRunResult(success=False, output_text="", error=f"Nelze spustit CLI: {e}", model=self.config.model or None)
+            return AgentRunResult(
+                success=False, output_text="", error=f"Nelze spustit CLI: {e}",
+                model=effective_model or None, model_source=model_source,
+                selection_reason=request.selection_reason,
+            )
 
         raw: Optional[dict] = None
         try:
@@ -302,7 +335,9 @@ class AntigravityAgent(Agent):
                     f"Antigravity CLI nevrátilo platný JSON (exit kod {proc.returncode})"
                     + (f": {stderr}" if stderr else ".")
                 ),
-                model=self.config.model or None,
+                model=effective_model or None,
+                model_source=model_source,
+                selection_reason=request.selection_reason,
             )
 
         status = str(raw.get("status") or "").upper()
@@ -316,7 +351,9 @@ class AntigravityAgent(Agent):
             "thinking_tokens": usage.get("thinking_tokens"),
             "total_tokens": usage.get("total_tokens"),
         }
-        reported_model = _reported_model(raw, usage, self.config.model)
+        reported_model, reported_model_source = _reported_model(
+            raw, usage, effective_model, model_requested
+        )
 
         if status != SUCCESS_STATUS:
             error_message = raw.get("error") or response_text or f"Antigravity CLI vrátilo stav '{status or 'UNKNOWN'}'."
@@ -331,6 +368,8 @@ class AntigravityAgent(Agent):
                     limited=True,
                     retry_after_seconds=retry_after_seconds,
                     model=reported_model,
+                    model_source=reported_model_source,
+                    selection_reason=request.selection_reason,
                     **token_fields,
                 )
             return AgentRunResult(
@@ -340,6 +379,8 @@ class AntigravityAgent(Agent):
                 session_id=conversation_id,
                 error=f"Antigravity CLI vrátilo neúspěšný stav '{status or 'UNKNOWN'}': {error_message}",
                 model=reported_model,
+                model_source=reported_model_source,
+                selection_reason=request.selection_reason,
                 **token_fields,
             )
 
@@ -350,5 +391,7 @@ class AntigravityAgent(Agent):
             session_id=conversation_id,
             error=None,
             model=reported_model,
+            model_source=reported_model_source,
+            selection_reason=request.selection_reason,
             **token_fields,
         )

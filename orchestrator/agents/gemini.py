@@ -119,8 +119,12 @@ def _usage(raw: dict[str, Any]) -> dict[str, Optional[int]]:
     return values
 
 
-def _reported_model(raw: dict[str, Any], configured_model: str) -> Optional[str]:
-    """Return the model reported by Gemini, or the model explicitly passed."""
+def _reported_model(
+    raw: dict[str, Any], effective_model: str, requested: bool = False
+) -> tuple[Optional[str], Optional[str]]:
+    """Return (model, model_source) reported by Gemini, or the model actually
+    passed on the command line - see AntigravityAgent._reported_model for the
+    model_source rationale."""
     candidates = [raw]
     stats = raw.get("stats")
     if isinstance(stats, dict):
@@ -129,8 +133,11 @@ def _reported_model(raw: dict[str, Any], configured_model: str) -> Optional[str]
         for key in ("model", "model_id", "modelId"):
             value = source.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()
-    return configured_model.strip() or None
+                return value.strip(), "reported"
+    effective_model = effective_model.strip()
+    if effective_model:
+        return effective_model, ("requested" if requested else "configured")
+    return None, None
 
 
 class GeminiAgent(Agent):
@@ -190,8 +197,19 @@ class GeminiAgent(Agent):
                     return [node_path, str(script_path)]
         return [self._cli_path]
 
+    def _effective_model(self, request: AgentRunRequest) -> tuple[str, bool]:
+        """Return (model_to_pass, was_explicitly_requested) - see
+        ClaudeCodeAgent._effective_model for the shared rationale. Gemini
+        always has a non-empty configured default (GEMINI_FREE_MODEL), so
+        the fallback here is never blank."""
+        requested = (request.requested_model or "").strip()
+        if requested:
+            return requested, True
+        return self.config.model, False
+
     def _build_command(self, request: AgentRunRequest) -> list[str]:
         assert self._cli_path
+        effective_model, _ = self._effective_model(request)
         command = [
             *self._command_prefix(),
             "-p",
@@ -207,7 +225,7 @@ class GeminiAgent(Agent):
             "--approval-mode",
             self.config.approval_mode,
             "--model",
-            self.config.model,
+            effective_model,
             "--skip-trust",
         ]
         for forbidden in FORBIDDEN_FLAGS:
@@ -215,9 +233,16 @@ class GeminiAgent(Agent):
         return command
 
     def run(self, request: AgentRunRequest) -> AgentRunResult:
+        effective_model, model_requested = self._effective_model(request)
+        model_source = "requested" if model_requested else ("configured" if effective_model else None)
+
         available, note = self.is_available()
         if not available:
-            return AgentRunResult(success=False, output_text="", error=note, model=self.config.model or None)
+            return AgentRunResult(
+                success=False, output_text="", error=note,
+                model=effective_model or None, model_source=model_source,
+                selection_reason=request.selection_reason,
+            )
 
         prompt = request.prompt
         if request.context:
@@ -233,6 +258,7 @@ class GeminiAgent(Agent):
             prompt=prompt,
             session_id=request.session_id,
             output_schema=request.output_schema,
+            requested_model=request.requested_model,
         )
         command = self._build_command(effective)
         # Keep both explicit mechanisms: --skip-trust is supported by current
@@ -276,10 +302,16 @@ class GeminiAgent(Agent):
                     + (f" stderr: {detail}" if detail else "")
                 ),
                 timed_out=True,
-                model=self.config.model or None,
+                model=effective_model or None,
+                model_source=model_source,
+                selection_reason=request.selection_reason,
             )
         except OSError as exc:
-            return AgentRunResult(success=False, output_text="", error=f"Nelze spustit Gemini CLI: {exc}", model=self.config.model or None)
+            return AgentRunResult(
+                success=False, output_text="", error=f"Nelze spustit Gemini CLI: {exc}",
+                model=effective_model or None, model_source=model_source,
+                selection_reason=request.selection_reason,
+            )
 
         stdout = proc.stdout.strip()
         stderr = proc.stderr.strip()
@@ -293,15 +325,28 @@ class GeminiAgent(Agent):
                 error=f"Gemini CLI nevrátilo platný JSON (exit kód {proc.returncode}): {error}",
                 limited=_quota_error(error),
                 unavailable=_auth_unavailable(error),
-                model=self.config.model or None,
+                model=effective_model or None,
+                model_source=model_source,
+                selection_reason=request.selection_reason,
             )
         if not isinstance(raw, dict):
-            return AgentRunResult(success=False, output_text="", error="Gemini CLI vrátilo JSON jiné než object")
+            return AgentRunResult(
+                success=False, output_text="", error="Gemini CLI vrátilo JSON jiné než object",
+                selection_reason=request.selection_reason,
+            )
 
         response = _response_text(raw)
         error = raw.get("error") if isinstance(raw.get("error"), str) else stderr
         usage = _usage(raw)
-        fields = {**usage, "raw_response": raw, "session_id": raw.get("session_id") or raw.get("sessionId"), "model": _reported_model(raw, self.config.model)}
+        reported_model, reported_model_source = _reported_model(raw, effective_model, model_requested)
+        fields = {
+            **usage,
+            "raw_response": raw,
+            "session_id": raw.get("session_id") or raw.get("sessionId"),
+            "model": reported_model,
+            "model_source": reported_model_source,
+            "selection_reason": request.selection_reason,
+        }
         if proc.returncode != 0 or error:
             message = error or response or f"Gemini CLI vrátilo exit kód {proc.returncode}"
             limited = _quota_error(message)

@@ -55,6 +55,31 @@ def test_command_never_contains_forbidden_flags():
     assert "acceptEdits" in cmd
 
 
+def test_build_command_uses_requested_model_override_not_config():
+    # AgentRunRequest.requested_model (e.g. AI Project Manager routing by
+    # task type/complexity) must win over config.yaml's static model for
+    # this call only - see AgentRunRequest.requested_model in agents/base.py.
+    agent = ClaudeCodeAgent(make_config(model="claude-sonnet-4-1"))
+    cmd = agent._build_command(
+        AgentRunRequest(project_path=Path("."), prompt="hello", requested_model="claude-opus-4-1")
+    )
+    assert cmd[cmd.index("--model") + 1] == "claude-opus-4-1"
+
+
+def test_build_command_falls_back_to_configured_model_without_override():
+    agent = ClaudeCodeAgent(make_config(model="claude-sonnet-4-1"))
+    cmd = agent._build_command(AgentRunRequest(project_path=Path("."), prompt="hello"))
+    assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-1"
+
+
+def test_build_command_ignores_blank_requested_model_override():
+    agent = ClaudeCodeAgent(make_config(model="claude-sonnet-4-1"))
+    cmd = agent._build_command(
+        AgentRunRequest(project_path=Path("."), prompt="hello", requested_model="   ")
+    )
+    assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-1"
+
+
 def test_run_success(monkeypatch):
     agent = ClaudeCodeAgent(make_config())
 
@@ -113,6 +138,79 @@ def test_run_reports_model_selected_by_claude_in_model_usage(monkeypatch):
 
     assert result.success is True
     assert result.model == "claude-haiku-4-5"
+
+
+def test_run_reports_model_source_reported_when_confirmed(monkeypatch):
+    agent = ClaudeCodeAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    fake_stdout = json.dumps({"is_error": False, "result": "hotovo", "model": "claude-haiku-4-5"})
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+    assert result.model == "claude-haiku-4-5"
+    assert result.model_source == "reported"
+
+
+def test_run_never_invents_model_from_requested_override(monkeypatch):
+    # Claude Code may choose its own model even when --model was passed -
+    # a requested override must never be echoed back as fact unless the
+    # provider itself confirms it (see _reported_model's docstring).
+    agent = ClaudeCodeAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    fake_stdout = json.dumps({"is_error": False, "result": "hotovo"})
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="udelej neco", requested_model="claude-opus-4-1")
+    )
+    assert result.model is None
+    assert result.model_source is None
+
+
+def test_run_echoes_selection_reason_into_result(monkeypatch):
+    agent = ClaudeCodeAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    fake_stdout = json.dumps({"is_error": False, "result": "hotovo"})
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="udelej neco", selection_reason="explicit_agent")
+    )
+    assert result.selection_reason == "explicit_agent"
+
+
+def test_run_rejects_invalid_requested_model_safely(monkeypatch):
+    # A provider CLI that does not recognize a requested model must fail
+    # safely (AgentRunResult(success=False, ...)) instead of raising or
+    # silently ignoring the request - see AgentRunRequest.requested_model.
+    agent = ClaudeCodeAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[cmd.index("--model") + 1] == "not-a-real-model"
+        return subprocess.CompletedProcess(
+            cmd, returncode=1, stdout="", stderr="Unknown model: not-a-real-model"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="udelej neco", requested_model="not-a-real-model")
+    )
+    assert result.success is False
+    assert "not-a-real-model" in result.error
 
 
 def test_run_ignores_missing_or_malformed_usage(monkeypatch):

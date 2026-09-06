@@ -134,6 +134,73 @@ Selže-li čtení stdin/stavového souboru, hook vždy "fail-open" (exit 0,
 povolí) - statická allow/deny pravidla zůstávají záložní vrstvou, stejně
 jako u ostatních `permission_mode`/`FORBIDDEN_*` kontrol.
 
+## Volba providera a modelu per požadavek a provider receipt
+
+Navazuje na rešerši v `PROVIDER_MODEL_ROUTING_RESEARCH.md` (kap. 6): AI
+Project Manager (nebo jiný volající) musí umět pro jeden konkrétní
+požadavek zvolit model bez úpravy `config.yaml`, a zpětně z výsledku
+spolehlivě zjistit, který provider/model byl skutečně použit a proč.
+AI Orchestrator zůstává "dumb pipe" - nevaliduje `requested_model` proti
+žádnému katalogu (žádný v repozitáři neexistuje), jen ho předá dál a
+reportuje, co se skutečně stalo.
+
+- `AgentRunRequest.requested_model` (`agents/base.py`) - nepovinný per-volání
+  override modelu. Když je vyplněný a neprázdný, provider ho použije místo
+  `config.<provider>.model` jen pro toto volání; prázdná/blank hodnota se
+  chová jako "žádný override". Provider, který dostane hodnotu, jakou jeho
+  CLI nezná, ji předá dál beze změny - bezpečné chování je, že CLI samo
+  vrátí chybu a adaptér ji zabalí do běžného `AgentRunResult(success=False,
+  ...)`, nikdy nespadne ani netiše neignoruje požadavek.
+- `AgentRunRequest.selection_reason` - opakní, orchestrátorem
+  nevalidovaný důvod volby (např. `"explicit_agent"`, `"default_agent"`,
+  nebo PM vlastní klasifikační štítek úlohy). Prochází beze změny až do
+  `AgentRunResult.selection_reason`, pokud volání neprošlo failoverem (viz
+  níže).
+- `AgentRunResult.model`/`model_source` - `model` nese nejlepší dostupnou
+  evidenci o skutečně použitém modelu; `model_source` rozlišuje `"reported"`
+  (provider to sám potvrdil ve své JSON odpovědi), `"requested"` (jen víme,
+  že jsme poslali `requested_model`, provider to nepotvrdil) a
+  `"configured"` (poslali jsme statickou `config.yaml` hodnotu, opět
+  nepotvrzenou). `None`/`None`, když provider nic neposlal ani nic
+  nekonfiguroval - hodnota se nikdy nevymýšlí (viz `claude_code.py`'s
+  `_reported_model()`, který u Claude Code záměrně NIKDY nepoužije
+  `requested`/`configured` fallback, protože Claude Code smí zvolit model
+  sám i když `--model` nedostal).
+- `FailoverAgent._compose_selection_reason()` (`agents/failover.py`) - když
+  výsledné volání proběhlo na prvním zkoušeném provideru, důvod se jen
+  echuje z `request.selection_reason`; jakmile failover přeskočil alespoň
+  jednoho providera (LIMITED/nedostupný/timeout/...), sestaví strojově
+  čitelný řetězec `"failover: <status providera 1>; ... -> <aktivní
+  provider>"` ze stejných dat, která už `provider_status_snapshot()`
+  poskytuje - volající tak nikdy nemusí ručně rekonstruovat důvod z mapy
+  `provider_statuses`.
+- `Task.requested_model`/`selection_reason`/`model`/`model_source`
+  (`models.py`) - `requested_model`/`selection_reason` nastaví volající
+  (CLI/API/Inbox) před spuštěním, `runner.py`'s `run_task()` po běhu (i po
+  každém fix-pokusu) přepíše `model`/`model_source`/`selection_reason`
+  skutečnou hodnotou z `AgentRunResult`. Protože `Task.to_dict()` serializuje
+  `__dict__` beze změny, `outbox/<task_id>.json` (běžný `run`/
+  `import-inbox` úkol) tuto čtveřici automaticky obsahuje - odstraňuje to
+  asymetrii popsanou v rešerši (kap. 5.3), kdy jednorázový outbox neměl
+  žádný ekvivalent autonomního `active_provider`/`active_model`.
+- `OrchestratorService.submit()` - když volající `selection_reason`
+  nezadá, doplní ho sám: `"explicit_agent"`, když byl zadán `agent_name`,
+  jinak `"default_agent"` (padlo se na `Config.default_agent`) - takže tahle
+  distinkce nikdy nechybí ani u nejjednoduššího volání bez explicitního
+  důvodu.
+- `import_inbox()` čte `requested_model`/`selection_reason` z JSON souboru v
+  `inbox/` stejně nevalidovaně jako `submit()`.
+
+Mimo rozsah (viz rešerše kap. 6 bod 5 a `inbox_planning_recipe.md`):
+klasifikace úlohy podle typu/složitosti a její promítnutí do konkrétní
+`requested_model`/`selection_reason` hodnoty je vlastnictví AI Project
+Manageru, ne tohoto orchestrátoru. Samostatný, dřívější mechanismus
+`OrchestratorService.run_autonomous(..., model_override=...)` (per-run
+override modelu pro autonomní smyčku přes dočasně nahrazenou kopii
+`Config`, nikdy ne mutaci originálu) zůstává beze změny vedle tohoto
+kontraktu - řeší jiný vstupní bod (celý autonomní běh, ne jedno
+`AgentRunRequest`) a nesdílí s ním datový tok.
+
 ## Pracovní prostor (`workspace_root`)
 
 `ClaudeCodeAgent` dostává `cwd` = cesta projektu vrácená

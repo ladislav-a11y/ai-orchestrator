@@ -303,6 +303,8 @@ def make_task(
     max_fix_attempts: int,
     auto_commit_requested: bool,
     source: str = "cli",
+    requested_model: Optional[str] = None,
+    selection_reason: Optional[str] = None,
 ) -> Task:
     return Task(
         id=new_task_id(),
@@ -316,4 +318,6 @@ def make_task(
         max_fix_attempts=max_fix_attempts,
         auto_commit_requested=auto_commit_requested,
         source=source,
+        requested_model=requested_model,
+        selection_reason=selection_reason,
     )

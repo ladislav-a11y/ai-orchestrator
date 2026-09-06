@@ -109,9 +109,19 @@ def run_task(task: Task, config: Config, agent: Agent, queue: TaskQueue, logger:
     queue.update(task)
     logger.info("Task %s: spouštím agenta '%s' na projektu %s", task.id, task.agent, project_path)
 
-    result = agent.run(AgentRunRequest(project_path=project_path, prompt=task.prompt))
+    result = agent.run(
+        AgentRunRequest(
+            project_path=project_path,
+            prompt=task.prompt,
+            requested_model=task.requested_model,
+            selection_reason=task.selection_reason,
+        )
+    )
     task.claude_session_id = result.session_id
     task.cost_usd = result.cost_usd
+    task.model = result.model
+    task.model_source = result.model_source
+    task.selection_reason = result.selection_reason
     _record_permission_denials(task, result, logger)
 
     if not result.success:
@@ -151,10 +161,15 @@ def run_task(task: Task, config: Config, agent: Agent, queue: TaskQueue, logger:
                     project_path=project_path,
                     prompt=_fix_prompt(task.prompt, task.test_command, output),
                     session_id=task.claude_session_id,
+                    requested_model=task.requested_model,
+                    selection_reason=task.selection_reason,
                 )
             )
             task.attempts += 1
             task.claude_session_id = fix_result.session_id or task.claude_session_id
+            task.model = fix_result.model or task.model
+            task.model_source = fix_result.model_source or task.model_source
+            task.selection_reason = fix_result.selection_reason or task.selection_reason
             _record_permission_denials(task, fix_result, logger)
             if fix_result.cost_usd:
                 task.cost_usd = (task.cost_usd or 0) + fix_result.cost_usd

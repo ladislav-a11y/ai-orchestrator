@@ -262,6 +262,29 @@ class FailoverAgent(Agent):
         )
         return False
 
+    def _compose_selection_reason(
+        self, request: AgentRunRequest, order_names: list[str], active_name: Optional[str] = None
+    ) -> Optional[str]:
+        """Machine-passable reason for the ACTUAL provider selection this run
+        represents (see PROVIDER_MODEL_ROUTING_RESEARCH.md ch.6 point 4).
+
+        Echoes the caller's own ``request.selection_reason`` unchanged when
+        no provider was skipped before landing on (or exhausting)
+        ``active_name`` - built from the exact same ``ProviderStatus`` data
+        ``provider_status_snapshot()``/``_describe_status_for_notify()``
+        already expose, so a caller never has to reconstruct it by hand from
+        ``provider_statuses``.
+        """
+        skipped = [
+            self._describe_status_for_notify(name)
+            for name in order_names
+            if name in self._provider_statuses and name != active_name
+        ]
+        if not skipped:
+            return request.selection_reason
+        suffix = f" -> {active_name}" if active_name else ""
+        return "failover: " + "; ".join(skipped) + suffix
+
     def _describe_status_for_notify(self, name: str) -> str:
         """One human-readable line per provider for the "all exhausted"
         Slack notification - see DoD requirement (produkční incident
@@ -403,6 +426,8 @@ class FailoverAgent(Agent):
                 context=request.context,
                 session_id=provider_session,
                 output_schema=request.output_schema,
+                requested_model=request.requested_model,
+                selection_reason=request.selection_reason,
             )
 
             started_at = time.monotonic()
@@ -535,10 +560,14 @@ class FailoverAgent(Agent):
 
             # Normal result (success=True or ordinary error with limited=False)
             result.usage_events = usage_events or result.usage_events
+            result.selection_reason = self._compose_selection_reason(request, order_names, provider_name)
             return result
 
         if last_result is not None and not last_result.limited:
             last_result.usage_events = usage_events or last_result.usage_events
+            last_result.selection_reason = self._compose_selection_reason(
+                request, order_names, self.active_provider_name
+            )
             return last_result
 
         self.logger.error(
@@ -574,6 +603,7 @@ class FailoverAgent(Agent):
             limited=True,
             retry_after_seconds=retry_after_seconds,
             usage_events=usage_events,
+            selection_reason=self._compose_selection_reason(request, order_names),
         )
 
 

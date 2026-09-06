@@ -272,6 +272,19 @@ class ClaudeCodeAgent(Agent):
             return False, f"'{self._cli_path} --version' selhalo (kod {proc.returncode}): {proc.stderr.strip()}"
         return True, f"{proc.stdout.strip()} ({self._detect_note})"
 
+    def _effective_model(self, request: AgentRunRequest) -> tuple[str, bool]:
+        """Return (model_to_pass, was_explicitly_requested).
+
+        A non-empty ``request.requested_model`` overrides ``config.model``
+        for this call only - config.yaml is never mutated. An empty/blank
+        override is treated as "no override" instead of sending a blank
+        --model value to the CLI.
+        """
+        requested = (request.requested_model or "").strip()
+        if requested:
+            return requested, True
+        return self.config.model, False
+
     def _build_command(self, request: AgentRunRequest) -> list[str]:
         assert self._cli_path
         cmd = [self._cli_path, "-p", request.prompt, "--output-format", "json"]
@@ -281,8 +294,9 @@ class ClaudeCodeAgent(Agent):
 
         cmd += ["--permission-mode", self.config.permission_mode]
 
-        if self.config.model:
-            cmd += ["--model", self.config.model]
+        effective_model, _ = self._effective_model(request)
+        if effective_model:
+            cmd += ["--model", effective_model]
         if self.config.allowed_tools:
             cmd += ["--allowedTools", *self.config.allowed_tools]
         if self.config.disallowed_tools:
@@ -298,7 +312,10 @@ class ClaudeCodeAgent(Agent):
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         available, note = self.is_available()
         if not available:
-            return AgentRunResult(success=False, output_text="", error=note)
+            return AgentRunResult(
+                success=False, output_text="", error=note,
+                selection_reason=request.selection_reason,
+            )
 
         prompt = request.prompt
         if request.context:
@@ -308,6 +325,7 @@ class ClaudeCodeAgent(Agent):
             project_path=request.project_path,
             prompt=prompt,
             session_id=request.session_id,
+            requested_model=request.requested_model,
         )
         cmd = self._build_command(effective_request)
 
@@ -344,9 +362,13 @@ class ClaudeCodeAgent(Agent):
                 limited=limited,
                 timed_out=True,
                 retry_after_seconds=retry_after_seconds,
+                selection_reason=request.selection_reason,
             )
         except FileNotFoundError as e:
-            return AgentRunResult(success=False, output_text="", error=f"Nelze spustit CLI: {e}")
+            return AgentRunResult(
+                success=False, output_text="", error=f"Nelze spustit CLI: {e}",
+                selection_reason=request.selection_reason,
+            )
 
         raw: Optional[dict] = None
         try:
@@ -418,6 +440,8 @@ class ClaudeCodeAgent(Agent):
                 limited=limited,
                 retry_after_seconds=retry_after_seconds,
                 model=reported_model,
+                model_source=("reported" if reported_model else None),
+                selection_reason=request.selection_reason,
             )
 
         # Could not parse JSON - fall back to raw stdout/stderr.
@@ -440,4 +464,5 @@ class ClaudeCodeAgent(Agent):
             error=error_message,
             limited=limited,
             retry_after_seconds=retry_after_seconds,
+            selection_reason=request.selection_reason,
         )

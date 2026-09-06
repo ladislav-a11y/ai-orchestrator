@@ -108,6 +108,98 @@ def test_submit_does_not_overwrite_existing_claude_settings(tmp_path):
     assert content == {"permissions": {"allow": ["Bash(npm test:*)"]}}
 
 
+def test_submit_defaults_selection_reason_to_explicit_agent_when_agent_given(tmp_path):
+    service = OrchestratorService(make_cfg(tmp_path))
+    task = service.submit(project_ref="station-agent", prompt="zaloz projekt", agent_name="claude-code")
+    assert task.selection_reason == "explicit_agent"
+
+
+def test_submit_defaults_selection_reason_to_default_agent_when_agent_omitted(tmp_path):
+    service = OrchestratorService(make_cfg(tmp_path))
+    task = service.submit(project_ref="station-agent", prompt="zaloz projekt")
+    assert task.selection_reason == "default_agent"
+
+
+def test_submit_caller_supplied_selection_reason_wins(tmp_path):
+    service = OrchestratorService(make_cfg(tmp_path))
+    task = service.submit(
+        project_ref="station-agent", prompt="zaloz projekt", agent_name="claude-code",
+        selection_reason="pm-routing:complex",
+    )
+    assert task.selection_reason == "pm-routing:complex"
+
+
+def test_submit_passes_through_requested_model(tmp_path):
+    service = OrchestratorService(make_cfg(tmp_path))
+    task = service.submit(
+        project_ref="station-agent", prompt="zaloz projekt", requested_model="claude-opus-4-1",
+    )
+    assert task.requested_model == "claude-opus-4-1"
+
+
+def test_run_task_provider_receipt_reaches_outbox(tmp_path, monkeypatch):
+    """The one-shot run/outbox receipt must carry the same
+    provider/model/reason triple the autonomous outbox already exposes as
+    active_provider/active_model (see PROVIDER_MODEL_ROUTING_RESEARCH.md
+    ch.5.3's asymmetry and ch.6 point 3)."""
+
+    class ReceiptAgent(Agent):
+        name = "fake"
+
+        def is_available(self):
+            return True, "fake agent always available"
+
+        def run(self, request):
+            return AgentRunResult(
+                success=True,
+                output_text="hotovo",
+                model="claude-opus-4-1",
+                model_source="reported",
+                selection_reason="explicit_agent",
+            )
+
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: ReceiptAgent())
+    cfg = make_cfg(tmp_path)
+
+    service = OrchestratorService(cfg)
+    task = service.submit(
+        project_ref="station-agent", prompt="zaloz projekt", agent_name="claude-code",
+        requested_model="claude-opus-4-1",
+    )
+    service.run_sync(task)
+
+    outbox_path = cfg.outbox_dir / f"{task.id}.json"
+    payload = json.loads(outbox_path.read_text(encoding="utf-8"))
+    assert payload["agent"] == "claude-code"
+    assert payload["requested_model"] == "claude-opus-4-1"
+    assert payload["model"] == "claude-opus-4-1"
+    assert payload["model_source"] == "reported"
+    assert payload["selection_reason"] == "explicit_agent"
+
+
+def test_import_inbox_reads_requested_model_and_selection_reason(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.inbox_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.inbox_dir / "task1.json").write_text(
+        json.dumps(
+            {
+                "project": "station-agent",
+                "prompt": "udelej neco",
+                "requested_model": "claude-opus-4-1",
+                "selection_reason": "pm-routing:complex",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    service = OrchestratorService(cfg)
+    created = service.import_inbox()
+
+    assert len(created) == 1
+    assert created[0].requested_model == "claude-opus-4-1"
+    assert created[0].selection_reason == "pm-routing:complex"
+
+
 def test_run_task_permission_denial_details_reach_outbox(tmp_path, monkeypatch):
     denials = [{"tool_name": "Bash", "tool_input": {"command": "git push --force"}}]
 

@@ -102,6 +102,72 @@ def test_run_task_tests_exhaust_attempts_marks_failed(tmp_path):
     assert result.committed is False
 
 
+def test_run_task_forwards_requested_model_and_records_receipt(tmp_path):
+    queue = TaskQueue(tmp_path / "tasks.db")
+    task = make_task(
+        "demo", str(tmp_path), "dej mi ahoj", "fake", None, 2, False,
+        requested_model="claude-opus-4-1", selection_reason="explicit_agent",
+    )
+    queue.add(task)
+
+    captured = {}
+
+    class RecordingAgent(Agent):
+        name = "fake"
+
+        def is_available(self):
+            return True, "ok"
+
+        def run(self, request):
+            captured["requested_model"] = request.requested_model
+            captured["selection_reason"] = request.selection_reason
+            return AgentRunResult(
+                success=True,
+                output_text="hotovo",
+                model="claude-opus-4-1",
+                model_source="reported",
+                selection_reason="explicit_agent",
+            )
+
+    result = run_task(task, make_cfg(tmp_path), RecordingAgent(), queue, LOGGER)
+
+    assert captured["requested_model"] == "claude-opus-4-1"
+    assert captured["selection_reason"] == "explicit_agent"
+    assert result.model == "claude-opus-4-1"
+    assert result.model_source == "reported"
+    assert result.selection_reason == "explicit_agent"
+
+
+def test_run_task_forwards_requested_model_through_fix_attempts(tmp_path):
+    queue = TaskQueue(tmp_path / "tasks.db")
+    test_cmd = 'python -c "import sys; sys.exit(1)"'
+    task = make_task(
+        "demo", str(tmp_path), "oprav to", "fake", test_cmd, 1, False,
+        requested_model="claude-opus-4-1",
+    )
+    queue.add(task)
+
+    requested_models_seen = []
+
+    class RecordingAgent(Agent):
+        name = "fake"
+
+        def is_available(self):
+            return True, "ok"
+
+        def run(self, request):
+            requested_models_seen.append(request.requested_model)
+            return AgentRunResult(success=True, output_text="pokus", model="claude-opus-4-1", model_source="reported")
+
+    result = run_task(task, make_cfg(tmp_path), RecordingAgent(), queue, LOGGER)
+
+    assert result.status == TaskStatus.FAILED
+    # First attempt + at least one fix attempt, all carrying the same
+    # per-task requested_model override.
+    assert len(requested_models_seen) >= 2
+    assert all(model == "claude-opus-4-1" for model in requested_models_seen)
+
+
 def test_run_task_records_permission_denial_details(tmp_path):
     queue = TaskQueue(tmp_path / "tasks.db")
     task = make_task("demo", str(tmp_path), "dej mi ahoj", "fake", None, 2, False)

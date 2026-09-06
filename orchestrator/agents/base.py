@@ -24,6 +24,22 @@ class AgentRunRequest:
     # Optional JSON Schema for the provider's final response. Providers with
     # native structured output should enforce it; others may rely on prompt.
     output_schema: Optional[dict[str, Any]] = None
+    # Explicit per-call model override (e.g. AI Project Manager routing by
+    # task type/complexity). When set and non-empty, a provider that supports
+    # passing a model to its CLI uses this instead of its configured default
+    # for THIS call only - config.yaml is never mutated. A provider adapter
+    # never validates this string against a model catalog (none exists in
+    # this orchestrator, see PROVIDER_MODEL_ROUTING_RESEARCH.md); an invalid
+    # value is rejected by the underlying CLI like any other bad --model
+    # value, surfacing as an ordinary AgentRunResult(success=False, ...).
+    requested_model: Optional[str] = None
+    # Opaque, caller-supplied reason for this provider/model request (e.g.
+    # "explicit_agent", "default_agent", or a PM-owned task-classification
+    # tag). The orchestrator never interprets or validates this string - it
+    # is carried through so the receipt on AgentRunResult.selection_reason
+    # can echo it (or be overridden with the actual failover reason, see
+    # FailoverAgent).
+    selection_reason: Optional[str] = None
 
 
 @dataclass
@@ -87,6 +103,21 @@ class AgentRunResult:
     # must not infer it from a configured catalog when the provider chose the
     # model itself; this is evidence from the provider receipt.
     model: Optional[str] = None
+    # How `model` was established: "reported" when the provider's own CLI
+    # response confirmed it, "requested" when it is only known because this
+    # call's AgentRunRequest.requested_model was passed to the CLI (not yet
+    # confirmed by the provider), "configured" when it is only known because
+    # config.yaml's static value was passed. None when `model` itself is None
+    # (no value was ever sent or reported - never invent one, see
+    # claude_code.py's _reported_model()).
+    model_source: Optional[str] = None
+    # Machine-passable reason for the ACTUAL provider selection this result
+    # represents. Single-provider adapters echo AgentRunRequest.selection_reason
+    # unchanged (they have no extra insight of their own). FailoverAgent
+    # overrides this with the real mechanism (e.g. "failover: gemini LIMITED
+    # -> antigravity") whenever it advanced past another provider first, so a
+    # caller never has to reconstruct the reason from provider_statuses.
+    selection_reason: Optional[str] = None
 
 
 class Agent(ABC):

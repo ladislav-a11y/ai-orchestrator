@@ -685,6 +685,73 @@ def test_failover_all_limited_preserves_earliest_retry():
     assert result.retry_after_seconds == 900
 
 
+# -- 10. requested_model/selection_reason contract ---------------------------
+
+
+def test_failover_forwards_requested_model_and_selection_reason_to_provider():
+    p1 = MockAgent("claude-code", available=True)
+    agent = FailoverAgent([p1])
+
+    agent.run(
+        AgentRunRequest(
+            project_path=Path("."),
+            prompt="vytvor feature",
+            requested_model="claude-opus-4-1",
+            selection_reason="explicit_agent",
+        )
+    )
+
+    assert p1.run_calls[0].requested_model == "claude-opus-4-1"
+    assert p1.run_calls[0].selection_reason == "explicit_agent"
+
+
+def test_failover_echoes_selection_reason_when_no_provider_skipped():
+    p1 = MockAgent("claude-code", available=True)
+    agent = FailoverAgent([p1])
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="vytvor feature", selection_reason="default_agent")
+    )
+
+    assert result.selection_reason == "default_agent"
+
+
+def test_failover_composes_selection_reason_when_provider_is_skipped():
+    def p1_run(request):
+        return AgentRunResult(
+            success=False, output_text="", error="429 quota", limited=True,
+        )
+
+    p1 = MockAgent("claude-code", available=True, run_fn=p1_run)
+    p2 = MockAgent("antigravity", available=True)
+
+    agent = FailoverAgent([p1, p2])
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="vytvor feature", selection_reason="default_agent")
+    )
+
+    assert result.success is True
+    assert result.selection_reason.startswith("failover: ")
+    assert "claude-code" in result.selection_reason
+    assert result.selection_reason.endswith("-> antigravity")
+
+
+def test_failover_composes_selection_reason_when_all_exhausted():
+    def limited_run(request):
+        return AgentRunResult(success=False, output_text="", error="429 quota", limited=True)
+
+    p1 = MockAgent("claude-code", available=True, run_fn=limited_run)
+    p2 = MockAgent("antigravity", available=False, avail_msg="agy not found")
+
+    agent = FailoverAgent([p1, p2])
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="vytvor feature"))
+
+    assert result.success is False
+    assert result.selection_reason.startswith("failover: ")
+    assert "claude-code" in result.selection_reason
+    assert "antigravity" in result.selection_reason
+
+
 def test_failover_preserves_usage_from_limited_provider_before_fallback():
     limited = MockAgent("p1", available=True, run_fn=lambda request: AgentRunResult(
         success=False, output_text="", error="429", limited=True,

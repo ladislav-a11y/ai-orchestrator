@@ -50,6 +50,17 @@ def test_list_and_filter(tmp_path):
     assert [t.id for t in done_tasks] == [t2.id]
 
 
+def test_make_task_passes_through_requested_model_and_selection_reason(tmp_path):
+    task = make_task(
+        "demo", "D:/demo", "do something", "claude-code", None, 2, False,
+        requested_model="claude-opus-4-1", selection_reason="explicit_agent",
+    )
+    assert task.requested_model == "claude-opus-4-1"
+    assert task.selection_reason == "explicit_agent"
+    assert task.model is None
+    assert task.model_source is None
+
+
 def test_next_pending(tmp_path):
     q = make_queue(tmp_path)
     assert q.next_pending() is None

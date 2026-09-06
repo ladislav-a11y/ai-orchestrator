@@ -47,6 +47,83 @@ def test_build_command_uses_explicit_model_and_auto_edit_without_yolo():
     assert "-y" not in command
 
 
+def test_build_command_uses_requested_model_override_not_config():
+    agent = make_agent(model="gemini-2.5-flash")
+    command = agent._build_command(
+        AgentRunRequest(Path("."), "hello", requested_model="gemini-3.0-preview")
+    )
+    assert command[command.index("--model") + 1] == "gemini-3.0-preview"
+
+
+def test_run_model_source_is_requested_when_provider_does_not_confirm(monkeypatch):
+    agent = make_agent()
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, returncode=0, stdout=json.dumps({"response": "implemented"}), stderr=""
+        ),
+    )
+
+    result = agent.run(AgentRunRequest(Path("."), "do the work", requested_model="gemini-3.0-preview"))
+
+    assert result.model == "gemini-3.0-preview"
+    assert result.model_source == "requested"
+
+
+def test_run_model_source_is_configured_without_override(monkeypatch):
+    agent = make_agent()
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, returncode=0, stdout=json.dumps({"response": "implemented"}), stderr=""
+        ),
+    )
+
+    result = agent.run(AgentRunRequest(Path("."), "do the work"))
+
+    assert result.model == "gemini-2.5-flash"
+    assert result.model_source == "configured"
+
+
+def test_run_echoes_selection_reason_into_result(monkeypatch):
+    agent = make_agent()
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, returncode=0, stdout=json.dumps({"response": "implemented"}), stderr=""
+        ),
+    )
+
+    result = agent.run(AgentRunRequest(Path("."), "do the work", selection_reason="default_agent"))
+
+    assert result.selection_reason == "default_agent"
+
+
+def test_run_rejects_invalid_requested_model_safely(monkeypatch):
+    agent = make_agent()
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    def fake_run(command, **kwargs):
+        assert command[command.index("--model") + 1] == "not-a-real-model"
+        return subprocess.CompletedProcess(
+            command, returncode=1, stdout="", stderr="Unknown model: not-a-real-model"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(
+        AgentRunRequest(Path("."), "do the work", requested_model="not-a-real-model")
+    )
+    assert result.success is False
+    assert "not-a-real-model" in result.error
+
+
 def test_run_success_parses_json_response(monkeypatch):
     agent = make_agent()
     monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))

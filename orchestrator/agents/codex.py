@@ -174,8 +174,13 @@ def _extract_retry_after_seconds(raw: dict, text: str) -> Optional[float]:
     return None
 
 
-def _reported_model(events: list[dict], configured_model: str = "") -> Optional[str]:
-    """Extract model identity from Codex events without inventing one."""
+def _reported_model(
+    events: list[dict], effective_model: str = "", requested: bool = False
+) -> tuple[Optional[str], Optional[str]]:
+    """Extract (model, model_source) from Codex events without inventing one.
+
+    See AntigravityAgent._reported_model for the model_source rationale.
+    """
     names: list[str] = []
     for event in events:
         candidates = [event]
@@ -188,7 +193,12 @@ def _reported_model(events: list[dict], configured_model: str = "") -> Optional[
                 value = source.get(key)
                 if isinstance(value, str) and value.strip() and value.strip() not in names:
                     names.append(value.strip())
-    return ", ".join(names) if names else (configured_model.strip() or None)
+    if names:
+        return ", ".join(names), "reported"
+    effective_model = effective_model.strip()
+    if effective_model:
+        return effective_model, ("requested" if requested else "configured")
+    return None, None
 
 
 def _detect_quota_limit(raw: dict, error_text: str) -> tuple[bool, Optional[float]]:
@@ -305,6 +315,14 @@ class CodexAgent(Agent):
             return False, f"'{self._cli_path} --version' selhalo (kod {proc.returncode}): {proc.stderr.strip()}"
         return True, f"{proc.stdout.strip()} ({self._detect_note}; launcher={' '.join(command)})"
 
+    def _effective_model(self, request: AgentRunRequest) -> tuple[str, bool]:
+        """Return (model_to_pass, was_explicitly_requested) - see
+        ClaudeCodeAgent._effective_model for the shared rationale."""
+        requested = (request.requested_model or "").strip()
+        if requested:
+            return requested, True
+        return self.config.model, False
+
     def _build_command(
         self,
         request: AgentRunRequest,
@@ -334,8 +352,9 @@ class CodexAgent(Agent):
             cmd += ["--skip-git-repo-check", "--approve-for-me"]
         else:
             raise ValueError(f"Unsupported Codex sandbox mode: {self.config.sandbox_mode}")
-        if self.config.model:
-            cmd += ["--model", self.config.model]
+        effective_model, _ = self._effective_model(request)
+        if effective_model:
+            cmd += ["--model", effective_model]
         if output_schema_path is not None:
             cmd += ["--output-schema", str(output_schema_path)]
         # `codex exec -` reads the prompt from stdin.  Never put an autonomous
@@ -349,9 +368,16 @@ class CodexAgent(Agent):
         return cmd
 
     def run(self, request: AgentRunRequest) -> AgentRunResult:
+        effective_model, model_requested = self._effective_model(request)
+        model_source = "requested" if model_requested else ("configured" if effective_model else None)
+
         available, note = self.is_available()
         if not available:
-            return AgentRunResult(success=False, output_text="", error=note, model=self.config.model or None)
+            return AgentRunResult(
+                success=False, output_text="", error=note,
+                model=effective_model or None, model_source=model_source,
+                selection_reason=request.selection_reason,
+            )
 
         prompt = request.prompt
         if request.context:
@@ -362,6 +388,7 @@ class CodexAgent(Agent):
             prompt=prompt,
             session_id=request.session_id,
             output_schema=request.output_schema,
+            requested_model=request.requested_model,
         )
 
         output_schema_path: Optional[Path] = None
@@ -398,10 +425,16 @@ class CodexAgent(Agent):
                     + (f" stderr: {timeout_stderr}" if timeout_stderr else "")
                 ),
                 timed_out=True,
-                model=self.config.model or None,
+                model=effective_model or None,
+                model_source=model_source,
+                selection_reason=request.selection_reason,
             )
         except FileNotFoundError as e:
-            return AgentRunResult(success=False, output_text="", error=f"Nelze spustit CLI: {e}", model=self.config.model or None)
+            return AgentRunResult(
+                success=False, output_text="", error=f"Nelze spustit CLI: {e}",
+                model=effective_model or None, model_source=model_source,
+                selection_reason=request.selection_reason,
+            )
         finally:
             if output_schema_path is not None:
                 output_schema_path.unlink(missing_ok=True)
@@ -416,7 +449,9 @@ class CodexAgent(Agent):
                     f"Codex CLI nevrátilo platný JSON výstup (exit kod {proc.returncode})"
                     + (f": {stderr}" if stderr else ".")
                 ),
-                model=self.config.model or None,
+                model=effective_model or None,
+                model_source=model_source,
+                selection_reason=request.selection_reason,
             )
 
         error_event: Optional[dict] = None
@@ -474,7 +509,7 @@ class CodexAgent(Agent):
             "total_tokens": total_tokens,
         }
         raw_response = {"events": events}
-        reported_model = _reported_model(events, self.config.model)
+        reported_model, reported_model_source = _reported_model(events, effective_model, model_requested)
 
         if error_event is not None:
             error_message = error_event.get("message") or "Codex CLI vrátilo chybu."
@@ -489,6 +524,8 @@ class CodexAgent(Agent):
                     limited=True,
                     retry_after_seconds=retry_after_seconds,
                     model=reported_model,
+                    model_source=reported_model_source,
+                    selection_reason=request.selection_reason,
                     **token_fields,
                 )
             return AgentRunResult(
@@ -498,6 +535,8 @@ class CodexAgent(Agent):
                 session_id=session_id,
                 error=f"Codex CLI vrátilo chybu: {error_message}",
                 model=reported_model,
+                model_source=reported_model_source,
+                selection_reason=request.selection_reason,
                 **token_fields,
             )
 
@@ -514,6 +553,8 @@ class CodexAgent(Agent):
                     + (f": {stderr}" if stderr else ".")
                 ),
                 model=reported_model,
+                model_source=reported_model_source,
+                selection_reason=request.selection_reason,
                 **token_fields,
             )
 
@@ -524,6 +565,8 @@ class CodexAgent(Agent):
             session_id=session_id,
             error=None,
             model=reported_model,
+            model_source=reported_model_source,
+            selection_reason=request.selection_reason,
             **token_fields,
         )
 
