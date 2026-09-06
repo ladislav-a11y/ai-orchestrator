@@ -100,6 +100,16 @@ def _tool_schema() -> list[dict[str, Any]]:
                         "path": {"type": "string"},
                         "start_line": {"type": "integer", "minimum": 1},
                         "max_lines": {"type": "integer", "minimum": 1, "maximum": 1000},
+                        "line_start": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Alias for start_line.",
+                        },
+                        "line_end": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Inclusive end line; use with line_start.",
+                        },
                     },
                     "required": ["path"],
                     "additionalProperties": False,
@@ -233,8 +243,22 @@ def _tool_read_file(project_path: Path, args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("binary files are not supported")
     text = target.read_text(encoding="utf-8")
     lines = text.splitlines()
-    start = max(1, int(args.get("start_line", 1)))
-    max_lines = min(1000, max(1, int(args.get("max_lines", 400))))
+
+    has_native_window = "start_line" in args or "max_lines" in args
+    has_alias_window = "line_start" in args or "line_end" in args
+    if has_native_window and has_alias_window:
+        raise ValueError("read_file line window must use either start_line/max_lines or line_start/line_end")
+
+    if has_alias_window:
+        start = max(1, int(args.get("line_start", 1)))
+        end = int(args.get("line_end", start + 399))
+        if end < start:
+            raise ValueError("line_end must be greater than or equal to line_start")
+        max_lines = min(1000, end - start + 1)
+    else:
+        start = max(1, int(args.get("start_line", 1)))
+        max_lines = min(1000, max(1, int(args.get("max_lines", 400))))
+
     selected = lines[start - 1 : start - 1 + max_lines]
     rendered = "\n".join(f"{start + i}: {line}" for i, line in enumerate(selected))
     return {

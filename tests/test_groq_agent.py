@@ -199,6 +199,47 @@ def test_session_context_is_reused_with_same_session_id(monkeypatch, tmp_path):
     assert second.session_id == first.session_id
 
 
+def test_read_file_accepts_line_start_and_line_end_aliases(tmp_path):
+    path = tmp_path / "sample.txt"
+    path.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+
+    result = json.loads(
+        _execute_tool(
+            tmp_path,
+            "read_file",
+            json.dumps({"path": "sample.txt", "line_start": 2, "line_end": 3}),
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["text"] == "2: two\n3: three"
+    assert result["result"]["total_lines"] == 4
+
+
+def test_read_file_rejects_conflicting_line_window_aliases(tmp_path):
+    path = tmp_path / "sample.txt"
+    path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+
+    result = json.loads(
+        _execute_tool(
+            tmp_path,
+            "read_file",
+            json.dumps(
+                {
+                    "path": "sample.txt",
+                    "start_line": 1,
+                    "max_lines": 2,
+                    "line_start": 1,
+                    "line_end": 2,
+                }
+            ),
+        )
+    )
+
+    assert result["ok"] is False
+    assert "either start_line/max_lines or line_start/line_end" in result["error"]
+
+
 def test_path_escape_is_rejected(tmp_path):
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("secret", encoding="utf-8")
