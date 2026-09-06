@@ -79,6 +79,11 @@ souboru):
   `LIMITED` záznam, ne pouze nejbližší společný retry.
 - `active_provider` (str|null) - poslední použitý provider z
   `provider_sequence` (ten, který běh buď dokončil, nebo na kterém čeká).
+- `active_model` (str|null) - model reportovaný `active_provider`em u jeho
+  posledního volání v tomto běhu (dohledáno z `usage.events`, ne z
+  nakonfigurované hodnoty, pokud provider vlastní volbu modelu potvrdil -
+  viz `PROVIDER_MODEL_ROUTING_RESEARCH.md` kap. 5.1). `null`, když žádné
+  volání model nereportovalo ani nemělo nakonfigurovanou hodnotu k předání.
 - `dod_items` (list) - kompletní Definition of Done se stavem. Každý záznam
   obsahuje `text`, `done`, `live_verification` (`command` + `expect`, nebo
   `null`) a `live_evidence` (odvozené `passed`, `exit_code`, skutečný `output`,
