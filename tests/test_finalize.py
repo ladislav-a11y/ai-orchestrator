@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from orchestrator.config import Config
-from orchestrator.finalize import _safe_paths, finalize_repository
+from orchestrator.finalize import _safe_paths, _transient_paths, finalize_repository
 
 
 def _git(path, *args):
@@ -75,6 +75,38 @@ def test_finalize_auto_scopes_to_dirty_status_when_no_paths_configured():
             path, "show", "--name-only", "--pretty=", "HEAD"
         ).stdout.split()
         assert sorted(committed_files) == ["new_file.txt", "tracked.txt"]
+
+
+def test_dynamic_scope_blocks_transient_artifacts_without_filename_allowlists():
+    with _temporary_repo() as path:
+        (path / "tracked.txt").write_text("after", encoding="utf-8")
+        cache = path / "src" / "__pycache__"
+        cache.mkdir(parents=True)
+        (cache / "module.pyc").write_bytes(b"generated")
+        _git(path, "add", "-f", "src/__pycache__/module.pyc")
+
+        result = finalize_repository(path, Config(), "run-transient", goal="auto scope")
+
+        assert result["status"] == "blocked"
+        assert result["committed"] is False
+        assert result["transient_paths"] == ["src/__pycache__/module.pyc"]
+        assert _git(path, "log", "-1", "--pretty=%s").stdout.strip() == "initial"
+
+
+def test_transient_detection_is_project_agnostic_and_keeps_real_new_files():
+    paths = [
+        "README.md",
+        "src/new_feature.py",
+        "build/cache.tmp",
+        "pkg/__pycache__/module.pyc",
+        ".coverage.worker-1",
+    ]
+
+    assert _transient_paths(paths) == [
+        "build/cache.tmp",
+        "pkg/__pycache__/module.pyc",
+        ".coverage.worker-1",
+    ]
 
 
 def test_finalize_reports_committed_when_blocked_on_push_allowlist():

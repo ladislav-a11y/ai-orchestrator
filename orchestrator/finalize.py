@@ -64,6 +64,36 @@ def _status_paths(status_output: str) -> list[str]:
     return paths
 
 
+_TRANSIENT_PATH_COMPONENTS = frozenset({
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox",
+})
+_TRANSIENT_FILE_SUFFIXES = (".pyc", ".pyo", ".tmp", ".temp", ".bak", ".swp")
+
+
+def _transient_paths(paths: Sequence[str]) -> list[str]:
+    """Return generated/cache paths that must be cleaned, never committed.
+
+    This is deliberately project-agnostic. It rejects artifact categories,
+    not application filenames, so dynamic self-update scope remains able to
+    finalize any legitimate new source or documentation file.
+    """
+    transient = []
+    for raw in paths:
+        normalized = str(raw).replace("\\", "/")
+        lowered = normalized.casefold()
+        components = {part.casefold() for part in normalized.split("/")}
+        name = normalized.rsplit("/", 1)[-1]
+        if (
+            components.intersection(_TRANSIENT_PATH_COMPONENTS)
+            or lowered.endswith(_TRANSIENT_FILE_SUFFIXES)
+            or name.endswith("~")
+            or name == ".coverage"
+            or name.startswith(".coverage.")
+        ):
+            transient.append(normalized)
+    return transient
+
+
 def _path_in_scope(path: str, scopes: Sequence[str]) -> bool:
     """Return whether a dirty path matches an exact path or directory scope."""
     normalized = str(path).replace("\\", "/")
@@ -146,6 +176,12 @@ def finalize_repository(
     head = _git(project_path, ["rev-parse", "HEAD"]).stdout.strip()
     if dirty:
         dirty_paths = _status_paths(before.stdout)
+        transient_paths = _transient_paths(dirty_paths)
+        if transient_paths:
+            return _blocked(
+                "temporary/cache artifacts must be cleaned before controller finalization",
+                dirty_paths=dirty_paths, transient_paths=transient_paths, branch=branch,
+            )
         if explicit_scope:
             outside_scope = [
                 path for path in dirty_paths if not _path_in_scope(path, safe_paths)
