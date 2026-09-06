@@ -313,6 +313,7 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                 "antigravity": "antigravity",
                 "claude-code": "claude_code",
                 "codex": "codex",
+                "groq": "groq",
             }[args.agent]
             safe_config = replace(
                 safe_config,
@@ -488,7 +489,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_projects.set_defaults(func=cmd_projects)
 
     p_plan = sub.add_parser("plan-inbox", help="AI read-only příprava lidského Inbox požadavku")
-    p_plan.add_argument("--agent", required=True, choices=["gemini", "antigravity", "claude-code", "codex"])
+    p_plan.add_argument("--agent", required=True, choices=["gemini", "antigravity", "claude-code", "codex", "groq"])
     p_plan.add_argument("--model", help="Přesný model vybraného plánovacího providera")
     p_plan.set_defaults(func=cmd_plan_inbox)
 

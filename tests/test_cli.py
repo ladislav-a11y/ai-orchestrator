@@ -167,6 +167,52 @@ def test_plan_inbox_schema_uses_codex_compatible_json_schema(monkeypatch, capsys
     json.loads(capsys.readouterr().out)
 
 
+def test_plan_inbox_accepts_groq_and_returns_json_envelope(monkeypatch, capsys):
+    seen = {}
+
+    class PlanningAgent(Agent):
+        name = "groq"
+
+        def is_available(self):
+            return True, "planner test agent"
+
+        def run(self, request):
+            seen["project_path"] = request.project_path
+            return AgentRunResult(
+                success=True,
+                output_text=json.dumps({
+                    "tasks": [{
+                        "project_key": "AI Project Manager",
+                        "scope": "Inbox planner",
+                        "task": "Opravit Groq plan-inbox routing.",
+                        "next_step": "Spustit cílený regresní test.",
+                        "priority": 5.1,
+                        "priority_reason": "Blokuje Inbox intake.",
+                        "work_type": "implementation",
+                        "split_reason": "Jedna koherentní oprava CLI kontraktu.",
+                        "depends_on": [],
+                    }]
+                }),
+                model="openai/gpt-oss-120b",
+            )
+
+    monkeypatch.setattr(cli, "build_agent", lambda name, config: PlanningAgent())
+    monkeypatch.setattr(cli, "load_config", lambda: Config())
+    monkeypatch.setattr(
+        cli.sys,
+        "stdin",
+        io.StringIO(json.dumps({"card": {"name": "oprava Groq Inbox planneru"}})),
+    )
+
+    assert cli.main(["plan-inbox", "--agent", "groq"]) == 0
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["success"] is True
+    assert envelope["provider"] == "groq"
+    assert envelope["model"] == "openai/gpt-oss-120b"
+    assert json.loads(envelope["output"])["tasks"][0]["scope"] == "Inbox planner"
+    assert seen["project_path"].name.startswith("ai-orchestrator-inbox-plan-")
+
+
 def test_plan_inbox_fails_closed_when_recipe_is_missing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_INBOX_PLANNING_RECIPE_PATH", tmp_path / "missing.md")
     monkeypatch.setattr(
