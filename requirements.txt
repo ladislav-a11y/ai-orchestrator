@@ -3,3 +3,4 @@ fastapi>=0.110
 uvicorn>=0.27
 pytest>=8.0
 httpx>=0.27
+groq>=1.7.0

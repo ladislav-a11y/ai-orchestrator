@@ -45,12 +45,14 @@ ANTIGRAVITY_ALLOWED_MODES = {"accept-edits", "plan", ""}
 CODEX_ALLOWED_SANDBOX_MODES = {"read-only", "workspace-write"}
 
 GEMINI_FREE_MODEL = "gemini-2.5-flash"
+GROQ_FREE_MODEL = "openai/gpt-oss-120b"
 
 # Supported provider implementations in the orchestrator registry.
-AVAILABLE_AGENTS = ["claude-code", "antigravity", "codex", "gemini"]
+AVAILABLE_AGENTS = ["claude-code", "antigravity", "codex", "gemini", "groq"]
 
-# Default provider failover order for autonomous mode.
-DEFAULT_PROVIDER_ORDER = ["gemini", "antigravity", "claude-code", "codex"]
+# Default provider failover order for autonomous mode. Groq is the preferred
+# free API provider; quota exhaustion falls through to the existing providers.
+DEFAULT_PROVIDER_ORDER = ["groq", "antigravity", "claude-code", "codex"]
 
 
 
@@ -125,6 +127,21 @@ class GeminiAgentConfig:
 
 
 @dataclass
+class GroqAgentConfig:
+    # Strict free-only provider contract. The adapter rejects any per-call
+    # model override while free_only is true unless it matches this model.
+    model: str = GROQ_FREE_MODEL
+    free_only: bool = True
+    reasoning_effort: str = "low"
+    max_output_tokens: int = 2048
+    max_tool_rounds: int = 64
+    # Defensive budget guard: Groq normally does not report cost_usd in this
+    # adapter, but if cost metadata is added later any positive spend stops it.
+    max_budget_usd: Optional[float] = 0.0
+    timeout_seconds: int = 600
+
+
+@dataclass
 class GitConfig:
     # Default for every task/run that does not explicitly override
     # `auto_commit=...` itself (CLI `--commit`/`--no-commit`, or the API/
@@ -165,6 +182,7 @@ class Config:
     antigravity: AntigravityAgentConfig = field(default_factory=AntigravityAgentConfig)
     codex: CodexAgentConfig = field(default_factory=CodexAgentConfig)
     gemini: GeminiAgentConfig = field(default_factory=GeminiAgentConfig)
+    groq: GroqAgentConfig = field(default_factory=GroqAgentConfig)
     git: GitConfig = field(default_factory=GitConfig)
     testing: TestingConfig = field(default_factory=TestingConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -322,6 +340,32 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         timeout_seconds=int(gemini_raw.get("timeout_seconds", 600)),
     )
 
+    groq_raw = raw.get("groq") or {}
+    groq_reasoning_effort = str(groq_raw.get("reasoning_effort", "low"))
+    if groq_reasoning_effort not in {"low", "medium", "high"}:
+        raise ValueError(
+            "config.yaml nastavuje groq.reasoning_effort mimo povolené hodnoty "
+            "low/medium/high."
+        )
+    groq = GroqAgentConfig(
+        model=str(groq_raw.get("model", GROQ_FREE_MODEL)),
+        free_only=bool(groq_raw.get("free_only", True)),
+        reasoning_effort=groq_reasoning_effort,
+        max_output_tokens=int(groq_raw.get("max_output_tokens", 2048)),
+        max_tool_rounds=int(groq_raw.get("max_tool_rounds", 64)),
+        max_budget_usd=groq_raw.get("max_budget_usd", 0.0),
+        timeout_seconds=int(groq_raw.get("timeout_seconds", 600)),
+    )
+    if groq.max_output_tokens <= 0:
+        raise ValueError("groq.max_output_tokens musí být > 0.")
+    if groq.max_tool_rounds <= 0:
+        raise ValueError("groq.max_tool_rounds musí být > 0.")
+    if groq.free_only and groq.model != GROQ_FREE_MODEL:
+        raise ValueError(
+            f"groq.free_only dovoluje pouze model {GROQ_FREE_MODEL!r}; "
+            f"nakonfigurováno {groq.model!r}."
+        )
+
     git_raw = raw.get("git") or {}
     git = GitConfig(
         auto_commit=bool(git_raw.get("auto_commit", False)),
@@ -383,6 +427,7 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         antigravity=antigravity,
         codex=codex,
         gemini=gemini,
+        groq=groq,
         git=git,
         testing=testing,
         api=api,

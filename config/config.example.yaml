@@ -11,7 +11,7 @@ default_agent: claude-code
 # Orchestrátor zkusí providery v tomto pořadí a při vyčerpání kvóty (LIMITED) nebo
 # nedostupnosti CLI automaticky přepne na dalšího.
 provider_order:
-  - gemini
+  - groq
   - antigravity
   - claude-code
   - codex
@@ -122,6 +122,18 @@ gemini:
   # Fail fast when Google rejects the project/model; do not hold the PM
   # implementation slot for the generic ten-minute provider timeout.
   timeout_seconds: 60
+
+# Nastavení Groq API providera. Groq je první provider v auto/failover pořadí.
+# Tento adapter je striktně free-only: používá pouze ověřený GPT-OSS 120B model,
+# on-demand service tier a při vyčerpání free kvóty vrací LIMITED pro failover.
+groq:
+  model: openai/gpt-oss-120b
+  free_only: true
+  reasoning_effort: low
+  max_output_tokens: 2048
+  max_tool_rounds: 64
+  max_budget_usd: 0.0
+  timeout_seconds: 600
 
 # Git integrace.
 git:

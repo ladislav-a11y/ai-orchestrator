@@ -362,6 +362,8 @@ class OrchestratorService:
                     agent_config.codex = replace(self.config.codex, model=model)
                 elif agent_name == "gemini":
                     agent_config.gemini = replace(self.config.gemini, model=model)
+                elif agent_name == "groq":
+                    agent_config.groq = replace(self.config.groq, model=model)
                 else:
                     raise ValueError(
                         "--model vyžaduje explicitního podporovaného agenta; "

@@ -177,6 +177,22 @@ this file, stop and ask - do not silently override safety rules.
      or silently substitute another model. Malformed JSON, quota/rate errors,
      and timeouts must remain distinct `AgentRunResult` failures so the
      configured failover chain can continue without claiming successful work.
+11e. **Groq is a strict free-only, project-scoped implementation provider.**
+     `orchestrator/agents/groq.py` may use only `openai/gpt-oss-120b` while
+     `groq.free_only` is enabled and must use the normal `on_demand` service
+     tier - never `auto`, `flex`, performance tier, or an automatic model
+     substitution. A 429/rate-limit response is `LIMITED` and must flow into
+     the normal provider failover chain instead of retrying through a paid
+     tier. Groq is an API model, not a coding CLI, so its implementation
+     capability is supplied by a bounded local tool loop owned by the
+     adapter. Those tools must remain confined to `project_path`, must reject
+     path traversal and `.git` internals, and may only list/search/read/write
+     UTF-8 project files plus read Git status/diff. There is no generic shell,
+     test execution, commit, push, reset, rebase, deletion, or command
+     execution tool. Structured final output is requested only after the tool
+     loop finishes because Groq Structured Outputs and tool use are separate
+     API phases. Tests and commits remain exclusively orchestrator-owned.
+
 12. **A repeated protocol error must never be allowed to run indefinitely,
     even though it is excluded from the no-progress signature.** Rule 9
     correctly excludes a protocol error from `NO_PROGRESS_LIMIT` (an agent

@@ -405,13 +405,14 @@ def _usage_summary(events: list[dict]) -> tuple[dict[str, dict], dict]:
 
 def _provider_budget_usd(config: Config, provider_name: Optional[str]) -> Optional[float]:
     """Look up the per-job financial cap configured for `provider_name`
-    (see ClaudeCodeAgentConfig/AntigravityAgentConfig/CodexAgentConfig's
-    max_budget_usd). None means "no limit configured" - never treated as a
+    (see ClaudeCodeAgentConfig/AntigravityAgentConfig/CodexAgentConfig/
+    GroqAgentConfig.max_budget_usd). None means "no limit configured" - never treated as a
     zero-budget cap."""
     mapping = {
         "claude-code": config.claude_code.max_budget_usd,
         "antigravity": config.antigravity.max_budget_usd,
         "codex": config.codex.max_budget_usd,
+        "groq": config.groq.max_budget_usd,
     }
     return mapping.get(provider_name or "")
 
@@ -2220,8 +2221,8 @@ def run_autonomous_loop(
                 return final
 
         # Per-job, provider-specific financial hard cap (see
-        # ClaudeCodeAgentConfig/AntigravityAgentConfig/CodexAgentConfig.
-        # max_budget_usd and _provider_budget_usd): checked once per
+        # ClaudeCodeAgentConfig/AntigravityAgentConfig/CodexAgentConfig/
+        # GroqAgentConfig.max_budget_usd and _provider_budget_usd): checked once per
         # iteration against this run's own cumulative reported cost_usd for
         # the currently active provider, never against a single call's
         # cost - a provider that has no reported cost_usd (usage tracking is
