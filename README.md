@@ -6,6 +6,11 @@ zadaný úkol, spustí testy, a pokud vše projde a ty to povolíš, vytvoří G
 commit. Nic se neděje bez tvého vědomí a nic se nikdy neposílá na internet
 mimo volání samotného AI modelu.
 
+Autoritativní podklad pro explicitní volbu modelu, validaci skutečné nabídky a
+vyhodnocení provider receipt je v `PROVIDER_MODEL_CAPABILITIES.md`. Statický seznam
+modelů se záměrně neudržuje, protože dostupnost je vlastností konkrétního CLI, účtu a
+okamžiku ověření.
+
 Tento návod nepředpokládá, že umíš programovat nebo pracovat s Gitem -
 všechny příkazy níže stačí zkopírovat a spustit.
 

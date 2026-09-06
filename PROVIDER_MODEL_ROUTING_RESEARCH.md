@@ -1,5 +1,10 @@
 # Rešerše: schopnosti providerů a modelů pro směrování podle typu/složitosti úlohy
 
+> Historický návrhový podklad před implementací per-request volby modelu a receipt.
+> Aktuální provozní kontrakt, skutečné zdroje nabídky a fail-closed postup pro AI
+> Project Manager jsou v `PROVIDER_MODEL_CAPABILITIES.md`; tvrzení o chybějícím
+> rozhraní níže už nepopisují současný stav kódu.
+
 Datum: 2026-09-05
 Rozsah: čistě rešeršní karta AI Orchestratoru (viz `orchestrator/inbox_planning_recipe.md`,
 hranice 1-2: "rešerše schopností v AI Orchestratoru" a "providerové rozhraní a receipt v
