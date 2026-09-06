@@ -94,3 +94,47 @@ stupně `reported`; ten je třeba číst z příslušné události/receiptu.
 Obecný OpenAI katalog je záměrně pouze zdroj možných názvů, ne důkaz dostupnosti v
 Codex CLI konkrétního účtu. Stejné omezení platí pro obecné modelové stránky ostatních
 výrobců.
+
+## Ověřený lokální snapshot a směrovací úrovně
+
+Snapshot níže vznikl 2026-09-06 přímo v runtime prostředí orchestrátoru. Je omezený
+na právě přihlášený účet a instalované CLI; není to trvalý katalog. Ověření nepoužilo
+žádný modelový požadavek a nevytvořilo souborový artefakt.
+
+| Provider | Ověřená instalace | Autoritativní účetní výsledek | Bezpečný závěr pro routing |
+|---|---|---|---|
+| `antigravity` | `agy 1.1.27` | `agy models` úspěšně vrátil níže uvedené slugy | Lze použít uvedené přiřazení tierů, dokud nový výpis pro stejný účet slug stále nabízí |
+| `claude-code` | CLI v tomto prostředí nenalezeno | Bez úspěšného provider receipt není ověřen žádný slug | Žádný tier nesmí dostat explicitní model; provider je lokálně nedostupný |
+| `codex` | `codex-cli 0.149.0`; `codex --help` potvrzuje `-m, --model <MODEL>` | CLI nemá neinvazivní účetní výpis; živý modelový smoke test je podle `AGENTS.md` pouze ruční krok | Žádný tier nemá lokálně ověřený explicitní slug; použít bez override, nebo až slug potvrzený úspěšným receipt |
+| `gemini` | `gemini 0.56.0`; upstream CLI reference potvrzuje `--model` | CLI neposkytlo neinvazivní účetní katalog; nakonfigurovaný `gemini-2.5-flash` nebyl modelovým během ověřen | Konfigurace zůstává požadavkem, nikoli ověřenou tier volbou; odmítnutí musí být viditelné a umožnit failover |
+
+Autoritativní výstup `agy models` pro tento snapshot:
+
+| Úroveň | Ověřené provider-specific identifikátory | Použití |
+|---|---|---|
+| `economical` | `gemini-3.8-flash-low`, `gemini-3.7-flash-low`, `gemini-3.6-flash-low` | Nejnižší deklarovaná effort varianta pro jednoduché, dobře ohraničené úlohy |
+| `balanced` | `gemini-3.8-flash-medium`, `gemini-3.7-flash-medium`, `gemini-3.6-flash-medium`, `gpt-oss-120b-medium` | Výchozí kompromis rychlosti a reasoning effort; preferovat nejnovější stále nabízený Flash `medium` |
+| `quality` | `gemini-3.8-flash-high`, `gemini-3.7-flash-high`, `gemini-3.6-flash-high`, `gemini-3.1-pro-high`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking` | Složitá implementace nebo audit; konkrétní volbu musí stále potvrdit čerstvý `agy models` |
+| bez automatického tieru | `gemini-3.1-pro-low` | Provider potvrzuje dostupnost, ale název kombinuje rodinu Pro s nízkým effort; bez samostatné politiky jej nelze poctivě zařadit |
+
+Přiřazení je lokální routingová politika podle providerem deklarované rodiny a effort
+(`low`/`medium`/`high`/`thinking`), ne tvrzení o ceně ani benchmarku. Pořadí slugů v
+jedné úrovni není žebříček kvality. Pro `claude-code`, `codex` a `gemini` je prázdná
+ověřená množina záměrný výsledek rešerše, nikoli chybějící údaj: jejich současné CLI
+nedává bezpečný neinvazivní důkaz nabídky pro tento účet.
+
+## Fail-closed rozhodovací pravidla
+
+- Před explicitní volbou Antigravity obnovit `agy models`; pokud příkaz selže, je
+  prázdný nebo vybraný slug chybí, nepředávat `requested_model` a zaznamenat důvod.
+- U ostatních providerů přijmout konkrétní slug jen z úspěšného receipt pro stejný
+  účet a aktuální CLI. Dokumentace výrobce dokládá syntaxi nebo kandidáta, ne lokální
+  oprávnění.
+- Chybějící tier, prázdná hodnota či neplatný slug nikdy nenahrazovat domnělým
+  provider-specific ekvivalentem. Explicitní single-provider běh skončí chybou;
+  automatický běh smí pokračovat pouze běžným failover kontraktem.
+- `requested_model` se při failoveru mechanicky předává dál. Proto se nesmí použít
+  s více různými providery, pokud tentýž přesný slug nebyl ověřen u každého z nich;
+  tier je záměr, nikoli přenositelný název modelu.
+- Úspěšný proces bez `model_source: "reported"` nepotvrzuje skutečně použitý model.
+  Rozdíl requested/reported je chyba důkazu a nesmí se tiše označit jako splněný tier.
