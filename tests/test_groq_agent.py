@@ -97,6 +97,8 @@ def test_config_defaults_to_strict_free_groq(tmp_path):
     assert config.groq.max_budget_usd == 0.0
     assert config.groq.max_tool_rounds == 12
     assert config.groq.max_total_tokens == 12000
+    assert config.groq.daily_token_limit == 200000
+    assert config.groq.daily_token_safety_margin == 12000
     assert config.provider_order == ["groq", "antigravity", "claude-code", "codex"]
 
 
@@ -666,6 +668,38 @@ def test_rate_limit_maps_to_limited_and_retry_after(monkeypatch, tmp_path):
     assert result.unavailable is False
     assert result.retry_after_seconds == 12.5
     assert "LIMITED" in result.error
+
+
+def test_tpd_rate_limit_receipt_carries_daily_quota_evidence(monkeypatch, tmp_path):
+    class FakeRateLimit(Exception):
+        status_code = 429
+
+        def __init__(self):
+            super().__init__("rate limit exceeded")
+            self.body = {
+                "error": {
+                    "message": (
+                        "Rate limit reached on tokens per day (TPD): "
+                        "Limit 200000, Used 198249, Requested 4685. "
+                        "Please try again in 21m7.488s."
+                    ),
+                    "code": "rate_limit_exceeded",
+                }
+            }
+            self.response = SimpleNamespace(headers={})
+
+    monkeypatch.setattr(groq_module, "RateLimitError", FakeRateLimit)
+    agent, _ = make_agent(monkeypatch, [FakeRateLimit()])
+
+    result = agent.run(AgentRunRequest(tmp_path, "do work"))
+
+    assert result.limited is True
+    assert result.retry_after_seconds == pytest.approx(1267.488)
+    assert result.quota_snapshot["limit_tokens"] == 200000
+    assert result.quota_snapshot["used_tokens"] == 198249
+    assert result.quota_snapshot["requested_tokens"] == 4685
+    assert result.quota_snapshot["remaining_tokens"] == 1751
+    assert result.quota_snapshot["source"] == "provider_429_tpd"
 
 
 

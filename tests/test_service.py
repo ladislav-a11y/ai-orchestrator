@@ -295,6 +295,41 @@ def test_run_autonomous_model_override_reaches_explicit_agent_without_mutating_c
     assert cfg.claude_code.model == ""
 
 
+def test_run_autonomous_provider_model_map_reaches_failover_without_mutating_config(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_build_failover(config, provider_order=None, **kwargs):
+        seen["antigravity"] = config.antigravity.model
+        seen["codex"] = config.codex.model
+        return FakeAgent()
+
+    monkeypatch.setattr(service_module, "build_failover_agent", fake_build_failover)
+    cfg = make_cfg(tmp_path)
+    service = OrchestratorService(cfg)
+    try:
+        _run_id, result = service.run_autonomous(
+            project_ref="station-agent",
+            goal="Priprav zakladni projekt",
+            spec_text="- [ ] Zaloz projekt",
+            agent_name="auto",
+            provider_models={
+                "antigravity": "gemini-3.8-flash-medium",
+                "codex": "gpt-5.6",
+            },
+            max_iterations=3,
+        )
+    finally:
+        service.shutdown()
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert seen == {
+        "antigravity": "gemini-3.8-flash-medium",
+        "codex": "gpt-5.6",
+    }
+    assert cfg.antigravity.model == ""
+    assert cfg.codex.model == ""
+
+
 def test_run_autonomous_passes_scoped_provider_order_to_failover(tmp_path, monkeypatch):
     seen = {}
 

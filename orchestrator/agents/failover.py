@@ -14,10 +14,12 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult
 from orchestrator.config import Config
+from orchestrator.provider_quota import ProviderQuotaLedger
 from orchestrator.slack_notify import notify
 
 
@@ -57,6 +59,7 @@ class ProviderStatus:
     # inspect the checkout). This is not a quota or protocol failure.
     audit_inadequate: bool = False
     audit_inadequate_reason: Optional[str] = None
+    quota_snapshot: Optional[dict] = None
 
 
 def _format_duration(seconds: float) -> str:
@@ -81,6 +84,9 @@ class FailoverAgent(Agent):
         providers: list[Agent],
         logger: Optional[logging.Logger] = None,
         token_budgets: Optional[dict[str, int]] = None,
+        quota_state_path: Optional[Path] = None,
+        daily_token_limits: Optional[dict[str, int]] = None,
+        daily_token_safety_margins: Optional[dict[str, int]] = None,
     ):
         if not providers:
             raise ValueError("FailoverAgent vyžaduje alespoň jednoho providera v seznamu.")
@@ -94,6 +100,15 @@ class FailoverAgent(Agent):
             if value is not None
         }
         self._reported_tokens_by_provider: dict[str, int] = {}
+        self._quota_ledger = (
+            ProviderQuotaLedger(
+                quota_state_path,
+                limits=daily_token_limits,
+                safety_margins=daily_token_safety_margins,
+            )
+            if quota_state_path is not None
+            else None
+        )
         self._active_provider_index: int = 0
         self._last_notified_provider: Optional[str] = None
 
@@ -114,6 +129,7 @@ class FailoverAgent(Agent):
                     "retry_after_seconds": None,
                     "retry_at": None,
                     "reason": None,
+                    "quota": self._quota_ledger.snapshot(name) if self._quota_ledger else None,
                 }
                 continue
             if status.token_budget_exceeded:
@@ -142,6 +158,7 @@ class FailoverAgent(Agent):
                     or status.token_budget_exceeded_reason
                     or status.audit_inadequate_reason
                 ),
+                "quota": status.quota_snapshot,
             }
         return snapshot
 
@@ -451,6 +468,64 @@ class FailoverAgent(Agent):
                 self._active_provider_index += 1
                 continue
 
+            if self._quota_ledger is not None:
+                required_tokens = (
+                    max(1, token_budget - used_tokens)
+                    if token_budget is not None
+                    else request.max_total_tokens
+                )
+                if required_tokens is not None:
+                    quota_ok, quota = self._quota_ledger.preflight(
+                        provider_name, required_tokens
+                    )
+                    if not quota_ok:
+                        reason = str(
+                            quota.get("reason")
+                            or "provider quota gate odmítl další požadavek"
+                        )
+                        retry_at = quota.get("blocked_until")
+                        retry_after_seconds = None
+                        if isinstance(retry_at, str) and retry_at.strip():
+                            try:
+                                deadline = datetime.fromisoformat(retry_at)
+                                if deadline.tzinfo is None:
+                                    deadline = deadline.replace(tzinfo=timezone.utc)
+                                retry_after_seconds = max(
+                                    0.0,
+                                    (
+                                        deadline.astimezone(timezone.utc)
+                                        - datetime.now(timezone.utc)
+                                    ).total_seconds(),
+                                )
+                            except (TypeError, ValueError, OverflowError):
+                                retry_after_seconds = None
+                        self._provider_statuses[provider_name] = ProviderStatus(
+                            name=provider_name,
+                            available=True,
+                            limited=True,
+                            limited_error=reason,
+                            retry_after_seconds=retry_after_seconds,
+                            retry_at=retry_at,
+                            quota_snapshot=quota,
+                        )
+                        self.logger.warning(
+                            "Provider '%s' přeskočen před API voláním kvůli lokálnímu "
+                            "quota gate: %s.",
+                            provider_name,
+                            reason,
+                        )
+                        next_index = self._active_provider_index + 1
+                        if next_index < len(self.providers):
+                            next_name = getattr(
+                                self.providers[next_index], "name", str(self.providers[next_index])
+                            )
+                            notify(
+                                f"[AI Orchestrator] Provider {provider_name} byl přeskočen "
+                                f"před API voláním kvůli lokálnímu limitu; přepínám na {next_name}."
+                            )
+                        self._active_provider_index += 1
+                        continue
+
             self.logger.info(
                 "Vybrán provider '%s' (z pořadí %s).",
                 provider_name,
@@ -522,6 +597,13 @@ class FailoverAgent(Agent):
                             self._reported_tokens_by_provider.get(event_provider, 0)
                             + max(0, event_total)
                         )
+                        if self._quota_ledger is not None:
+                            self._quota_ledger.record_usage(event_provider, event_total)
+            if self._quota_ledger is not None:
+                self._quota_ledger.observe_quota(provider_name, result.quota_snapshot)
+                current_status = self._provider_statuses.get(provider_name)
+                if current_status is not None:
+                    current_status.quota_snapshot = self._quota_ledger.snapshot(provider_name)
             if result.session_id:
                 self._sessions[provider_name] = result.session_id
 
@@ -628,6 +710,14 @@ class FailoverAgent(Agent):
                     limited_error=result.error,
                     retry_after_seconds=result.retry_after_seconds,
                     retry_at=retry_at,
+                    quota_snapshot=(
+                        result.quota_snapshot
+                        or (
+                            self._quota_ledger.snapshot(provider_name)
+                            if self._quota_ledger
+                            else None
+                        )
+                    ),
                 )
 
                 next_index = self._active_provider_index + 1
@@ -745,4 +835,11 @@ def build_failover_agent(
     ]
     providers = [agent_builder(name, config) for name in order]
     token_budgets = {"groq": config.groq.max_total_tokens}
-    return FailoverAgent(providers=providers, logger=logger, token_budgets=token_budgets)
+    return FailoverAgent(
+        providers=providers,
+        logger=logger,
+        token_budgets=token_budgets,
+        quota_state_path=config.data_dir / "provider_quota_state.json",
+        daily_token_limits={"groq": config.groq.daily_token_limit},
+        daily_token_safety_margins={"groq": config.groq.daily_token_safety_margin},
+    )

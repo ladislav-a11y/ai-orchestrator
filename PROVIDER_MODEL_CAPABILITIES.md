@@ -78,9 +78,10 @@ stupně `reported`; ten je třeba číst z příslušné události/receiptu.
 3. Odmítnutí modelu, chybějící potvrzení nebo rozdíl mezi požadovaným a reportovaným
    modelem se nesmí přepsat na úspěšně ověřené směrování. APM uchová důvod a zvolí
    další model/provider jen v nové, explicitní plánovací volbě.
-4. Pro automatický failover APM předává model pouze tehdy, když je stejný slug
-   ověřený pro všechny providery v omezeném `provider_order`; jinak má směrovat na
-   jednoho explicitního providera nebo model override vynechat.
+4. Pro automatický failover APM předává volitelnou mapu `provider -> model`.
+   Každý adapter dostane pouze slug patřící právě jeho providerovi; chybějící
+   položka znamená použití providerova vlastního nakonfigurovaného/výchozího
+   modelu. Jeden slug se nesmí mechanicky kopírovat mezi různé providery.
 5. Dočasný výpis nabídky slouží jen k rozhodnutí v daném ticku. Nezapisuje se jako
    dlouhodobý runtime stav a po použití se odstraní; Trello a provider receipt zůstávají
    autoritou workflow a výsledku.
@@ -133,8 +134,9 @@ nedává bezpečný neinvazivní důkaz nabídky pro tento účet.
 - Chybějící tier, prázdná hodnota či neplatný slug nikdy nenahrazovat domnělým
   provider-specific ekvivalentem. Explicitní single-provider běh skončí chybou;
   automatický běh smí pokračovat pouze běžným failover kontraktem.
-- `requested_model` se při failoveru mechanicky předává dál. Proto se nesmí použít
-  s více různými providery, pokud tentýž přesný slug nebyl ověřen u každého z nich;
-  tier je záměr, nikoli přenositelný název modelu.
+- `requested_model` je per-provider hodnota. Při automatickém failoveru ji musí
+  volající odvodit z provider-specific mapy; nikdy se nesmí použít jako jediný
+  globální slug pro více různých providerů. Tier je záměr, nikoli přenositelný
+  název modelu.
 - Úspěšný proces bez `model_source: "reported"` nepotvrzuje skutečně použitý model.
   Rozdíl requested/reported je chyba důkazu a nesmí se tiše označit jako splněný tier.

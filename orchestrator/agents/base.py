@@ -90,6 +90,11 @@ class AgentRunResult:
     # ``source`` is ``reported`` for provider metadata; estimates must use a
     # different explicit value and are never mixed into reported totals.
     usage_events: list[dict[str, Any]] = field(default_factory=list)
+    # Provider-reported quota information, when the provider exposes it (for
+    # example Groq's TPD Limit/Used/Requested values on a 429). This is kept
+    # separate from usage totals because a rejected request has no usage
+    # event, but its quota evidence is still needed by central failover.
+    quota_snapshot: Optional[dict[str, Any]] = None
     # True if the provider's failure looks like a quota/rate/session limit
     # rather than an ordinary error (e.g. Antigravity's RESOURCE_EXHAUSTED /
     # "quota has been exceeded" responses) - callers (autonomous.py) can use

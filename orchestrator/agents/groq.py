@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -799,24 +800,88 @@ def _provider_rate_limit_failure(exc: Exception) -> bool:
     return str(error.get("code") or "").casefold() == "rate_limit_exceeded"
 
 
+def _error_body(exc: Exception) -> Optional[dict[str, Any]]:
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        return body
+    response = getattr(exc, "response", None)
+    json_method = getattr(response, "json", None)
+    if callable(json_method):
+        try:
+            body = json_method()
+        except Exception:  # noqa: BLE001 - diagnostics must not mask the provider error
+            body = None
+    return body if isinstance(body, dict) else None
+
+
+def _duration_from_text(text: str) -> Optional[float]:
+    """Parse Groq's compact retry text, for example ``21m7.488s``."""
+    matches = re.findall(r"(\d+(?:\.\d+)?)\s*(h|m|s)", text.casefold())
+    if not matches:
+        return None
+    multipliers = {"h": 3600.0, "m": 60.0, "s": 1.0}
+    return sum(float(value) * multipliers[unit] for value, unit in matches)
+
+
+def _quota_snapshot(exc: Exception, retry_after_seconds: Optional[float]) -> Optional[dict[str, Any]]:
+    """Extract provider-reported daily quota evidence from a Groq error."""
+    body = _error_body(exc)
+    error = body.get("error") if isinstance(body, dict) else None
+    message = str(error.get("message") if isinstance(error, dict) else "")
+    message = message or str(exc)
+    match = re.search(
+        r"tokens\s+per\s+day\s*\(TPD\).*?Limit\s+([\d,]+).*?"
+        r"Used\s+([\d,]+).*?Requested\s+([\d,]+)",
+        message,
+        re.IGNORECASE | re.DOTALL,
+    )
+    snapshot: dict[str, Any] = {}
+    if match:
+        snapshot.update(
+            {
+                "limit_tokens": int(match.group(1).replace(",", "")),
+                "used_tokens": int(match.group(2).replace(",", "")),
+                "requested_tokens": int(match.group(3).replace(",", "")),
+            }
+        )
+        snapshot["remaining_tokens"] = max(
+            0,
+            snapshot["limit_tokens"] - snapshot["used_tokens"],
+        )
+        snapshot["source"] = "provider_429_tpd"
+
+    if retry_after_seconds is None:
+        retry_after_seconds = _duration_from_text(message)
+    if retry_after_seconds is not None:
+        snapshot["retry_after_seconds"] = max(0.0, float(retry_after_seconds))
+        snapshot["retry_at"] = (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=snapshot["retry_after_seconds"])
+        ).isoformat()
+        snapshot.setdefault("source", "provider_429")
+    return snapshot or None
+
+
 def _retry_after_seconds(exc: Exception) -> Optional[float]:
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None)
-    if not headers:
-        return None
-    value = headers.get("retry-after") or headers.get("Retry-After")
-    if not value:
-        return None
-    try:
-        return max(0.0, float(value))
-    except (TypeError, ValueError):
-        try:
-            retry_at = parsedate_to_datetime(str(value))
-            if retry_at.tzinfo is None:
-                retry_at = retry_at.replace(tzinfo=timezone.utc)
-            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
-        except (TypeError, ValueError, OverflowError):
-            return None
+    if headers:
+        value = headers.get("retry-after") or headers.get("Retry-After")
+        if value:
+            try:
+                return max(0.0, float(value))
+            except (TypeError, ValueError):
+                try:
+                    retry_at = parsedate_to_datetime(str(value))
+                    if retry_at.tzinfo is None:
+                        retry_at = retry_at.replace(tzinfo=timezone.utc)
+                    return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+                except (TypeError, ValueError, OverflowError):
+                    pass
+    body = _error_body(exc)
+    error = body.get("error") if isinstance(body, dict) else None
+    message = str(error.get("message") if isinstance(error, dict) else "")
+    return _duration_from_text(message or str(exc))
 
 
 class GroqAgent(Agent):
@@ -954,11 +1019,13 @@ class GroqAgent(Agent):
                 limited=True,
             )
         if _provider_rate_limit_failure(exc):
+            retry_after_seconds = _retry_after_seconds(exc)
             return AgentRunResult(
                 **common,
                 error=f"LIMITED: {exc}",
                 limited=True,
-                retry_after_seconds=_retry_after_seconds(exc),
+                retry_after_seconds=retry_after_seconds,
+                quota_snapshot=_quota_snapshot(exc, retry_after_seconds),
             )
         if isinstance(exc, (APITimeoutError, _GroqWallClockTimeout)):
             return AgentRunResult(**common, error=str(exc), timed_out=True)

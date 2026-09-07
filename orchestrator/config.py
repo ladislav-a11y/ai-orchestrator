@@ -8,7 +8,7 @@ relative to the project root unless it is already absolute.
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -49,6 +49,14 @@ GROQ_FREE_MODEL = "openai/gpt-oss-120b"
 
 # Supported provider implementations in the orchestrator registry.
 AVAILABLE_AGENTS = ["claude-code", "antigravity", "codex", "gemini", "groq"]
+
+PROVIDER_CONFIG_ATTRIBUTES = {
+    "claude-code": "claude_code",
+    "antigravity": "antigravity",
+    "codex": "codex",
+    "gemini": "gemini",
+    "groq": "groq",
+}
 
 # Default provider failover order for autonomous mode. Groq is the preferred
 # free API provider; quota exhaustion falls through to the existing providers.
@@ -142,6 +150,12 @@ class GroqAgentConfig:
     # not exposed before a request, so this conservative local cap is the
     # fail-closed boundary for one orchestrated job.
     max_total_tokens: int = 12000
+    # Local account-level guard shared by autonomous processes. Groq does not
+    # expose TPD remaining in the normal response headers, so the ledger
+    # stops new work before this provider-side ceiling and learns a more
+    # precise Used/Limit pair from a provider 429 when available.
+    daily_token_limit: int = 200000
+    daily_token_safety_margin: int = 12000
     # Defensive budget guard: Groq normally does not report cost_usd in this
     # adapter, but if cost metadata is added later any positive spend stops it.
     max_budget_usd: Optional[float] = 0.0
@@ -205,7 +219,6 @@ class Config:
         if p.is_absolute():
             return p
         return PROJECT_ROOT / p
-
     @property
     def workspace_root_dir(self) -> Path:
         raw = self.workspace_root or str(PROJECT_ROOT.parent)
@@ -255,6 +268,41 @@ class Config:
             f"Neznámý projekt '{project_ref}'. Není ani v config.yaml (projects), "
             f"ani to není existující cesta na disku."
         )
+
+
+def with_provider_model_overrides(
+    config: Config, provider_models: Optional[dict[str, str]]
+) -> Config:
+    """Return a config copy with exact per-provider model overrides applied.
+
+    The mapping is intentionally provider-specific.  A model slug is never
+    copied from one provider to another during failover; each adapter receives
+    only the value assigned to its own provider.  Validate here as well as in
+    the CLI because service/API callers can invoke this helper directly.
+    """
+    if not provider_models:
+        return config
+    updated = config
+    for provider, model in provider_models.items():
+        if not isinstance(provider, str):
+            raise ValueError(f"Neplatný název providera v mapě modelů: {provider!r}")
+        config_attr = PROVIDER_CONFIG_ATTRIBUTES.get(provider)
+        if config_attr is None:
+            raise ValueError(f"Neznámý provider v mapě modelů: {provider!r}")
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError(
+                f"Mapa modelů musí mít neprázdný textový model pro providera {provider!r}"
+            )
+        updated = replace(
+            updated,
+            **{
+                config_attr: replace(
+                    getattr(updated, config_attr),
+                    model=model.strip(),
+                )
+            },
+        )
+    return updated
 
 
 def _ensure_config_exists() -> None:
@@ -361,6 +409,8 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         max_output_tokens=int(groq_raw.get("max_output_tokens", 2048)),
         max_tool_rounds=int(groq_raw.get("max_tool_rounds", 12)),
         max_total_tokens=int(groq_raw.get("max_total_tokens", 12000)),
+        daily_token_limit=int(groq_raw.get("daily_token_limit", 200000)),
+        daily_token_safety_margin=int(groq_raw.get("daily_token_safety_margin", 12000)),
         max_budget_usd=groq_raw.get("max_budget_usd", 0.0),
         timeout_seconds=int(groq_raw.get("timeout_seconds", 600)),
     )
@@ -370,6 +420,14 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         raise ValueError("groq.max_tool_rounds musí být > 0.")
     if groq.max_total_tokens <= 0:
         raise ValueError("groq.max_total_tokens musí být > 0.")
+    if groq.daily_token_limit <= 0:
+        raise ValueError("groq.daily_token_limit musí být > 0.")
+    if groq.daily_token_safety_margin < 0:
+        raise ValueError("groq.daily_token_safety_margin nesmí být záporný.")
+    if groq.daily_token_safety_margin >= groq.daily_token_limit:
+        raise ValueError(
+            "groq.daily_token_safety_margin musí být menší než groq.daily_token_limit."
+        )
     if groq.free_only and groq.model != GROQ_FREE_MODEL:
         raise ValueError(
             f"groq.free_only dovoluje pouze model {GROQ_FREE_MODEL!r}; "

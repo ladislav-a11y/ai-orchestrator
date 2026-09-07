@@ -133,6 +133,11 @@ groq:
   max_output_tokens: 2048
   max_tool_rounds: 12
   max_total_tokens: 12000
+  # Local daily guard; Groq's exact TPD remainder is learned from provider
+  # receipts when available, while this margin keeps PM-owned usage below
+  # the published free-tier ceiling.
+  daily_token_limit: 200000
+  daily_token_safety_margin: 12000
   max_budget_usd: 0.0
   timeout_seconds: 600
 

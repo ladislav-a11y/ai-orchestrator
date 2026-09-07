@@ -12,7 +12,11 @@ from pathlib import Path
 from orchestrator.autonomous import ABSOLUTE_MAX_ITERATIONS, AutonomousStatus, DEFAULT_MAX_ITERATIONS
 from orchestrator.agents.base import AgentRunRequest
 from orchestrator.agents.registry import build_agent
-from orchestrator.config import AVAILABLE_AGENTS, load_config
+from orchestrator.config import (
+    AVAILABLE_AGENTS,
+    load_config,
+    with_provider_model_overrides,
+)
 from orchestrator.doctor import run_doctor
 from orchestrator.models import TaskStatus
 from orchestrator.service import OrchestratorService
@@ -153,6 +157,7 @@ def cmd_autonomous(args: argparse.Namespace) -> int:
                 if args.provider_order
                 else None
             ),
+            provider_models=_parse_provider_models(args.provider_models),
         )
     except ValueError as e:
         print(f"Chyba: {e}")
@@ -307,6 +312,28 @@ def _parse_provider_order(raw: str | None) -> list[str] | None:
     return order
 
 
+def _parse_provider_models(raw: str | None) -> dict[str, str] | None:
+    """Parse a provider-specific model map without inventing model names."""
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--provider-models musí být platný JSON objekt: {exc.msg}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("--provider-models musí být JSON objekt provider -> model")
+    normalized: dict[str, str] = {}
+    for provider, model in parsed.items():
+        if not isinstance(provider, str) or provider not in AVAILABLE_AGENTS:
+            raise ValueError(f"--provider-models obsahuje neznámého providera: {provider!r}")
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError(
+                f"--provider-models musí mít neprázdný model pro providera {provider!r}"
+            )
+        normalized[provider] = model.strip()
+    return normalized
+
+
 def _planning_usage(result, provider: str | None = None) -> dict:
     fields = ("input_tokens", "output_tokens", "thinking_tokens", "total_tokens", "cost_usd")
     events = list(result.usage_events or [])
@@ -347,9 +374,12 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
         recipe = _load_inbox_planning_recipe()
         config = load_config()
         provider_order = _parse_provider_order(args.provider_order)
+        provider_models = _parse_provider_models(args.provider_models)
         central_failover = args.agent == "auto"
         if central_failover and args.model:
             raise ValueError("--model nelze použít s centrálním --agent auto")
+        if args.model and provider_models:
+            raise ValueError("--model nelze kombinovat s --provider-models")
         if not central_failover and provider_order is not None:
             raise ValueError("--provider-order vyžaduje --agent auto")
         # Planning receives an empty disposable workspace. The provider can
@@ -366,6 +396,7 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                 safe_config,
                 provider_order=provider_order or list(config.provider_order),
             )
+        safe_config = with_provider_model_overrides(safe_config, provider_models)
         if args.model:
             config_attr = {
                 "gemini": "gemini",
@@ -449,18 +480,25 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
             status_snapshot = {}
         active_provider = getattr(agent, "active_provider_name", None) or args.agent
         provider_sequence = list(status_snapshot) or [active_provider]
-        model_config = getattr(safe_config, args.agent.replace("-", "_"), None)
+        active_config_attr = {
+            "claude-code": "claude_code",
+            "antigravity": "antigravity",
+            "codex": "codex",
+            "gemini": "gemini",
+            "groq": "groq",
+        }.get(active_provider)
+        model_config = getattr(safe_config, active_config_attr, None)
         output = {
             "success": result.success,
             "provider": active_provider,
             "selected_provider": args.agent,
             "active_provider": active_provider,
-            # The PM deliberately does not pass --model for provider-owned
-            # selection.  Report the model the provider actually returned;
-            # only fall back to configured argv state when the provider did
+            # Report the model the provider actually returned; only fall back
+            # to the provider-specific configured value when the provider did
             # not expose a receipt model (e.g. a mocked/legacy CLI).
             "model": result.model or getattr(model_config, "model", None),
             "active_model": result.model or getattr(model_config, "model", None),
+            "provider_models": provider_models or {},
             "provider_sequence": provider_sequence,
             "provider_statuses": status_snapshot,
             "selection_reason": result.selection_reason,
@@ -532,6 +570,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         help="Přesný model předaný vybranému explicitnímu agentovi; bez volby se použije konfigurace agenta",
     )
+    p_auto.add_argument(
+        "--provider-models",
+        help="JSON mapa providerů na jejich vlastní přesné modely pro centrální failover",
+    )
     p_auto.add_argument("--test-command", help="Přepíše testovací příkaz pro tento běh")
     p_auto.add_argument(
         "--implementation-only",
@@ -565,6 +607,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_plan = sub.add_parser("plan-inbox", help="AI read-only příprava lidského Inbox požadavku")
     p_plan.add_argument("--agent", required=True, choices=["auto", "gemini", "antigravity", "claude-code", "codex", "groq"])
     p_plan.add_argument("--model", help="Přesný model vybraného plánovacího providera")
+    p_plan.add_argument(
+        "--provider-models",
+        help="JSON mapa providerů na jejich vlastní přesné modely pro centrální failover",
+    )
     p_plan.add_argument(
         "--provider-order",
         help="Pořadí providerů pro centrální --agent auto, oddělené čárkami",

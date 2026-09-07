@@ -33,7 +33,12 @@ from orchestrator.autonomous_checkpoint import (
     save_checkpoint,
 )
 from orchestrator.claude_settings import ensure_project_claude_settings
-from orchestrator.config import AVAILABLE_AGENTS, Config, load_config
+from orchestrator.config import (
+    AVAILABLE_AGENTS,
+    Config,
+    load_config,
+    with_provider_model_overrides,
+)
 from orchestrator.git_utils import has_uncommitted_changes, is_git_repo
 from orchestrator.logging_config import setup_logging, write_autonomous_log, write_task_log
 from orchestrator.models import Task, TaskStatus
@@ -301,6 +306,7 @@ class OrchestratorService:
         implementation_only: bool = False,
         run_id: Optional[str] = None,
         provider_order: Optional[list[str]] = None,
+        provider_models: Optional[dict[str, str]] = None,
         _waiting_task: Optional[Task] = None,
     ) -> tuple[str, AutonomousResult]:
         """Run the autonomous implement -> test -> evaluate -> fix loop until
@@ -349,21 +355,22 @@ class OrchestratorService:
         # run. It must not enter the single-agent branch, otherwise the
         # supplied ``--provider-order`` is silently ignored and AO falls back
         # to its canonical default order.
+        dispatch_config = with_provider_model_overrides(self.config, provider_models)
         if agent_name and agent_name != "auto":
-            agent_config = self.config
+            agent_config = dispatch_config
             if model_override:
                 model = model_override.strip()
-                agent_config = replace(self.config)
+                agent_config = replace(dispatch_config)
                 if agent_name == "claude-code":
-                    agent_config.claude_code = replace(self.config.claude_code, model=model)
+                    agent_config.claude_code = replace(dispatch_config.claude_code, model=model)
                 elif agent_name == "antigravity":
-                    agent_config.antigravity = replace(self.config.antigravity, model=model)
+                    agent_config.antigravity = replace(dispatch_config.antigravity, model=model)
                 elif agent_name == "codex":
-                    agent_config.codex = replace(self.config.codex, model=model)
+                    agent_config.codex = replace(dispatch_config.codex, model=model)
                 elif agent_name == "gemini":
-                    agent_config.gemini = replace(self.config.gemini, model=model)
+                    agent_config.gemini = replace(dispatch_config.gemini, model=model)
                 elif agent_name == "groq":
-                    agent_config.groq = replace(self.config.groq, model=model)
+                    agent_config.groq = replace(dispatch_config.groq, model=model)
                 else:
                     raise ValueError(
                         "--model vyžaduje explicitního podporovaného agenta; "
@@ -372,7 +379,7 @@ class OrchestratorService:
             agent = build_agent(agent_name, agent_config)
         else:
             agent = build_failover_agent(
-                self.config,
+                dispatch_config,
                 provider_order=provider_order,
                 logger=self.logger,
                 agent_builder=build_agent,
