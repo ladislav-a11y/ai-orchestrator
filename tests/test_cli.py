@@ -159,6 +159,9 @@ def test_plan_inbox_schema_uses_codex_compatible_json_schema(monkeypatch, capsys
     assert cli.main(["plan-inbox", "--agent", "codex"]) == 0
     assert "uniqueItems" not in seen["schema"]["properties"]["tasks"]["items"]["properties"]["depends_on"]
     assert "project_key" in seen["schema"]["properties"]["tasks"]["items"]["required"]
+    assert seen["schema"]["properties"]["tasks"]["items"]["properties"]["project_key"]["anyOf"][-1] == {
+        "type": "null"
+    }
     assert "AI intake musí lidské zadání rozložit na logicky navazující atomické úlohy" in seen["prompt"]
     assert "Může jít o libovolnou aplikaci nebo kombinaci aplikací" in seen["prompt"]
     assert "AI Orchestrator vlastní adaptéry providerů" in seen["prompt"]

@@ -74,12 +74,20 @@ Samostatnou kartu vytvoř, když platí alespoň jedna z podmínek:
 - jde o samostatně dokončitelnou a auditovatelnou změnu s vlastním výsledkem;
 - pozdější práce nemůže bezpečně začít před dokončením předchozího výsledku.
 
-Každá karta musí ve `scope` a `task` jednoznačně pojmenovat svůj cílový projekt.
+Každá karta musí ve `scope` a `task` jednoznačně popsat svůj cílový projekt nebo
+výsledek.
 Pokud zadání zasahuje více projektů, vytvoř pro každý projekt samostatné karty.
 Nespojuj změny ve více repozitářích do jedné karty.
-Pole `project_key` musí obsahovat přesně jednu existující identitu z
-`configured_projects`. Je autoritativní pro přiřazení cílového repozitáře;
-nespoléhej na hádání identity ze slov použitých ve `scope` nebo `task`.
+Pole `project_key` u existujícího projektu musí obsahovat přesně jednu identitu
+z `configured_projects`. U skutečně nového, dosud nezařazeného nápadu musí být
+`project_key` `null`; PM mu vytvoří izolovanou identitu svázanou se zdrojovou
+Inbox kartou. Nikdy nevymýšlej slug existujícího projektu a nespoléhej na
+hádání identity pouze ze slov použitých ve `scope` nebo `task`.
+
+Pokud vstup obsahuje řádek `Pracovní adresář: <cesta>`, ber ho pouze jako
+explicitní routingový údaj pro existující projekt. PM ho ověří přesnou shodou
+s povolenou mapou checkoutů; cesta sama nesmí být použita jako libovolný
+checkout ani jako náhrada za `project_key`.
 
 Každá karta musí mít vlastní projektovou identitu, přesný technický rozsah,
 testovací změny odpovídající jejímu výsledku a vlastní controllerovou

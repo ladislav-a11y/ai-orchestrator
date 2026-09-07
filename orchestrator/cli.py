@@ -409,7 +409,12 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "project_key": {"type": "string", "minLength": 1},
+                                        "project_key": {
+                                            "anyOf": [
+                                                {"type": "string", "minLength": 1},
+                                                {"type": "null"},
+                                            ]
+                                        },
                                         "scope": {"type": "string", "minLength": 1},
                                         "task": {"type": "string", "minLength": 1},
                                         "next_step": {"type": "string", "minLength": 1},
