@@ -55,8 +55,11 @@ NO_COMMIT_INSTRUCTION = (
 
 _SYSTEM_PROMPT = """You are the Groq implementation provider inside ai-orchestrator.
 Work only through the supplied project-scoped tools. Inspect the real checkout before editing.
-Make minimal changes directly in the project to satisfy the user's task. Never claim a change
-without verifying it by reading the resulting file or Git diff. Do not attempt to run tests;
+Make minimal changes directly in the project to satisfy the user's task. For a small edit to
+an existing file, prefer replace_text over rewriting the whole file with write_file. Tool
+arguments must be valid JSON and must contain raw file content, never line-numbered read_file
+output. Never claim a change without verifying it by reading the resulting file or Git diff.
+Do not attempt to run tests;
 the orchestrator runs them independently after you return. Do not attempt Git commit/push or
 history rewriting. Never access paths outside the supplied project root. When the work is done,
 return a concise final result. If the caller requires a JSON schema, a separate schema-constrained
@@ -137,7 +140,7 @@ def _tool_schema() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "write_file",
-                "description": "Create or replace one UTF-8 text file inside the project. Uses LF and no BOM.",
+                "description": "Create a new UTF-8 text file or fully replace one only when full replacement is intended. For small edits to existing files, use replace_text. Content must be raw file text without read_file line-number prefixes. Uses LF and no BOM.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -459,6 +462,27 @@ def _add_usage(total: dict[str, int], response: Any) -> None:
 
 
 
+
+def _malformed_tool_arguments_failure(exc: Exception) -> bool:
+    """Recognize Groq rejecting a model-emitted tool call before message delivery."""
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        response = getattr(exc, "response", None)
+        json_method = getattr(response, "json", None)
+        if callable(json_method):
+            try:
+                body = json_method()
+            except Exception:  # noqa: BLE001 - provider diagnostics are best-effort
+                body = None
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error")
+    if not isinstance(error, dict) or error.get("code") != "tool_use_failed":
+        return False
+    message = str(error.get("message") or "")
+    return "failed to parse tool call arguments as json" in message.casefold()
+
+
 def _schema_finalization_tool_failure(
     exc: Exception,
     output_schema: Optional[dict[str, Any]],
@@ -725,6 +749,19 @@ class GroqAgent(Agent):
                     if _schema_finalization_tool_failure(exc, request.output_schema):
                         final_content = ""
                         break
+                    if _malformed_tool_arguments_failure(exc):
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Your previous tool call arguments were rejected as invalid JSON. "
+                                    "Retry with one valid tool call. For a small edit to an existing file, "
+                                    "use replace_text with exact raw text; do not copy read_file line numbers "
+                                    "into file content and do not rewrite the whole file unless required."
+                                ),
+                            }
+                        )
+                        continue
                     raise
                 last_response = response
                 _add_usage(usage, response)

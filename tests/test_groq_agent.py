@@ -390,6 +390,52 @@ def test_exact_replace_refuses_non_unique_old_block(tmp_path):
     assert path.read_text(encoding="utf-8") == "same\nsame\n"
 
 
+
+def test_malformed_tool_arguments_are_retried_with_corrective_prompt(monkeypatch, tmp_path):
+    class FakeMalformedToolError(Exception):
+        status_code = 400
+
+        def __init__(self):
+            super().__init__("invalid tool arguments")
+            self.body = {
+                "error": {
+                    "code": "tool_use_failed",
+                    "message": "Failed to parse tool call arguments as JSON",
+                    "failed_generation": '{"name":"write_file","arguments":{broken}}',
+                }
+            }
+
+    path = tmp_path / "README.md"
+    path.write_text("before\n", encoding="utf-8")
+    retry = FakeResponse(
+        FakeMessage(
+            tool_calls=[
+                tool_call(
+                    "replace_text",
+                    {"path": "README.md", "old": "before\n", "new": "before\n\nafter\n"},
+                )
+            ]
+        )
+    )
+    done = FakeResponse(FakeMessage(content="implementation complete"))
+    agent, client = make_agent(monkeypatch, [FakeMalformedToolError(), retry, done])
+
+    result = agent.run(AgentRunRequest(tmp_path, "append after"))
+
+    assert result.success is True
+    assert path.read_text(encoding="utf-8") == "before\n\nafter\n"
+    assert len(client.calls) == 3
+    retry_messages = client.calls[1]["messages"]
+    correction = next(
+        message["content"]
+        for message in reversed(retry_messages)
+        if message.get("role") == "user"
+    )
+    assert "rejected as invalid JSON" in correction
+    assert "use replace_text" in correction
+    assert "do not copy read_file line numbers" in correction
+
+
 def test_rate_limit_maps_to_limited_and_retry_after(monkeypatch, tmp_path):
     class FakeRateLimit(Exception):
         status_code = 429
