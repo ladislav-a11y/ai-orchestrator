@@ -68,16 +68,17 @@ finalization call will be made after tool use.
 
 _IGNORED_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", "node_modules"}
 _MAX_TOOL_TEXT = 6000
-_MAX_TOOL_RESULT_JSON = 7000
-# Keep every individual Groq request below a conservative free-tier budget.
-# The provider's rolling TPM usage is not visible before a call, so this local
-# ceiling prevents oversized requests while leaving Groq first in the
-# failover order for smaller tasks.
-_MAX_SAFE_REQUEST_TOKENS = 6000
+_MAX_TOOL_RESULT_JSON = 5000
+# Groq's observed free-tier TPM limit for the configured model is 8000. The
+# rolling usage of the account is not visible before a call, so keep a fixed
+# request margin and let a real 429 continue through normal failover.
+_GROQ_TPM_LIMIT_TOKENS = 8000
+_GROQ_REQUEST_SAFETY_MARGIN_TOKENS = 512
+_MAX_SAFE_REQUEST_TOKENS = _GROQ_TPM_LIMIT_TOKENS - _GROQ_REQUEST_SAFETY_MARGIN_TOKENS
 _TOKEN_ESTIMATE_CHARS_PER_TOKEN = 3
 _REQUEST_FIXED_OVERHEAD_TOKENS = 64
 _MIN_OUTPUT_TOKENS = 256
-_MAX_RETAINED_HISTORY_MESSAGES = 6
+_MAX_RETAINED_HISTORY_MESSAGES = 4
 
 
 class _GroqWallClockTimeout(Exception):
@@ -442,24 +443,70 @@ def _bounded_tool_result_payload(result: Any) -> dict[str, Any]:
     }
 
 
-def _compact_message_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep the task and newest complete tool exchanges for the next request."""
-    if len(messages) <= _MAX_RETAINED_HISTORY_MESSAGES + 3:
-        return messages
+def _compact_message_history(
+    messages: list[dict[str, Any]],
+    *,
+    tools: Optional[list[dict[str, Any]]] = None,
+    response_format: Optional[dict[str, Any]] = None,
+    max_input_tokens: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    """Keep the current task and newest complete exchanges within the budget."""
+    source = list(messages)
 
-    prefix = messages[:2]
-    tail = messages[-_MAX_RETAINED_HISTORY_MESSAGES:]
+    def fits(candidate: list[dict[str, Any]]) -> bool:
+        return (
+            max_input_tokens is None
+            or _estimate_request_tokens(
+                candidate, tools=tools, response_format=response_format
+            ) <= max_input_tokens
+        )
+
+    if len(source) <= _MAX_RETAINED_HISTORY_MESSAGES + 3 and fits(source):
+        return source
+    if len(source) <= 2:
+        # The only user prompt is the task itself. Never compact it away; if
+        # it cannot fit alongside the system contract, fail closed below.
+        return source
+
+    def candidate(prefix: list[dict[str, Any]], tail: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        omitted = max(0, len(source) - len(prefix) - len(tail))
+        if not omitted:
+            return [*prefix, *tail]
+        marker = {
+            "role": "user",
+            "content": (
+                "Earlier Groq conversation history was compacted to stay within the request budget; "
+                f"{omitted} older message(s) were omitted. Re-read project files if their details are needed."
+            ),
+        }
+        return [*prefix, marker, *tail]
+
+    tail = source[2:][-_MAX_RETAINED_HISTORY_MESSAGES:]
     while tail and tail[0].get("role") == "tool":
         tail.pop(0)
-    omitted = max(0, len(messages) - len(prefix) - len(tail))
-    marker = {
-        "role": "user",
-        "content": (
-            "Earlier Groq conversation history was compacted to stay within the request budget; "
-            f"{omitted} older message(s) were omitted. Re-read project files if their details are needed."
-        ),
-    }
-    return [*prefix, marker, *tail]
+    compacted = candidate(source[:2], tail)
+    if fits(compacted):
+        return compacted
+
+    # When autonomous iterations reuse a provider session, retaining the old
+    # user task plus the current task can exceed the budget even though the
+    # newest tool exchange is small. Keep the system contract and current
+    # exchange; the current prompt already carries the verified checkpoint.
+    compacted = candidate(source[:1], tail)
+    while not fits(compacted) and len(tail) > 1:
+        if (
+            len(tail) >= 2
+            and tail[0].get("role") == "assistant"
+            and tail[0].get("tool_calls")
+            and tail[1].get("role") == "tool"
+        ):
+            del tail[:2]
+        else:
+            del tail[:1]
+        while tail and tail[0].get("role") == "tool":
+            tail.pop(0)
+        compacted = candidate(source[:1], tail)
+    return compacted
 
 
 def _estimate_request_tokens(
@@ -805,16 +852,21 @@ class GroqAgent(Agent):
         tools: Optional[list[dict[str, Any]]] = None,
         response_format: Optional[dict[str, Any]] = None,
     ):
-        bounded_messages = _compact_message_history(messages)
+        configured_output_tokens = max(1, int(self.config.max_output_tokens))
+        minimum_output_tokens = min(_MIN_OUTPUT_TOKENS, configured_output_tokens)
+        bounded_messages = _compact_message_history(
+            messages,
+            tools=tools,
+            response_format=response_format,
+            max_input_tokens=_MAX_SAFE_REQUEST_TOKENS - minimum_output_tokens,
+        )
         messages[:] = bounded_messages
         input_tokens = _estimate_request_tokens(
             bounded_messages,
             tools=tools,
             response_format=response_format,
         )
-        configured_output_tokens = max(1, int(self.config.max_output_tokens))
         available_output_tokens = _MAX_SAFE_REQUEST_TOKENS - input_tokens
-        minimum_output_tokens = min(_MIN_OUTPUT_TOKENS, configured_output_tokens)
         if available_output_tokens < minimum_output_tokens:
             raise _GroqRequestBudgetExceeded(
                 "Groq request odhadnut na nejméně "

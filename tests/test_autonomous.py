@@ -882,6 +882,38 @@ def test_run_autonomous_detects_no_progress_and_blocks(tmp_path):
     assert len(result.iterations) < 10
 
 
+def test_run_autonomous_ignores_volatile_test_duration_for_no_progress(monkeypatch, tmp_path):
+    calls = {"tests": 0}
+
+    def run_fn(request):
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": false}], "notes": "stale"}',
+        )
+
+    def fake_run_test_command(project_path, command, logger):
+        calls["tests"] += 1
+        return True, f"1 passed in {calls['tests']}.00s"
+
+    monkeypatch.setattr("orchestrator.autonomous.run_test_command", fake_run_test_command)
+    result = run_autonomous_loop(
+        run_id="test-run",
+        project_path=tmp_path,
+        goal="nemozny cil",
+        dod_items=parse_definition_of_done("- [ ] stale bod"),
+        config=Config(),
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command="pytest -q",
+        max_iterations=10,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.BLOCKED
+    assert len(result.iterations) == NO_PROGRESS_LIMIT
+    assert calls["tests"] == NO_PROGRESS_LIMIT
+
+
 # -- tests_passed must always be a real bool when a test command runs -------
 
 

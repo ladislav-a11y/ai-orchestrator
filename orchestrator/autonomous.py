@@ -1550,9 +1550,19 @@ def _audit_with_repair(
     )
 
 
-def _iteration_signature(dod_items: list[DoDItem], tests_passed: Optional[bool], test_output: Optional[str]) -> str:
+def _iteration_signature(
+    dod_items: list[DoDItem], tests_passed: Optional[bool], project_status: str
+) -> str:
+    """Return a stable fingerprint for verified progress between iterations.
+
+    Test output is intentionally excluded: pytest and similar runners append
+    volatile durations, worker identifiers, and temporary paths even when the
+    verified result is unchanged. The actual Git status is captured before the
+    next agent call and distinguishes a real checkout change from a repeated
+    claim against the same tree.
+    """
     unmet = sorted(item.text for item in dod_items if not item.done)
-    return "|".join([str(tests_passed), tail_text(test_output or "", 500), "||".join(unmet)])
+    return "|".join([str(tests_passed), project_status.strip(), "||".join(unmet)])
 
 
 def _commit_if_ready(
@@ -2269,7 +2279,7 @@ def run_autonomous_loop(
         # rule 9 and _apply_dod_updates' docstring.
         test_result_missing = bool(test_command) and tests_passed is None
         if not protocol_error and not test_result_missing and not audit_protocol_error:
-            signature = _iteration_signature(dod_items, tests_passed, test_output)
+            signature = _iteration_signature(dod_items, tests_passed, project_status)
             if signature == last_signature:
                 same_signature_count += 1
             else:

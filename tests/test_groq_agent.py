@@ -323,10 +323,29 @@ def test_session_context_is_reused_with_same_session_id(monkeypatch, tmp_path):
 def test_request_output_budget_is_clamped_for_large_but_usable_prompt(monkeypatch, tmp_path):
     agent, client = make_agent(monkeypatch, [FakeResponse(FakeMessage(content="done"))])
 
-    result = agent.run(AgentRunRequest(tmp_path, "x" * 9000))
+    result = agent.run(AgentRunRequest(tmp_path, "x" * 15000))
 
     assert result.success is True
     assert 0 < client.calls[0]["max_tokens"] < 2048
+
+
+def test_tool_result_history_is_compacted_before_the_request_budget_is_exceeded(monkeypatch, tmp_path):
+    large = tmp_path / "large.txt"
+    large.write_text("".join(f"line-{i:04d} " + ("x" * 80) + "\n" for i in range(1, 401)), encoding="utf-8")
+    agent, client = make_agent(
+        monkeypatch,
+        [
+            FakeResponse(FakeMessage(tool_calls=[tool_call("read_file", {"path": "large.txt"})])),
+            FakeResponse(FakeMessage(content="done")),
+        ],
+    )
+
+    result = agent.run(AgentRunRequest(tmp_path, "inspect the file"))
+
+    assert result.success is True
+    assert len(client.calls) == 2
+    assert 0 < client.calls[1]["max_tokens"] <= agent.config.max_output_tokens
+    assert len(client.calls[1]["messages"][-1]["content"]) <= groq_module._MAX_TOOL_RESULT_JSON
 
 
 def test_request_over_safe_budget_fails_closed_before_api_call(monkeypatch, tmp_path):
