@@ -114,34 +114,28 @@ def finalize_repository(
     run_id: str,
     goal: str = "",
     paths: Sequence[str] = (),
+    preexisting_paths: Sequence[str] = (),
     test_command: Optional[str] = None,
     push_requested: bool = False,
     allowed_remote: Optional[str] = None,
 ) -> dict:
-    """Finalize the explicitly supplied worktree paths, or every currently
-    dirty path when the caller configured none.
+    """Finalize current-task paths while preserving pre-existing user work.
 
     This is intentionally separate from the agent loop.  When the caller
     supplies ``paths`` (a curated, per-project allowlist - see
     ``AI_ORCHESTRATOR_FINALIZE_PATHS``), that list is a hard scope: any
-    other dirty path blocks the whole finalization. Most projects never get
-    such a curated list (it exists mainly for a project that can modify its
-    own controller code, e.g. AI Project Manager's self-update - a real
-    self-referential risk ordinary target projects do not carry), so an
-    empty ``paths`` does not mean "nothing is safe to commit" - it means
-    "no human pre-typed a filename list for this project". In that case the
-    scope is derived from the actual ``git status --porcelain`` right
-    before committing instead of blocking every ordinary project's
-    finalization forever. Either way this function never uses
-    ``git add -A`` (paths are always staged one by one, explicitly) and
-    never offers force-push or history rewrite; the real boundary on which
-    repository may be touched at all remains the caller's own
-    project-path allowlist and workspace root, backed by the unconditional
-    tests + independent-audit gate before a card may reach Hotovo.
+    except for paths explicitly identified by the caller as pre-existing
+    before the task started. Most projects never get a curated task-path
+    list, so an empty ``paths`` still derives the current-task scope from
+    ``git status --porcelain`` - but it never absorbs the supplied baseline.
+    Baseline paths remain dirty and are reported in the finalization proof;
+    they are not staged, committed, or pushed by this task. This function
+    never uses ``git add -A`` and never offers force-push or history rewrite.
     """
     project_path = Path(project_path).resolve()
     try:
         safe_paths = _safe_paths(paths)
+        safe_preexisting_paths = _safe_paths(preexisting_paths)
     except ValueError as exc:
         return _blocked(str(exc))
     explicit_scope = bool(safe_paths)
@@ -174,6 +168,8 @@ def finalize_repository(
     dirty = bool(before.stdout.strip())
     committed = False
     head = _git(project_path, ["rev-parse", "HEAD"]).stdout.strip()
+    baseline_remaining: list[str] = []
+    task_paths_for_proof: list[str] = []
     if dirty:
         dirty_paths = _status_paths(before.stdout)
         transient_paths = _transient_paths(dirty_paths)
@@ -182,9 +178,28 @@ def finalize_repository(
                 "temporary/cache artifacts must be cleaned before controller finalization",
                 dirty_paths=dirty_paths, transient_paths=transient_paths, branch=branch,
             )
+        baseline_paths = [
+            path for path in dirty_paths
+            if _path_in_scope(path, safe_preexisting_paths)
+        ]
+        staged_baseline = [
+            path for line, path in (
+                (line, line[3:].strip().replace("\\", "/"))
+                for line in before.stdout.splitlines()
+                if len(line) >= 4
+            )
+            if path in baseline_paths and line[0] not in {" ", "?"}
+        ]
+        if staged_baseline:
+            return _blocked(
+                "pre-existing user changes are already staged; refusing to alter their index state",
+                dirty_paths=dirty_paths, preexisting_paths=baseline_paths,
+                staged_preexisting_paths=staged_baseline, branch=branch,
+            )
+        task_dirty_paths = [path for path in dirty_paths if path not in baseline_paths]
         if explicit_scope:
             outside_scope = [
-                path for path in dirty_paths if not _path_in_scope(path, safe_paths)
+                path for path in task_dirty_paths if not _path_in_scope(path, safe_paths)
             ]
             if outside_scope:
                 return _blocked(
@@ -193,13 +208,16 @@ def finalize_repository(
                 )
         else:
             try:
-                safe_paths = _safe_paths(dirty_paths)
+                safe_paths = _safe_paths(task_dirty_paths)
             except ValueError as exc:
                 return _blocked(str(exc), branch=branch)
-        stage_paths = (
-            [path for path in dirty_paths if _path_in_scope(path, safe_paths)]
-            if explicit_scope else safe_paths
-        )
+        stage_paths = [path for path in task_dirty_paths if _path_in_scope(path, safe_paths)]
+        if not stage_paths:
+            return _blocked(
+                "no current-task changes are available for controller finalization",
+                dirty_paths=dirty_paths, preexisting_paths=baseline_paths, branch=branch,
+            )
+        task_paths_for_proof = list(stage_paths)
         staged = _git(project_path, ["add", "--", *stage_paths])
         if staged.returncode != 0:
             return _blocked(f"git add of explicit finalize paths failed: {staged.stderr}", branch=branch)
@@ -218,11 +236,27 @@ def finalize_repository(
         head = _git(project_path, ["rev-parse", "HEAD"]).stdout.strip()
 
     after = _git(project_path, ["status", "--porcelain"])
-    if after.returncode != 0 or after.stdout.strip():
+    if after.returncode != 0:
         return _blocked(
             "post-commit Git status is not clean", committed=committed,
             commit_hash=head, clean=False, status=after.stdout.strip(), branch=branch,
         )
+    remaining_paths = _status_paths(after.stdout)
+    unexpected_remaining = [
+        path for path in remaining_paths
+        if not _path_in_scope(path, safe_preexisting_paths)
+    ]
+    if unexpected_remaining:
+        return _blocked(
+            "post-commit Git status contains unapproved current-task paths",
+            committed=committed, commit_hash=head, clean=False,
+            status=after.stdout.strip(), remaining_paths=remaining_paths,
+            unexpected_remaining=unexpected_remaining, branch=branch,
+        )
+    baseline_remaining = [
+        path for path in remaining_paths
+        if _path_in_scope(path, safe_preexisting_paths)
+    ]
 
     origin = _git(project_path, ["remote", "get-url", "origin"]).stdout.strip()
     remote_head = None
@@ -254,6 +288,9 @@ def finalize_repository(
         "completed", committed=committed, commit_hash=head, clean=True,
         tests_passed=True, test_command=selected_test, branch=branch,
         remote=origin or None, pushed=push_requested, remote_commit=remote_head,
+        preexisting_paths=baseline_remaining,
+        task_paths=task_paths_for_proof,
+        scope_policy="preexisting paths preserved outside current-task commit",
         run_id=run_id,
     )
 
@@ -267,6 +304,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--goal", default="")
     parser.add_argument("--test-command")
     parser.add_argument("--path", action="append", default=[])
+    parser.add_argument("--preexisting-path", action="append", default=[])
     parser.add_argument("--push", action="store_true")
     parser.add_argument("--allowed-remote")
     args = parser.parse_args(argv)
@@ -277,7 +315,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         entry = config.resolve_project(args.project)
         result = finalize_repository(
             Path(entry.path), config, args.run_id, goal=args.goal,
-            paths=args.path, test_command=args.test_command,
+            paths=args.path, preexisting_paths=args.preexisting_path,
+            test_command=args.test_command,
             push_requested=args.push, allowed_remote=args.allowed_remote,
         )
     except (FileNotFoundError, ValueError, KeyError) as exc:

@@ -54,6 +54,31 @@ def test_finalize_commits_explicit_scope_and_leaves_clean_worktree():
         assert _git(path, "status", "--porcelain").stdout == ""
 
 
+def test_finalize_preserves_preexisting_paths_outside_current_task_scope():
+    with _temporary_repo() as path:
+        (path / "tracked.txt").write_text("task change", encoding="utf-8")
+        (path / "user-owned.txt").write_text("keep outside task\n", encoding="utf-8")
+
+        result = finalize_repository(
+            path,
+            Config(),
+            "run-baseline-scope",
+            goal="task scope",
+            paths=["tracked.txt"],
+            preexisting_paths=["user-owned.txt"],
+        )
+
+        assert result["status"] == "completed", result.get("error")
+        assert result["committed"] is True
+        assert result["preexisting_paths"] == ["user-owned.txt"]
+        assert result["task_paths"] == ["tracked.txt"]
+        committed_files = _git(
+            path, "show", "--name-only", "--pretty=", "HEAD"
+        ).stdout.split()
+        assert committed_files == ["tracked.txt"]
+        assert _git(path, "status", "--porcelain").stdout.strip() == "?? user-owned.txt"
+
+
 def test_finalize_auto_scopes_to_dirty_status_when_no_paths_configured():
     """Most projects never get a curated finalize-paths allowlist (see
     scripts/run-ai-project-manager.ps1's $finalizePaths - historically only

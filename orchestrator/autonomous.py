@@ -191,6 +191,8 @@ def _compact_audit_readback(readback: object) -> dict:
                     "tests_passed",
                     "pushed",
                     "remote_commit",
+                    "preexisting_paths",
+                    "scope_policy",
                 )
                 if key in finalization
             }
@@ -343,14 +345,49 @@ def controller_finalization_is_current(project_path: Path, finalization: object)
         return False
     head = current_head(project_path)
     branch = current_branch(project_path)
+    if not head or head != finalization.get("commit_hash"):
+        return False
+    if not _finalization_scope_is_current(project_path, finalization):
+        return False
     return bool(
         head
-        and head == finalization.get("commit_hash")
         and branch == finalization.get("branch")
-        and not status_porcelain(project_path)
         and origin_url(project_path) == finalization.get("remote")
         and remote_branch_head(project_path, branch) == head
     )
+
+
+def _status_paths(status_output: str) -> list[str]:
+    """Extract repository-relative paths from raw ``git status --porcelain``."""
+    paths = []
+    for line in (status_output or "").splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1]
+        if path:
+            paths.append(path.replace("\\", "/"))
+    return paths
+
+
+def _finalization_scope_is_current(project_path: Path, finalization: dict) -> bool:
+    """Allow only the baseline paths to remain dirty after task finalization."""
+    current_paths = _status_paths(status_porcelain(project_path))
+    baseline = finalization.get("preexisting_paths")
+    if not isinstance(baseline, list):
+        return not current_paths
+    allowed = [path for path in baseline if isinstance(path, str) and path.strip()]
+    return all(_path_in_scope(path, allowed) for path in current_paths)
+
+
+def _path_in_scope(path: str, scopes: list[str]) -> bool:
+    normalized = str(path).replace("\\", "/")
+    for scope in scopes:
+        candidate = str(scope).replace("\\", "/").rstrip("/")
+        if normalized == candidate or normalized.startswith(f"{candidate}/"):
+            return True
+    return False
 
 
 class AutonomousStatus(str, Enum):
@@ -1050,6 +1087,7 @@ def _build_audit_prompt(
     test_command: Optional[str],
     tests_passed: Optional[bool],
     test_output: Optional[str],
+    finalization: Optional[dict] = None,
 ) -> str:
     """Independent verification prompt, only ever sent once the executor
     claims every DoD item is done and the orchestrator's own test run
@@ -1123,6 +1161,26 @@ def _build_audit_prompt(
         "implementačního agenta ani obecné 'testy prošly' není důkaz splnění daného bodu. Pokud "
         "důkaz chybí nebo bod nelze ověřit, nastav accepted=false.",
     ]
+    if isinstance(finalization, dict) and isinstance(finalization.get("preexisting_paths"), list):
+        baseline = [
+            path for path in finalization["preexisting_paths"]
+            if isinstance(path, str) and path.strip()
+        ]
+        task_paths = finalization.get("task_paths")
+        task_paths = [
+            path for path in task_paths
+            if isinstance(path, str) and path.strip()
+        ] if isinstance(task_paths, list) else []
+        lines += [
+            "",
+            "Controller finalization scope evidence:",
+            "Paths already dirty before this task are baseline user work and are not task-scope failures: "
+            + (", ".join(baseline) or "(none)"),
+            "Current-task paths finalized by the controller: "
+            + (", ".join(task_paths) or "(not reported)"),
+            "Do not reject the commit solely because a recorded baseline path remains outside the task commit; "
+            "still verify the requested task and reject any unaccounted path or contradictory evidence.",
+        ]
     return "\n".join(lines)
 
 
@@ -1326,6 +1384,7 @@ def _run_audit(
     iteration: int,
     logger,
     max_iterations: int,
+    finalization: Optional[dict] = None,
 ) -> AuditOutcome:
     """One independent, read-only verification call, made only when the
     executor claims completion and the orchestrator's own tests agree (see
@@ -1349,7 +1408,9 @@ def _run_audit(
             original_goal_length,
             len(goal),
         )
-    prompt = _build_audit_prompt(goal, dod_items, project_status, test_command, tests_passed, test_output)
+    prompt = _build_audit_prompt(
+        goal, dod_items, project_status, test_command, tests_passed, test_output, finalization
+    )
     logger.info(
         "Autonomní běh %s: iterace %s - všechny body tvrzeny jako splněné, spouštím nezávislý "
         "audit (%s znaků, ~%s tokenů odhadem, schema %s znaků)",
@@ -2217,6 +2278,7 @@ def run_autonomous_loop(
                 audit = _run_audit(
                     agent, project_path, goal, dod_items, project_status, test_command,
                     tests_passed, test_output, session_id, run_id, i, logger, max_iterations,
+                    controller_finalization,
                 )
             session_id = audit.session_id or session_id
             note_breaker_savings(audit.breaker_saved_attempts)

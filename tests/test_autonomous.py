@@ -19,6 +19,7 @@ from orchestrator.autonomous import (
     _audit_needs_quality_fallback,
     compact_audit_goal,
     _controller_audit_gate_indices,
+    controller_finalization_is_current,
     _validate_audit_response,
     controller_finalization_from_spec,
     parse_definition_of_done,
@@ -212,6 +213,27 @@ def test_audit_prompt_includes_successful_test_output():
     assert "324 passed, 4 skipped in 30.77s" in prompt
 
 
+def test_audit_prompt_distinguishes_preexisting_paths_from_task_scope():
+    dod = parse_definition_of_done("- [x] implementace")
+    prompt = _build_audit_prompt(
+        "cil",
+        dod,
+        " M task.py\n M user-owned.txt",
+        None,
+        None,
+        None,
+        {
+            "preexisting_paths": ["user-owned.txt"],
+            "task_paths": ["task.py"],
+        },
+    )
+
+    assert "user-owned.txt" in prompt
+    assert "task.py" in prompt
+    assert "baseline user work" in prompt
+    assert "solely because a recorded baseline path" in prompt
+
+
 def test_audit_prompt_explains_controller_owned_final_gate():
     dod = parse_definition_of_done(
         "- [x] implementation\n- [ ] ai-orchestrator vydá accepted / rejected verdikt"
@@ -281,6 +303,28 @@ def test_controller_finalization_is_extracted_only_for_audit_specs():
 
     assert controller_finalization_from_spec(spec) == proof
     assert controller_finalization_from_spec(spec.replace('"audit"', '"autonomous"')) is None
+
+
+def test_controller_finalization_accepts_declared_preexisting_dirty_paths(monkeypatch, tmp_path):
+    import orchestrator.autonomous as autonomous_module
+
+    head = "abc123"
+    monkeypatch.setattr(autonomous_module, "is_git_repo", lambda _path: True)
+    monkeypatch.setattr(autonomous_module, "current_head", lambda _path: head)
+    monkeypatch.setattr(autonomous_module, "current_branch", lambda _path: "main")
+    monkeypatch.setattr(autonomous_module, "status_porcelain", lambda _path: " M user-owned.txt\n")
+    monkeypatch.setattr(autonomous_module, "origin_url", lambda _path: "origin")
+    monkeypatch.setattr(autonomous_module, "remote_branch_head", lambda _path, _branch: head)
+
+    proof = {
+        "status": "completed", "done": True, "committed": True,
+        "clean": True, "tests_passed": True, "pushed": True,
+        "commit_hash": head, "remote_commit": head,
+        "branch": "main", "remote": "origin",
+        "preexisting_paths": ["user-owned.txt"],
+    }
+
+    assert controller_finalization_is_current(tmp_path, proof) is True
 
 
 def test_controller_finalization_audit_skips_provider_when_proof_is_current(git_repo, tmp_path):
