@@ -470,6 +470,52 @@ def test_malformed_tool_arguments_are_retried_with_corrective_prompt(monkeypatch
     assert "do not copy read_file line numbers" in correction
 
 
+
+def test_output_parse_failure_is_retried_with_tool_only_prompt(monkeypatch, tmp_path):
+    class FakeOutputParseError(Exception):
+        status_code = 400
+
+        def __init__(self):
+            super().__init__("output parse failed")
+            self.body = {
+                "error": {
+                    "message": "Parsing failed. The model generated output that could not be parsed.",
+                    "type": "invalid_request_error",
+                    "code": "output_parse_failed",
+                    "failed_generation": "Need to inspect the file first.",
+                }
+            }
+
+    path = tmp_path / "README.md"
+    path.write_text("before\n", encoding="utf-8")
+    retry = FakeResponse(
+        FakeMessage(
+            tool_calls=[
+                tool_call(
+                    "replace_text",
+                    {"path": "README.md", "old": "before\n", "new": "before\n\nafter\n"},
+                )
+            ]
+        )
+    )
+    done = FakeResponse(FakeMessage(content="implementation complete"))
+    agent, client = make_agent(monkeypatch, [FakeOutputParseError(), retry, done])
+
+    result = agent.run(AgentRunRequest(tmp_path, "append after"))
+
+    assert result.success is True
+    assert path.read_text(encoding="utf-8") == "before\n\nafter\n"
+    assert len(client.calls) == 3
+    retry_messages = client.calls[1]["messages"]
+    correction = next(
+        message["content"]
+        for message in reversed(retry_messages)
+        if message.get("role") == "user"
+    )
+    assert "requires a tool call" in correction
+    assert "Do not narrate your plan" in correction
+
+
 def test_rate_limit_maps_to_limited_and_retry_after(monkeypatch, tmp_path):
     class FakeRateLimit(Exception):
         status_code = 429

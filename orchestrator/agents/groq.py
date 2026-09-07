@@ -525,6 +525,26 @@ def _malformed_tool_arguments_failure(exc: Exception) -> bool:
     return "failed to parse tool call arguments as json" in message.casefold()
 
 
+
+def _output_parse_failure(exc: Exception) -> bool:
+    """Recognize Groq rejecting free-form text when a tool call was expected."""
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        response = getattr(exc, "response", None)
+        json_method = getattr(response, "json", None)
+        if callable(json_method):
+            try:
+                body = json_method()
+            except Exception:  # noqa: BLE001 - provider diagnostics are best-effort
+                body = None
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return False
+    return str(error.get("code") or "").casefold() == "output_parse_failed"
+
+
 def _schema_finalization_tool_failure(
     exc: Exception,
     output_schema: Optional[dict[str, Any]],
@@ -823,6 +843,18 @@ class GroqAgent(Agent):
                                     "Retry with one valid tool call. For a small edit to an existing file, "
                                     "use replace_text with exact raw text; do not copy read_file line numbers "
                                     "into file content and do not rewrite the whole file unless required."
+                                ),
+                            }
+                        )
+                        continue
+                    if _output_parse_failure(exc):
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Your previous response was rejected because this turn requires a tool call, "
+                                    "not free-form prose. Retry with exactly one valid supplied tool call. "
+                                    "Do not narrate your plan before the tool call."
                                 ),
                             }
                         )
