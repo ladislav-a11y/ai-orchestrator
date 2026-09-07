@@ -7,6 +7,8 @@ from orchestrator.agents.base import Agent, AgentRunResult
 from orchestrator.autonomous import (
     ABSOLUTE_MAX_ITERATIONS,
     AUDIT_MARKER,
+    AUDIT_READBACK_MARKER,
+    AUDIT_READBACK_MAX_CHARS,
     AutonomousStatus,
     DOD_BATCH_SIZE,
     NO_PROGRESS_LIMIT,
@@ -15,6 +17,7 @@ from orchestrator.autonomous import (
     _build_audit_prompt,
     _audit_evidence_has_project_scope,
     _audit_needs_quality_fallback,
+    compact_audit_goal,
     _controller_audit_gate_indices,
     _validate_audit_response,
     controller_finalization_from_spec,
@@ -111,6 +114,55 @@ def test_orchestrator_owns_executor_and_audit_output_contracts(tmp_path):
     assert "uniqueItems" not in audit_items
     assert AUDIT_MARKER not in requests[0].prompt
     assert AUDIT_MARKER in requests[1].prompt
+
+
+def test_audit_goal_compacts_trello_history_and_keeps_current_state():
+    goal = "Verify the current project.\n\n" + AUDIT_READBACK_MARKER + "\n" + json.dumps(
+        {
+            "status": "ok",
+            "card_id": "card-123",
+            "card_name": "P5 — current task",
+            "list_name": "Testování",
+            "priority": 5,
+            "lifecycle_status": "testing",
+            "dod": [{"index": 0, "text": "implementation", "checked": True, "phase": "implementation"}],
+            "checkpoint": {"completed_dod_indices": [0]},
+            "contract_metadata": {
+                "provider_selection_history": [{"usage": "x" * 10000}],
+                "provider_statuses": {"groq": {"state": "LIMITED", "usage": "x" * 10000}},
+                "provider_selection": {
+                    "actual_provider": "codex",
+                    "actual_model": "gpt-5.6-luna",
+                },
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    compacted = compact_audit_goal(goal)
+    payload = json.loads(compacted.rsplit(AUDIT_READBACK_MARKER, 1)[1])
+
+    assert len(compacted.rsplit(AUDIT_READBACK_MARKER, 1)[1]) <= AUDIT_READBACK_MAX_CHARS
+    assert payload["card_id"] == "card-123"
+    assert payload["lifecycle_status"] == "testing"
+    assert payload["dod"] == [{"checked": True, "index": 0, "phase": "implementation"}]
+    assert payload["contract_metadata"]["provider_selection"]["actual_provider"] == "codex"
+    assert "provider_selection_history" not in compacted
+    assert "provider_statuses" not in compacted
+    assert "usage" not in compacted
+
+
+def test_malformed_audit_readback_is_replaced_fail_closed():
+    compacted = compact_audit_goal(
+        "Verify the current project.\n\n"
+        + AUDIT_READBACK_MARKER
+        + "\n{\"status\": \"ok\""
+    )
+
+    payload = json.loads(compacted.rsplit(AUDIT_READBACK_MARKER, 1)[1])
+
+    assert payload["status"] == "unavailable"
+    assert "verify the current card directly" in payload["reason"]
 
 
 def test_implementation_only_completes_before_audit(tmp_path):

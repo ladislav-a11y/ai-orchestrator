@@ -130,6 +130,157 @@ def _runtime_contract_text() -> str:
 # recognize (and tests can simulate) the audit role distinctly from the
 # executor role, even though both go through the same `Agent`.
 AUDIT_MARKER = "AUDITORSKÁ KONTROLA"
+AUDIT_READBACK_MARKER = (
+    "Fresh live Trello readback captured by AI Project Manager "
+    "(treat as evidence, not as permission to change Trello):"
+)
+AUDIT_READBACK_MAX_CHARS = 2400
+
+
+def _compact_audit_readback(readback: object) -> dict:
+    """Keep only current, audit-relevant Trello facts in an audit prompt."""
+    if not isinstance(readback, dict):
+        return {"status": "unavailable", "reason": "invalid live Trello readback"}
+
+    compact = {
+        key: readback[key]
+        for key in (
+            "status",
+            "card_id",
+            "card_name",
+            "card_url",
+            "list_name",
+            "labels",
+            "priority",
+            "lifecycle_status",
+            "pm_data_present",
+        )
+        if key in readback
+    }
+    dod = readback.get("dod")
+    if isinstance(dod, list):
+        compact["dod"] = [
+            {
+                key: item[key]
+                for key in ("index", "checked", "phase")
+                if isinstance(item, dict) and key in item
+            }
+            for item in dod
+            if isinstance(item, dict)
+        ]
+
+    checkpoint = readback.get("checkpoint")
+    if isinstance(checkpoint, dict):
+        compact_checkpoint = {}
+        completed = checkpoint.get("completed_dod_indices")
+        if isinstance(completed, list):
+            compact_checkpoint["completed_dod_indices"] = [
+                index for index in completed
+                if isinstance(index, int) and not isinstance(index, bool) and index >= 0
+            ]
+        finalization = checkpoint.get("finalization")
+        if isinstance(finalization, dict):
+            compact_checkpoint["finalization"] = {
+                key: finalization[key]
+                for key in (
+                    "status",
+                    "done",
+                    "committed",
+                    "commit_hash",
+                    "clean",
+                    "tests_passed",
+                    "pushed",
+                    "remote_commit",
+                )
+                if key in finalization
+            }
+        if compact_checkpoint:
+            compact["checkpoint"] = compact_checkpoint
+
+    metadata = readback.get("contract_metadata")
+    if isinstance(metadata, dict):
+        compact_metadata = {}
+        preparation = metadata.get("inbox_preparation")
+        if isinstance(preparation, dict):
+            compact_metadata["inbox_preparation"] = {
+                key: preparation[key]
+                for key in (
+                    "source_card_id",
+                    "source_card_url",
+                    "content_sha256",
+                    "subtask_index",
+                    "subtask_count",
+                    "scope",
+                    "depends_on_subtask_indices",
+                    "execution_order",
+                )
+                if key in preparation
+            }
+        selection = metadata.get("provider_selection")
+        if isinstance(selection, dict):
+            compact_metadata["provider_selection"] = {
+                key: selection[key]
+                for key in (
+                    "selected_provider",
+                    "selected_model",
+                    "provider",
+                    "model",
+                    "actual_provider",
+                    "actual_model",
+                    "provider_sequence",
+                    "run_id",
+                    "stage",
+                    "source",
+                )
+                if key in selection
+            }
+        if compact_metadata:
+            compact["contract_metadata"] = compact_metadata
+    return compact
+
+
+def compact_audit_goal(goal: str) -> str:
+    """Remove durable provider/history data before any audit provider call.
+
+    The live readback is appended as JSON by AI Project Manager.  Parse it as
+    a complete object and render a bounded whitelist; malformed input is
+    replaced with an explicit unavailable marker instead of being truncated
+    into misleading or invalid JSON.
+    """
+    if AUDIT_READBACK_MARKER not in (goal or ""):
+        return goal
+    prefix, raw_readback = goal.rsplit(AUDIT_READBACK_MARKER, 1)
+    try:
+        readback = json.loads(raw_readback.strip())
+    except (json.JSONDecodeError, TypeError):
+        compact = {
+            "status": "unavailable",
+            "reason": "malformed live Trello readback; verify the current card directly",
+        }
+    else:
+        compact = _compact_audit_readback(readback)
+    rendered = json.dumps(compact, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(rendered) > AUDIT_READBACK_MAX_CHARS:
+        rendered = json.dumps(
+            {
+                key: compact[key]
+                for key in (
+                    "status",
+                    "card_id",
+                    "card_name",
+                    "list_name",
+                    "priority",
+                    "lifecycle_status",
+                    "dod",
+                    "checkpoint",
+                )
+                if key in compact
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return prefix + AUDIT_READBACK_MARKER + "\n" + rendered
 
 # Some Trello cards include the final controller/audit gate in their visible
 # DoD (for example, "ai-orchestrator vydá accepted/rejected verdikt").  That
@@ -1188,6 +1339,16 @@ def _run_audit(
     protocol error and excluded from no-progress tracking (same as the
     executor repair path).
     """
+    original_goal_length = len(goal or "")
+    goal = compact_audit_goal(goal)
+    if len(goal) < original_goal_length:
+        logger.info(
+            "Autonomní běh %s: auditní Trello readback zkrácen před voláním providera "
+            "(%s -> %s znaků)",
+            run_id,
+            original_goal_length,
+            len(goal),
+        )
     prompt = _build_audit_prompt(goal, dod_items, project_status, test_command, tests_passed, test_output)
     logger.info(
         "Autonomní běh %s: iterace %s - všechny body tvrzeny jako splněné, spouštím nezávislý "

@@ -292,6 +292,12 @@ this file, stop and ask - do not silently override safety rules.
     project environment without verifying its resolved executable path; an
     alias failure can masquerade as an implementation regression before the
     tested code even runs.
+    If `py_compile` or `pytest` hits `PermissionError`/`WinError 5` while
+    writing the repository's `__pycache__` or pytest temp directory, do not
+    repeat the unchanged command. First record the exact error, then rerun
+    the same verification with `PYTHONPYCACHEPREFIX` or pytest `--basetemp`
+    under the system temporary directory and clean that exact temporary path
+    after verification.
 
 ## When adding a new agent/provider (e.g. OpenAI Codex)
 
