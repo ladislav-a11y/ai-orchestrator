@@ -185,6 +185,54 @@ def test_tool_loop_edits_project_and_returns_structured_final_response(monkeypat
 
 
 
+
+def test_structured_finalization_prompt_includes_array_max_items_constraint(
+    monkeypatch, tmp_path
+):
+    schema = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "maxItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer"},
+                        "done": {"type": "boolean"},
+                    },
+                    "required": ["index", "done"],
+                    "additionalProperties": False,
+                },
+            },
+            "notes": {"type": "string"},
+        },
+        "required": ["items", "notes"],
+        "additionalProperties": False,
+    }
+    implementation = FakeResponse(FakeMessage(content="implementation complete"))
+    final = FakeResponse(
+        FakeMessage(content='{"items":[{"index":0,"done":true}],"notes":"done"}')
+    )
+    agent, client = make_agent(monkeypatch, [implementation, final])
+
+    result = agent.run(
+        AgentRunRequest(tmp_path, "update README", output_schema=schema)
+    )
+
+    assert result.success is True
+    assert len(client.calls) == 2
+    final_messages = client.calls[1]["messages"]
+    final_prompt = next(
+        message["content"]
+        for message in reversed(final_messages)
+        if message.get("role") == "user"
+    )
+    assert "Follow the JSON schema exactly." in final_prompt
+    assert "Array `items` must contain at most 1 item(s)." in final_prompt
+    assert client.calls[1]["response_format"]["json_schema"]["schema"] == schema
+
+
 def test_schema_shaped_unknown_tool_call_falls_back_to_structured_finalization(
     monkeypatch, tmp_path
 ):

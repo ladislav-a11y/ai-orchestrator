@@ -525,6 +525,26 @@ def _schema_finalization_tool_failure(
     return True
 
 
+
+def _schema_finalization_instructions(output_schema: dict[str, Any]) -> str:
+    """Render concise prompt constraints that models must obey in addition to response_format."""
+    instructions = ["Follow the JSON schema exactly."]
+    properties = output_schema.get("properties")
+    if isinstance(properties, dict):
+        for name, definition in properties.items():
+            if not isinstance(definition, dict) or definition.get("type") != "array":
+                continue
+            minimum = definition.get("minItems")
+            maximum = definition.get("maxItems")
+            if isinstance(minimum, int) and isinstance(maximum, int) and minimum == maximum:
+                instructions.append(f"Array `{name}` must contain exactly {minimum} item(s).")
+            elif isinstance(maximum, int):
+                instructions.append(f"Array `{name}` must contain at most {maximum} item(s).")
+            elif isinstance(minimum, int):
+                instructions.append(f"Array `{name}` must contain at least {minimum} item(s).")
+    return " ".join(instructions)
+
+
 def _retry_after_seconds(exc: Exception) -> Optional[float]:
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None)
@@ -750,7 +770,8 @@ class GroqAgent(Agent):
                         "role": "user",
                         "content": (
                             "Return the final result for the orchestrator now. Do not call tools. "
-                            "Base it on the work and verification already performed in this conversation."
+                            "Base it on the work and verification already performed in this conversation. "
+                            + _schema_finalization_instructions(request.output_schema)
                         ),
                     }
                 )
