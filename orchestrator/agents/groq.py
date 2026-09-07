@@ -458,6 +458,73 @@ def _add_usage(total: dict[str, int], response: Any) -> None:
             total[key] = total.get(key, 0) + value
 
 
+
+def _schema_finalization_tool_failure(
+    exc: Exception,
+    output_schema: Optional[dict[str, Any]],
+) -> bool:
+    """Return True when Groq encoded the requested final JSON as a fake tool call.
+
+    Some OpenAI-compatible models can respond to a tool-enabled turn by wrapping
+    the requested final JSON object in an invented function call. Groq rejects
+    that response before returning a message because the function is not in the
+    supplied tool list. When the invented call's arguments match the caller's
+    output schema at the top level, the safe recovery is to leave the project
+    tool loop and use the existing tool-free, schema-constrained finalization
+    call.
+    """
+    if not isinstance(output_schema, dict):
+        return False
+
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        response = getattr(exc, "response", None)
+        json_method = getattr(response, "json", None)
+        if callable(json_method):
+            try:
+                body = json_method()
+            except Exception:  # noqa: BLE001 - provider error payload is best-effort diagnostics
+                body = None
+    if not isinstance(body, dict):
+        return False
+
+    error = body.get("error")
+    if not isinstance(error, dict) or error.get("code") != "tool_use_failed":
+        return False
+    failed_generation = error.get("failed_generation")
+    if not isinstance(failed_generation, str):
+        return False
+
+    try:
+        generation = json.loads(failed_generation)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(generation, dict):
+        return False
+
+    arguments = generation.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+    if not isinstance(arguments, dict):
+        return False
+
+    required = output_schema.get("required")
+    if isinstance(required, list):
+        required_keys = {str(key) for key in required}
+        if not required_keys.issubset(arguments):
+            return False
+
+    properties = output_schema.get("properties")
+    if output_schema.get("additionalProperties") is False and isinstance(properties, dict):
+        if not set(arguments).issubset(properties):
+            return False
+
+    return True
+
+
 def _retry_after_seconds(exc: Exception) -> Optional[float]:
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None)
@@ -627,12 +694,18 @@ class GroqAgent(Agent):
                     raise _GroqWallClockTimeout(
                         f"Groq překročil celkový timeout {self.config.timeout_seconds}s."
                     )
-                response = self._create_completion(
-                    messages=messages,
-                    model=model,
-                    remaining_seconds=remaining,
-                    tools=_tool_schema(),
-                )
+                try:
+                    response = self._create_completion(
+                        messages=messages,
+                        model=model,
+                        remaining_seconds=remaining,
+                        tools=_tool_schema(),
+                    )
+                except Exception as exc:
+                    if _schema_finalization_tool_failure(exc, request.output_schema):
+                        final_content = ""
+                        break
+                    raise
                 last_response = response
                 _add_usage(usage, response)
                 choice = response.choices[0]

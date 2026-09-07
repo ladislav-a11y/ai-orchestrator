@@ -184,6 +184,79 @@ def test_tool_loop_edits_project_and_returns_structured_final_response(monkeypat
     assert client.calls[2]["response_format"]["json_schema"]["schema"] == schema
 
 
+
+def test_schema_shaped_unknown_tool_call_falls_back_to_structured_finalization(
+    monkeypatch, tmp_path
+):
+    class FakeToolUseError(Exception):
+        status_code = 400
+
+        def __init__(self):
+            super().__init__("tool use failed")
+            self.body = {
+                "error": {
+                    "code": "tool_use_failed",
+                    "failed_generation": json.dumps(
+                        {
+                            "name": "commentary",
+                            "arguments": {
+                                "items": [{"index": 0, "done": True}],
+                                "notes": "README updated",
+                            },
+                        }
+                    ),
+                }
+            }
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "index": {"type": "integer"},
+                        "done": {"type": "boolean"},
+                    },
+                    "required": ["index", "done"],
+                    "additionalProperties": False,
+                },
+            },
+            "notes": {"type": "string"},
+        },
+        "required": ["items", "notes"],
+        "additionalProperties": False,
+    }
+    first = FakeResponse(
+        FakeMessage(
+            tool_calls=[
+                tool_call(
+                    "write_file",
+                    {"path": "README.md", "content": "updated\n"},
+                )
+            ]
+        )
+    )
+    final = FakeResponse(
+        FakeMessage(content='{"items":[{"index":0,"done":true}],"notes":"verified"}')
+    )
+    agent, client = make_agent(monkeypatch, [first, FakeToolUseError(), final])
+
+    result = agent.run(
+        AgentRunRequest(tmp_path, "update README", output_schema=schema)
+    )
+
+    assert result.success is True
+    assert result.output_text == '{"items":[{"index":0,"done":true}],"notes":"verified"}'
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "updated\n"
+    assert len(client.calls) == 3
+    assert "tools" in client.calls[0]
+    assert "tools" in client.calls[1]
+    assert "tools" not in client.calls[2]
+    assert client.calls[2]["response_format"]["json_schema"]["schema"] == schema
+
+
 def test_session_context_is_reused_with_same_session_id(monkeypatch, tmp_path):
     agent, client = make_agent(
         monkeypatch,
