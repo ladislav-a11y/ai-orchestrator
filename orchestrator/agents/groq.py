@@ -526,6 +526,27 @@ def _malformed_tool_arguments_failure(exc: Exception) -> bool:
 
 
 
+
+def _tool_schema_validation_failure(exc: Exception) -> bool:
+    """Recognize Groq rejecting valid JSON tool arguments that violate the declared schema."""
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        response = getattr(exc, "response", None)
+        json_method = getattr(response, "json", None)
+        if callable(json_method):
+            try:
+                body = json_method()
+            except Exception:  # noqa: BLE001 - provider diagnostics are best-effort
+                body = None
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error")
+    if not isinstance(error, dict) or error.get("code") != "tool_use_failed":
+        return False
+    message = str(error.get("message") or "").casefold()
+    return "parameters for tool" in message and "did not match schema" in message
+
+
 def _output_parse_failure(exc: Exception) -> bool:
     """Recognize Groq rejecting free-form text when a tool call was expected."""
     body = getattr(exc, "body", None)
@@ -843,6 +864,18 @@ class GroqAgent(Agent):
                                     "Retry with one valid tool call. For a small edit to an existing file, "
                                     "use replace_text with exact raw text; do not copy read_file line numbers "
                                     "into file content and do not rewrite the whole file unless required."
+                                ),
+                            }
+                        )
+                        continue
+                    if _tool_schema_validation_failure(exc):
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Your previous tool call arguments violated the supplied tool schema. "
+                                    "Retry with exactly one valid supplied tool call and obey every declared "
+                                    "argument bound. For read_file, max_lines must be at most 250."
                                 ),
                             }
                         )

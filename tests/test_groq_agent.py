@@ -471,6 +471,57 @@ def test_malformed_tool_arguments_are_retried_with_corrective_prompt(monkeypatch
 
 
 
+
+def test_tool_schema_validation_failure_is_retried_with_bounded_arguments(monkeypatch, tmp_path):
+    class FakeToolSchemaError(Exception):
+        status_code = 400
+
+        def __init__(self):
+            super().__init__("tool schema validation failed")
+            self.body = {
+                "error": {
+                    "message": (
+                        "Tool call validation failed: tool call validation failed: "
+                        "parameters for tool read_file did not match schema: "
+                        "errors: [`/max_lines`: must be <= 250 but found 500]"
+                    ),
+                    "type": "invalid_request_error",
+                    "code": "tool_use_failed",
+                    "failed_generation": (
+                        '{"name":"read_file","arguments":{"path":"README.md","max_lines":500}}'
+                    ),
+                }
+            }
+
+    path = tmp_path / "README.md"
+    path.write_text("before\n", encoding="utf-8")
+    retry_read = FakeResponse(
+        FakeMessage(
+            tool_calls=[
+                tool_call(
+                    "read_file",
+                    {"path": "README.md", "max_lines": 120},
+                )
+            ]
+        )
+    )
+    done = FakeResponse(FakeMessage(content="implementation complete"))
+    agent, client = make_agent(monkeypatch, [FakeToolSchemaError(), retry_read, done])
+
+    result = agent.run(AgentRunRequest(tmp_path, "inspect README"))
+
+    assert result.success is True
+    assert len(client.calls) == 3
+    retry_messages = client.calls[1]["messages"]
+    correction = next(
+        message["content"]
+        for message in reversed(retry_messages)
+        if message.get("role") == "user"
+    )
+    assert "violated the supplied tool schema" in correction
+    assert "max_lines must be at most 250" in correction
+
+
 def test_output_parse_failure_is_retried_with_tool_only_prompt(monkeypatch, tmp_path):
     class FakeOutputParseError(Exception):
         status_code = 400
