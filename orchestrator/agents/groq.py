@@ -69,9 +69,22 @@ finalization call will be made after tool use.
 _IGNORED_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", "node_modules"}
 _MAX_TOOL_TEXT = 6000
 _MAX_TOOL_RESULT_JSON = 7000
+# Keep every individual Groq request below a conservative free-tier budget.
+# The provider's rolling TPM usage is not visible before a call, so this local
+# ceiling prevents oversized requests while leaving Groq first in the
+# failover order for smaller tasks.
+_MAX_SAFE_REQUEST_TOKENS = 6000
+_TOKEN_ESTIMATE_CHARS_PER_TOKEN = 3
+_REQUEST_FIXED_OVERHEAD_TOKENS = 64
+_MIN_OUTPUT_TOKENS = 256
+_MAX_RETAINED_HISTORY_MESSAGES = 6
 
 
 class _GroqWallClockTimeout(Exception):
+    pass
+
+
+class _GroqRequestBudgetExceeded(Exception):
     pass
 
 
@@ -429,6 +442,51 @@ def _bounded_tool_result_payload(result: Any) -> dict[str, Any]:
     }
 
 
+def _compact_message_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the task and newest complete tool exchanges for the next request."""
+    if len(messages) <= _MAX_RETAINED_HISTORY_MESSAGES + 3:
+        return messages
+
+    prefix = messages[:2]
+    tail = messages[-_MAX_RETAINED_HISTORY_MESSAGES:]
+    while tail and tail[0].get("role") == "tool":
+        tail.pop(0)
+    omitted = max(0, len(messages) - len(prefix) - len(tail))
+    marker = {
+        "role": "user",
+        "content": (
+            "Earlier Groq conversation history was compacted to stay within the request budget; "
+            f"{omitted} older message(s) were omitted. Re-read project files if their details are needed."
+        ),
+    }
+    return [*prefix, marker, *tail]
+
+
+def _estimate_request_tokens(
+    messages: list[dict[str, Any]],
+    *,
+    tools: Optional[list[dict[str, Any]]] = None,
+    response_format: Optional[dict[str, Any]] = None,
+    max_tokens: int = 0,
+) -> int:
+    """Conservatively estimate one serialized Groq request before sending it."""
+    payload: dict[str, Any] = {"messages": messages}
+    if tools is not None:
+        payload["tools"] = tools
+    if response_format is not None:
+        payload["response_format"] = response_format
+    rendered = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    character_estimate = (
+        len(rendered) + _TOKEN_ESTIMATE_CHARS_PER_TOKEN - 1
+    ) // _TOKEN_ESTIMATE_CHARS_PER_TOKEN
+    return (
+        character_estimate
+        + len(messages) * 4
+        + _REQUEST_FIXED_OVERHEAD_TOKENS
+        + max(0, int(max_tokens))
+    )
+
+
 def _execute_tool(project_path: Path, name: str, raw_arguments: str) -> str:
     try:
         args = json.loads(raw_arguments or "{}")
@@ -747,13 +805,30 @@ class GroqAgent(Agent):
         tools: Optional[list[dict[str, Any]]] = None,
         response_format: Optional[dict[str, Any]] = None,
     ):
+        bounded_messages = _compact_message_history(messages)
+        messages[:] = bounded_messages
+        input_tokens = _estimate_request_tokens(
+            bounded_messages,
+            tools=tools,
+            response_format=response_format,
+        )
+        configured_output_tokens = max(1, int(self.config.max_output_tokens))
+        available_output_tokens = _MAX_SAFE_REQUEST_TOKENS - input_tokens
+        minimum_output_tokens = min(_MIN_OUTPUT_TOKENS, configured_output_tokens)
+        if available_output_tokens < minimum_output_tokens:
+            raise _GroqRequestBudgetExceeded(
+                "Groq request odhadnut na nejméně "
+                f"{input_tokens + minimum_output_tokens} tokenů přesahuje bezpečný limit "
+                f"{_MAX_SAFE_REQUEST_TOKENS} tokenů."
+            )
+        effective_output_tokens = min(configured_output_tokens, available_output_tokens)
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "service_tier": "on_demand",
             "reasoning_effort": self.config.reasoning_effort,
             "include_reasoning": False,
-            "max_tokens": self.config.max_output_tokens,
+            "max_tokens": effective_output_tokens,
         }
         if tools is not None:
             kwargs["tools"] = tools
@@ -785,6 +860,12 @@ class GroqAgent(Agent):
             thinking_tokens=usage.get("thinking_tokens"),
             total_tokens=usage.get("total_tokens"),
         )
+        if isinstance(exc, _GroqRequestBudgetExceeded):
+            return AgentRunResult(
+                **common,
+                error=f"LIMITED: {exc}",
+                limited=True,
+            )
         if _provider_rate_limit_failure(exc):
             return AgentRunResult(
                 **common,

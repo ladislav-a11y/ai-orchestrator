@@ -320,6 +320,45 @@ def test_session_context_is_reused_with_same_session_id(monkeypatch, tmp_path):
     assert second.session_id == first.session_id
 
 
+def test_request_output_budget_is_clamped_for_large_but_usable_prompt(monkeypatch, tmp_path):
+    agent, client = make_agent(monkeypatch, [FakeResponse(FakeMessage(content="done"))])
+
+    result = agent.run(AgentRunRequest(tmp_path, "x" * 9000))
+
+    assert result.success is True
+    assert 0 < client.calls[0]["max_tokens"] < 2048
+
+
+def test_request_over_safe_budget_fails_closed_before_api_call(monkeypatch, tmp_path):
+    agent, client = make_agent(monkeypatch, [])
+
+    result = agent.run(AgentRunRequest(tmp_path, "x" * 20000))
+
+    assert result.success is False
+    assert result.limited is True
+    assert "bezpečný limit" in result.error
+    assert client.calls == []
+
+
+def test_history_is_compacted_before_it_can_grow_without_bound(monkeypatch, tmp_path):
+    responses = [
+        FakeResponse(FakeMessage(tool_calls=[tool_call("git_status", {})]))
+        for _ in range(6)
+    ]
+    responses.append(FakeResponse(FakeMessage(content="done")))
+    agent, client = make_agent(monkeypatch, responses, max_tool_rounds=10)
+
+    result = agent.run(AgentRunRequest(tmp_path, "inspect the project"))
+
+    assert result.success is True
+    final_messages = client.calls[-1]["messages"]
+    assert len(final_messages) < 14
+    assert any(
+        "Earlier Groq conversation history was compacted" in (message.get("content") or "")
+        for message in final_messages
+    )
+
+
 
 def test_read_file_default_window_is_bounded_for_groq_context(tmp_path):
     path = tmp_path / "large.txt"
