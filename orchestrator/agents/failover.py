@@ -48,6 +48,10 @@ class ProviderStatus:
     # configured financial cap for this job.
     budget_exceeded: bool = False
     budget_exceeded_reason: Optional[str] = None
+    # Set by the orchestrator's own per-provider token ceiling. This is not a
+    # provider quota and must not be reported as LIMITED.
+    token_budget_exceeded: bool = False
+    token_budget_exceeded_reason: Optional[str] = None
     # Per-run marker for a structurally valid response that did not contain an
     # actual, specific independent audit (for example a generic refusal to
     # inspect the checkout). This is not a quota or protocol failure.
@@ -76,6 +80,7 @@ class FailoverAgent(Agent):
         self,
         providers: list[Agent],
         logger: Optional[logging.Logger] = None,
+        token_budgets: Optional[dict[str, int]] = None,
     ):
         if not providers:
             raise ValueError("FailoverAgent vyžaduje alespoň jednoho providera v seznamu.")
@@ -83,6 +88,12 @@ class FailoverAgent(Agent):
         self.logger = logger or logging.getLogger("orchestrator")
         self._provider_statuses: dict[str, ProviderStatus] = {}
         self._sessions: dict[str, str] = {}
+        self._token_budgets = {
+            name: max(1, int(value))
+            for name, value in (token_budgets or {}).items()
+            if value is not None
+        }
+        self._reported_tokens_by_provider: dict[str, int] = {}
         self._active_provider_index: int = 0
         self._last_notified_provider: Optional[str] = None
 
@@ -105,7 +116,9 @@ class FailoverAgent(Agent):
                     "reason": None,
                 }
                 continue
-            if status.limited:
+            if status.token_budget_exceeded:
+                state = "TOKEN_BUDGET_EXCEEDED"
+            elif status.limited:
                 state = "LIMITED"
             elif status.protocol_incompatible:
                 state = "PROTOCOL_ERROR"
@@ -126,6 +139,7 @@ class FailoverAgent(Agent):
                     or status.unavailable_reason
                     or status.protocol_incompatible_reason
                     or status.budget_exceeded_reason
+                    or status.token_budget_exceeded_reason
                     or status.audit_inadequate_reason
                 ),
             }
@@ -304,6 +318,8 @@ class FailoverAgent(Agent):
             return f"{name}: PROTOCOL_ERROR ({status.protocol_incompatible_reason})"
         if status.budget_exceeded:
             return f"{name}: BUDGET_EXCEEDED ({status.budget_exceeded_reason})"
+        if status.token_budget_exceeded:
+            return f"{name}: TOKEN_BUDGET_EXCEEDED ({status.token_budget_exceeded_reason})"
         if status.audit_inadequate:
             return f"{name}: AUDIT_INADEQUATE ({status.audit_inadequate_reason})"
         if not status.available:
@@ -326,6 +342,9 @@ class FailoverAgent(Agent):
                 continue
             if status and status.budget_exceeded:
                 notes.append(f"{p_name} (BUDGET_EXCEEDED)")
+                continue
+            if status and status.token_budget_exceeded:
+                notes.append(f"{p_name} (TOKEN_BUDGET_EXCEEDED)")
                 continue
             if status and status.audit_inadequate:
                 notes.append(f"{p_name} (AUDIT_INADEQUATE)")
@@ -375,6 +394,14 @@ class FailoverAgent(Agent):
                 )
                 self._active_provider_index += 1
                 continue
+            if status and status.token_budget_exceeded:
+                self.logger.info(
+                    "Provider '%s' je v tomto běhu již označen jako TOKEN_BUDGET_EXCEEDED, "
+                    "přeskakuji.",
+                    provider_name,
+                )
+                self._active_provider_index += 1
+                continue
             if status and status.audit_inadequate:
                 self.logger.info(
                     "Provider '%s' je v tomto běhu již označen jako věcně nedostatečný "
@@ -407,6 +434,23 @@ class FailoverAgent(Agent):
                 self._active_provider_index += 1
                 continue
 
+            token_budget = self._token_budgets.get(provider_name)
+            used_tokens = self._reported_tokens_by_provider.get(provider_name, 0)
+            if token_budget is not None and used_tokens >= token_budget:
+                reason = (
+                    f"provider {provider_name} dosáhl bezpečnostního limitu "
+                    f"{token_budget} tokenů pro tento orchestrated job"
+                )
+                self._provider_statuses[provider_name] = ProviderStatus(
+                    name=provider_name,
+                    available=True,
+                    token_budget_exceeded=True,
+                    token_budget_exceeded_reason=reason,
+                )
+                self.logger.warning("%s; přeskakuji na dalšího providera.", reason)
+                self._active_provider_index += 1
+                continue
+
             self.logger.info(
                 "Vybrán provider '%s' (z pořadí %s).",
                 provider_name,
@@ -429,6 +473,20 @@ class FailoverAgent(Agent):
                 requested_model=request.requested_model,
                 selection_reason=request.selection_reason,
                 failover_on_error=request.failover_on_error,
+                max_total_tokens=(
+                    max(0, token_budget - used_tokens)
+                    if token_budget is not None
+                    else request.max_total_tokens
+                ),
+            )
+
+            # A provider that is actually called must not remain
+            # indistinguishable from an unvisited provider in the durable
+            # snapshot. Failure branches below replace this marker with the
+            # precise terminal state.
+            self._provider_statuses[provider_name] = ProviderStatus(
+                name=provider_name,
+                available=True,
             )
 
             started_at = time.monotonic()
@@ -450,7 +508,20 @@ class FailoverAgent(Agent):
                 "cost_usd": result.cost_usd,
             }
             if any(event[key] is not None for key in event if key not in {"provider", "source"}):
-                usage_events.extend(result.usage_events or [event])
+                provider_events = result.usage_events or [event]
+                usage_events.extend(provider_events)
+                for usage_event in provider_events:
+                    event_provider = usage_event.get("provider", provider_name)
+                    event_total = usage_event.get("total_tokens")
+                    if (
+                        isinstance(event_provider, str)
+                        and isinstance(event_total, int)
+                        and not isinstance(event_total, bool)
+                    ):
+                        self._reported_tokens_by_provider[event_provider] = (
+                            self._reported_tokens_by_provider.get(event_provider, 0)
+                            + max(0, event_total)
+                        )
             if result.session_id:
                 self._sessions[provider_name] = result.session_id
 
@@ -507,6 +578,33 @@ class FailoverAgent(Agent):
                     provider_name, order_names,
                 )
                 break
+
+            if result.token_budget_exceeded:
+                reason = result.error or (
+                    f"provider {provider_name} překročil bezpečnostní tokenový limit"
+                )
+                self._provider_statuses[provider_name] = ProviderStatus(
+                    name=provider_name,
+                    available=True,
+                    token_budget_exceeded=True,
+                    token_budget_exceeded_reason=reason,
+                )
+                next_index = self._active_provider_index + 1
+                if next_index < len(self.providers):
+                    next_name = getattr(
+                        self.providers[next_index], "name", str(self.providers[next_index])
+                    )
+                    self.logger.warning(
+                        "Provider '%s' dosáhl bezpečnostního tokenového limitu: %s. "
+                        "Přepínám na providera '%s'.",
+                        provider_name, reason, next_name,
+                    )
+                    notify(
+                        f"[AI Orchestrator] Provider {provider_name} dosáhl bezpečnostního "
+                        f"tokenového limitu; přepínám na {next_name}. Důvod: {reason}"
+                    )
+                self._active_provider_index += 1
+                continue
 
             if result.limited:
                 retry_note = (
@@ -646,4 +744,5 @@ def build_failover_agent(
         "groq", "antigravity", "claude-code", "codex"
     ]
     providers = [agent_builder(name, config) for name in order]
-    return FailoverAgent(providers=providers, logger=logger)
+    token_budgets = {"groq": config.groq.max_total_tokens}
+    return FailoverAgent(providers=providers, logger=logger, token_budgets=token_budgets)

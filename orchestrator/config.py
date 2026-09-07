@@ -134,7 +134,14 @@ class GroqAgentConfig:
     free_only: bool = True
     reasoning_effort: str = "low"
     max_output_tokens: int = 2048
-    max_tool_rounds: int = 64
+    # A bounded tool loop is a second guard; the cumulative token budget is
+    # the primary protection against a long sequence of individually small
+    # requests exhausting the free account quota.
+    max_tool_rounds: int = 12
+    # Per-job hard token cap for Groq. The account's rolling daily usage is
+    # not exposed before a request, so this conservative local cap is the
+    # fail-closed boundary for one orchestrated job.
+    max_total_tokens: int = 12000
     # Defensive budget guard: Groq normally does not report cost_usd in this
     # adapter, but if cost metadata is added later any positive spend stops it.
     max_budget_usd: Optional[float] = 0.0
@@ -352,7 +359,8 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         free_only=bool(groq_raw.get("free_only", True)),
         reasoning_effort=groq_reasoning_effort,
         max_output_tokens=int(groq_raw.get("max_output_tokens", 2048)),
-        max_tool_rounds=int(groq_raw.get("max_tool_rounds", 64)),
+        max_tool_rounds=int(groq_raw.get("max_tool_rounds", 12)),
+        max_total_tokens=int(groq_raw.get("max_total_tokens", 12000)),
         max_budget_usd=groq_raw.get("max_budget_usd", 0.0),
         timeout_seconds=int(groq_raw.get("timeout_seconds", 600)),
     )
@@ -360,6 +368,8 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         raise ValueError("groq.max_output_tokens musí být > 0.")
     if groq.max_tool_rounds <= 0:
         raise ValueError("groq.max_tool_rounds musí být > 0.")
+    if groq.max_total_tokens <= 0:
+        raise ValueError("groq.max_total_tokens musí být > 0.")
     if groq.free_only and groq.model != GROQ_FREE_MODEL:
         raise ValueError(
             f"groq.free_only dovoluje pouze model {GROQ_FREE_MODEL!r}; "

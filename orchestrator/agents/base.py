@@ -45,6 +45,11 @@ class AgentRunRequest:
     # autonomous implementation requests keep the fail-closed behavior
     # unless the caller explicitly opts in.
     failover_on_error: bool = False
+    # Remaining hard token budget for this provider in the current
+    # orchestrated job. FailoverAgent fills this from its provider policy;
+    # adapters that support token-aware limits must stop before the next
+    # physical request when the budget cannot safely fit it.
+    max_total_tokens: Optional[int] = None
 
 
 @dataclass
@@ -92,6 +97,9 @@ class AgentRunResult:
     # `success` still stays False for a limited response; this is additional
     # detail, not a replacement status enum.
     limited: bool = False
+    # True when the orchestrator's own per-provider token budget stopped the
+    # call. This is distinct from a provider-reported quota/rate limit.
+    token_budget_exceeded: bool = False
     # True when the provider process exceeded its configured wall-clock
     # timeout. This is distinct from a quota limit so FailoverAgent can move
     # to the next provider without misreporting the cause as LIMITED.

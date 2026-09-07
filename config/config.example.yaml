@@ -131,7 +131,8 @@ groq:
   free_only: true
   reasoning_effort: low
   max_output_tokens: 2048
-  max_tool_rounds: 64
+  max_tool_rounds: 12
+  max_total_tokens: 12000
   max_budget_usd: 0.0
   timeout_seconds: 600
 

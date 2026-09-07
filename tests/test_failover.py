@@ -133,6 +133,10 @@ def test_failover_first_limited_second_succeeds(caplog):
     assert "retry po 60.0s" in caplog.text
     assert "Přepínám na providera 'antigravity'" in caplog.text
 
+    snapshot = agent.provider_status_snapshot()
+    assert snapshot["claude-code"]["state"] == "LIMITED"
+    assert snapshot["antigravity"]["state"] == "AVAILABLE"
+
 
 # -- 3. First provider is unavailable, second succeeds -----------------------
 
@@ -291,7 +295,32 @@ def test_provider_status_snapshot_contains_every_provider_and_absolute_retry_at(
     assert snapshot["claude-code"]["state"] == "LIMITED"
     assert snapshot["claude-code"]["retry_after_seconds"] == 60
     assert snapshot["claude-code"]["retry_at"].endswith("+00:00")
-    assert snapshot["codex"]["state"] == "NOT_ATTEMPTED"
+    assert snapshot["codex"]["state"] == "AVAILABLE"
+
+
+def test_failover_token_budget_is_central_and_triggers_normal_fallback():
+    seen_budgets = []
+
+    def p1_run(request):
+        seen_budgets.append(request.max_total_tokens)
+        return AgentRunResult(
+            success=False,
+            output_text="",
+            error="TOKEN_BUDGET_EXCEEDED: local cap",
+            token_budget_exceeded=True,
+        )
+
+    p1 = MockAgent("groq", available=True, run_fn=p1_run)
+    p2 = MockAgent("codex", available=True)
+
+    agent = FailoverAgent([p1, p2], token_budgets={"groq": 12000})
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="vytvor feature"))
+
+    assert result.success is True
+    assert seen_budgets == [12000]
+    snapshot = agent.provider_status_snapshot()
+    assert snapshot["groq"]["state"] == "TOKEN_BUDGET_EXCEEDED"
+    assert snapshot["codex"]["state"] == "AVAILABLE"
 
 
 # -- 4b. force_failover_on_protocol_error() advances past the active provider

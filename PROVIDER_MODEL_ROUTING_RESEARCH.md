@@ -179,7 +179,8 @@ nakonfigurovanou hodnotu, protože ta byla opravdu předaná přes `--model`:
     failover kvůli limitu/nedostupnosti vs. budoucí volba podle typu/složitosti
     úlohy) - jedinou nepřímou indicií je `provider_statuses` (stav KAŽDÉHO providera:
     `NOT_ATTEMPTED`/`AVAILABLE`/`LIMITED`/`PROTOCOL_ERROR`/`BUDGET_EXCEEDED`/
-    `AUDIT_INADEQUATE`/`UNAVAILABLE`), ze kterého lze **rekonstruovat**, že např.
+    `TOKEN_BUDGET_EXCEEDED`/`AUDIT_INADEQUATE`/`UNAVAILABLE`), ze kterého lze
+    **rekonstruovat**, že např.
     `gemini` byl přeskočen kvůli `LIMITED` a proto skončil aktivní `antigravity` - ale
     to není totéž jako explicitní `reason` pole u výsledného výběru.
   - `outbox/README.md` dokumentuje `provider_sequence`/`provider_statuses`/

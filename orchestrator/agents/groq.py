@@ -89,6 +89,10 @@ class _GroqRequestBudgetExceeded(Exception):
     pass
 
 
+class _GroqCumulativeTokenBudgetExceeded(_GroqRequestBudgetExceeded):
+    pass
+
+
 def _tool_schema() -> list[dict[str, Any]]:
     return [
         {
@@ -608,6 +612,20 @@ def _add_usage(total: dict[str, int], response: Any) -> None:
             total[key] = total.get(key, 0) + value
 
 
+def _usage_total_tokens(usage: dict[str, int]) -> int:
+    """Return the reported total, with a conservative field fallback."""
+    total = usage.get("total_tokens")
+    if isinstance(total, int) and not isinstance(total, bool):
+        return max(0, total)
+    return sum(
+        value
+        for key, value in usage.items()
+        if key in {"input_tokens", "output_tokens", "thinking_tokens"}
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+    )
+
+
 
 
 def _malformed_tool_arguments_failure(exc: Exception) -> bool:
@@ -849,6 +867,7 @@ class GroqAgent(Agent):
         messages: list[dict[str, Any]],
         model: str,
         remaining_seconds: float,
+        remaining_total_tokens: Optional[int],
         tools: Optional[list[dict[str, Any]]] = None,
         response_format: Optional[dict[str, Any]] = None,
     ):
@@ -874,6 +893,16 @@ class GroqAgent(Agent):
                 f"{_MAX_SAFE_REQUEST_TOKENS} tokenů."
             )
         effective_output_tokens = min(configured_output_tokens, available_output_tokens)
+        if remaining_total_tokens is not None:
+            remaining_total_tokens = max(0, int(remaining_total_tokens))
+            available_run_tokens = remaining_total_tokens - input_tokens
+            if available_run_tokens < minimum_output_tokens:
+                raise _GroqCumulativeTokenBudgetExceeded(
+                    "Groq kumulativní tokenový limit by byl překročen: další request "
+                    f"potřebuje nejméně {input_tokens + minimum_output_tokens} tokenů, "
+                    f"zbývá {remaining_total_tokens} z limitu."
+                )
+            effective_output_tokens = min(effective_output_tokens, available_run_tokens)
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -912,6 +941,12 @@ class GroqAgent(Agent):
             thinking_tokens=usage.get("thinking_tokens"),
             total_tokens=usage.get("total_tokens"),
         )
+        if isinstance(exc, _GroqCumulativeTokenBudgetExceeded):
+            return AgentRunResult(
+                **common,
+                error=f"TOKEN_BUDGET_EXCEEDED: {exc}",
+                token_budget_exceeded=True,
+            )
         if isinstance(exc, _GroqRequestBudgetExceeded):
             return AgentRunResult(
                 **common,
@@ -967,6 +1002,10 @@ class GroqAgent(Agent):
 
         started = time.monotonic()
         usage: dict[str, int] = {}
+        max_total_tokens = request.max_total_tokens
+        if max_total_tokens is None:
+            max_total_tokens = self.config.max_total_tokens
+        max_total_tokens = max(1, int(max_total_tokens))
         last_response = None
         final_content = ""
 
@@ -982,6 +1021,7 @@ class GroqAgent(Agent):
                         messages=messages,
                         model=model,
                         remaining_seconds=remaining,
+                        remaining_total_tokens=max_total_tokens - _usage_total_tokens(usage),
                         tools=_tool_schema(),
                     )
                 except Exception as exc:
@@ -1084,6 +1124,7 @@ class GroqAgent(Agent):
                     messages=messages,
                     model=model,
                     remaining_seconds=remaining,
+                    remaining_total_tokens=max_total_tokens - _usage_total_tokens(usage),
                     response_format={
                         "type": "json_schema",
                         "json_schema": {

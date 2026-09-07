@@ -95,6 +95,8 @@ def test_config_defaults_to_strict_free_groq(tmp_path):
     assert config.groq.model == GROQ_FREE_MODEL
     assert config.groq.free_only is True
     assert config.groq.max_budget_usd == 0.0
+    assert config.groq.max_tool_rounds == 12
+    assert config.groq.max_total_tokens == 12000
     assert config.provider_order == ["groq", "antigravity", "claude-code", "codex"]
 
 
@@ -376,6 +378,27 @@ def test_history_is_compacted_before_it_can_grow_without_bound(monkeypatch, tmp_
         "Earlier Groq conversation history was compacted" in (message.get("content") or "")
         for message in final_messages
     )
+
+
+def test_cumulative_token_budget_fails_closed_before_next_api_call(monkeypatch, tmp_path):
+    first = FakeResponse(
+        FakeMessage(tool_calls=[tool_call("git_status", {})]),
+        prompt=4000,
+        completion=800,
+    )
+    agent, client = make_agent(
+        monkeypatch,
+        [first, FakeResponse(FakeMessage(content="must not be called"))],
+        max_total_tokens=6000,
+    )
+
+    result = agent.run(AgentRunRequest(tmp_path, "inspect the project"))
+
+    assert result.success is False
+    assert result.token_budget_exceeded is True
+    assert result.limited is False
+    assert "TOKEN_BUDGET_EXCEEDED" in result.error
+    assert len(client.calls) == 1
 
 
 

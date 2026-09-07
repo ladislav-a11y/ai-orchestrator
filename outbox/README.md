@@ -75,8 +75,10 @@ souboru):
 - `provider_statuses` (object) - stav každého providera v tomto failover
   pořadí. Každá položka obsahuje `state`, `retry_after_seconds`, absolutní
   UTC `retry_at` (u `LIMITED`, pokud jej provider oznámil) a bezpečný
-  `reason`. `NOT_ATTEMPTED` není potvrzení dostupnosti. PM musí převzít každý
-  `LIMITED` záznam, ne pouze nejbližší společný retry.
+  `reason`. Povolené stavy zahrnují také `TOKEN_BUDGET_EXCEEDED` pro lokální
+  ochranný strop orchestrátoru; tento stav není providerová kvóta a nesmí se
+  převádět na globální `LIMITED`. `NOT_ATTEMPTED` není potvrzení dostupnosti.
+  PM musí převzít každý `LIMITED` záznam, ne pouze nejbližší společný retry.
 - `active_provider` (str|null) - poslední použitý provider z
   `provider_sequence` (ten, který běh buď dokončil, nebo na kterém čeká).
 - `active_model` (str|null) - model reportovaný `active_provider`em u jeho
