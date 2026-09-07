@@ -12,7 +12,7 @@ from pathlib import Path
 from orchestrator.autonomous import ABSOLUTE_MAX_ITERATIONS, AutonomousStatus, DEFAULT_MAX_ITERATIONS
 from orchestrator.agents.base import AgentRunRequest
 from orchestrator.agents.registry import build_agent
-from orchestrator.config import load_config
+from orchestrator.config import AVAILABLE_AGENTS, load_config
 from orchestrator.doctor import run_doctor
 from orchestrator.models import TaskStatus
 from orchestrator.service import OrchestratorService
@@ -290,6 +290,54 @@ def cmd_projects(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_provider_order(raw: str | None) -> list[str] | None:
+    if raw is None:
+        return None
+    order = [item.strip() for item in raw.split(",") if item.strip()]
+    if not order:
+        raise ValueError("--provider-order musí obsahovat alespoň jednoho providera")
+    if len(set(order)) != len(order):
+        raise ValueError("--provider-order nesmí obsahovat duplicity")
+    unknown = [item for item in order if item not in AVAILABLE_AGENTS]
+    if unknown:
+        raise ValueError(
+            "--provider-order obsahuje neznámého providera: "
+            + ", ".join(unknown)
+        )
+    return order
+
+
+def _planning_usage(result, provider: str | None = None) -> dict:
+    fields = ("input_tokens", "output_tokens", "thinking_tokens", "total_tokens", "cost_usd")
+    events = list(result.usage_events or [])
+    if not events and any(
+        getattr(result, field, None) is not None for field in fields
+    ):
+        events = [{
+            "provider": provider or getattr(result, "model_source", None) or "unknown",
+            "source": "reported",
+            **{field: getattr(result, field, None) for field in fields},
+        }]
+    by_provider = {}
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        provider = event.get("provider") or "unknown"
+        bucket = by_provider.setdefault(provider, {field: None for field in fields})
+        for field in fields:
+            value = event.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                bucket[field] = (bucket[field] or 0) + value
+        bucket["source"] = "reported"
+    total = {field: None for field in fields}
+    for bucket in by_provider.values():
+        for field in fields:
+            if bucket.get(field) is not None:
+                total[field] = (total[field] or 0) + bucket[field]
+    total["source"] = "reported" if by_provider else None
+    return {"by_provider": by_provider, "total": total}
+
+
 def cmd_plan_inbox(args: argparse.Namespace) -> int:
     """Run one read-only provider turn to structure a human Inbox request."""
     try:
@@ -298,6 +346,12 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
             raise ValueError("Inbox planner input must be a JSON object")
         recipe = _load_inbox_planning_recipe()
         config = load_config()
+        provider_order = _parse_provider_order(args.provider_order)
+        central_failover = args.agent == "auto"
+        if central_failover and args.model:
+            raise ValueError("--model nelze použít s centrálním --agent auto")
+        if not central_failover and provider_order is not None:
+            raise ValueError("--provider-order vyžaduje --agent auto")
         # Planning receives an empty disposable workspace. The provider can
         # reason over the supplied card text but cannot mutate a project
         # checkout. Provider-specific read-only modes add a second guard.
@@ -307,6 +361,11 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
             antigravity=replace(config.antigravity, mode="plan"),
             codex=replace(config.codex, sandbox_mode="read-only"),
         )
+        if central_failover:
+            safe_config = replace(
+                safe_config,
+                provider_order=provider_order or list(config.provider_order),
+            )
         if args.model:
             config_attr = {
                 "gemini": "gemini",
@@ -339,6 +398,7 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                 AgentRunRequest(
                     project_path=Path(workspace),
                     prompt=prompt,
+                    failover_on_error=central_failover,
                     output_schema={
                         "type": "object",
                         "properties": {
@@ -379,18 +439,27 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                     },
                 )
             )
+        status_snapshot = getattr(agent, "provider_status_snapshot", lambda: {})()
+        if not isinstance(status_snapshot, dict):
+            status_snapshot = {}
+        active_provider = getattr(agent, "active_provider_name", None) or args.agent
+        provider_sequence = list(status_snapshot) or [active_provider]
+        model_config = getattr(safe_config, args.agent.replace("-", "_"), None)
         output = {
             "success": result.success,
-            "provider": args.agent,
+            "provider": active_provider,
+            "selected_provider": args.agent,
+            "active_provider": active_provider,
             # The PM deliberately does not pass --model for provider-owned
             # selection.  Report the model the provider actually returned;
             # only fall back to configured argv state when the provider did
             # not expose a receipt model (e.g. a mocked/legacy CLI).
-            "model": result.model or getattr(
-                getattr(safe_config, args.agent.replace("-", "_"), None),
-                "model",
-                None,
-            ),
+            "model": result.model or getattr(model_config, "model", None),
+            "active_model": result.model or getattr(model_config, "model", None),
+            "provider_sequence": provider_sequence,
+            "provider_statuses": status_snapshot,
+            "selection_reason": result.selection_reason,
+            "usage": _planning_usage(result, active_provider),
             "output": result.output_text,
             "error": result.error,
             "unavailable": result.unavailable,
@@ -489,8 +558,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_projects.set_defaults(func=cmd_projects)
 
     p_plan = sub.add_parser("plan-inbox", help="AI read-only příprava lidského Inbox požadavku")
-    p_plan.add_argument("--agent", required=True, choices=["gemini", "antigravity", "claude-code", "codex", "groq"])
+    p_plan.add_argument("--agent", required=True, choices=["auto", "gemini", "antigravity", "claude-code", "codex", "groq"])
     p_plan.add_argument("--model", help="Přesný model vybraného plánovacího providera")
+    p_plan.add_argument(
+        "--provider-order",
+        help="Pořadí providerů pro centrální --agent auto, oddělené čárkami",
+    )
     p_plan.set_defaults(func=cmd_plan_inbox)
 
     return parser

@@ -429,6 +429,36 @@ def test_failover_normal_error_does_not_trigger_failover(caplog):
     assert "Přepínám na providera" not in caplog.text
 
 
+def test_failover_structured_request_can_retry_provider_error(caplog):
+    caplog.set_level(logging.INFO)
+
+    p1 = MockAgent(
+        "groq",
+        available=True,
+        run_fn=lambda request: AgentRunResult(
+            success=False,
+            output_text="",
+            error="provider returned invalid structured output",
+        ),
+    )
+    p2 = MockAgent("codex", available=True)
+
+    agent = FailoverAgent([p1, p2])
+    result = agent.run(
+        AgentRunRequest(
+            project_path=Path("."),
+            prompt="plan Inbox request",
+            failover_on_error=True,
+        )
+    )
+
+    assert result.success is True
+    assert len(p1.run_calls) == 1
+    assert len(p2.run_calls) == 1
+    assert agent.provider_status_snapshot()["groq"]["state"] == "UNAVAILABLE"
+    assert "centrální failover" in caplog.text
+
+
 def test_failover_timeout_switches_provider(caplog):
     caplog.set_level(logging.INFO)
 

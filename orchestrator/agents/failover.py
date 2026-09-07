@@ -428,6 +428,7 @@ class FailoverAgent(Agent):
                 output_schema=request.output_schema,
                 requested_model=request.requested_model,
                 selection_reason=request.selection_reason,
+                failover_on_error=request.failover_on_error,
             )
 
             started_at = time.monotonic()
@@ -557,6 +558,31 @@ class FailoverAgent(Agent):
 
                 self._active_provider_index += 1
                 continue
+
+            if not result.success and request.failover_on_error:
+                self._provider_statuses[provider_name] = ProviderStatus(
+                    name=provider_name,
+                    available=False,
+                    unavailable_reason=result.error or "provider returned an error",
+                )
+                next_index = self._active_provider_index + 1
+                if next_index < len(self.providers):
+                    next_name = getattr(
+                        self.providers[next_index], "name", str(self.providers[next_index])
+                    )
+                    self.logger.warning(
+                        "Provider '%s' vrátil chybu pro centrální failover: %s. "
+                        "Přepínám na providera '%s'.",
+                        provider_name,
+                        result.error or "neznámá chyba",
+                        next_name,
+                    )
+                    notify(
+                        f"[AI Orchestrator] Provider {provider_name} vrátil chybu; "
+                        f"přepínám na {next_name}. Důvod: {result.error or 'neznámá chyba'}"
+                    )
+                    self._active_provider_index = next_index
+                    continue
 
             # Normal result (success=True or ordinary error with limited=False)
             result.usage_events = usage_events or result.usage_events

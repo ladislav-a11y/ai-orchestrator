@@ -213,6 +213,54 @@ def test_plan_inbox_accepts_groq_and_returns_json_envelope(monkeypatch, capsys):
     assert seen["project_path"].name.startswith("ai-orchestrator-inbox-plan-")
 
 
+def test_plan_inbox_auto_uses_central_failover_and_returns_receipt(monkeypatch, capsys):
+    seen = {}
+
+    class PlanningFailoverAgent(Agent):
+        name = "failover"
+        active_provider_name = "codex"
+
+        def is_available(self):
+            return True, "central failover"
+
+        def provider_status_snapshot(self):
+            return {
+                "groq": {"state": "UNAVAILABLE", "reason": "structured output"},
+                "codex": {"state": "AVAILABLE", "reason": None},
+            }
+
+        def run(self, request):
+            seen["request"] = request
+            return AgentRunResult(
+                success=True,
+                output_text=json.dumps({"tasks": [{"scope": "one task"}]}),
+                model="gpt-5.6-mini",
+                selection_reason="failover: groq -> codex",
+            )
+
+    monkeypatch.setattr(cli, "build_agent", lambda name, config: PlanningFailoverAgent())
+    monkeypatch.setattr(cli, "load_config", lambda: Config())
+    monkeypatch.setattr(
+        cli.sys,
+        "stdin",
+        io.StringIO(json.dumps({"card": {"name": "central planner"}})),
+    )
+
+    assert cli.main([
+        "plan-inbox",
+        "--agent", "auto",
+        "--provider-order", "groq,codex",
+    ]) == 0
+
+    envelope = json.loads(capsys.readouterr().out)
+    assert seen["request"].failover_on_error is True
+    assert envelope["provider"] == "codex"
+    assert envelope["selected_provider"] == "auto"
+    assert envelope["provider_sequence"] == ["groq", "codex"]
+    assert envelope["provider_statuses"]["groq"]["state"] == "UNAVAILABLE"
+    assert envelope["selection_reason"] == "failover: groq -> codex"
+
+
 def test_plan_inbox_fails_closed_when_recipe_is_missing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_INBOX_PLANNING_RECIPE_PATH", tmp_path / "missing.md")
     monkeypatch.setattr(

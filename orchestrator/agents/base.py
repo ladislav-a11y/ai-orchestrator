@@ -40,6 +40,11 @@ class AgentRunRequest:
     # can echo it (or be overridden with the actual failover reason, see
     # FailoverAgent).
     selection_reason: Optional[str] = None
+    # Central failover may retry a provider-specific execution error for
+    # structured, read-only operations such as Inbox planning. Ordinary
+    # autonomous implementation requests keep the fail-closed behavior
+    # unless the caller explicitly opts in.
+    failover_on_error: bool = False
 
 
 @dataclass
