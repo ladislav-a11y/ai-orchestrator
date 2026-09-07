@@ -490,6 +490,56 @@ def test_rate_limit_maps_to_limited_and_retry_after(monkeypatch, tmp_path):
     assert "LIMITED" in result.error
 
 
+
+def test_groq_413_rate_limit_code_maps_to_limited(monkeypatch, tmp_path):
+    class FakeProviderLimit(Exception):
+        status_code = 413
+
+        def __init__(self):
+            super().__init__("request too large for TPM limit")
+            self.body = {
+                "error": {
+                    "message": "Request too large for model on tokens per minute",
+                    "type": "tokens",
+                    "code": "rate_limit_exceeded",
+                }
+            }
+            self.response = SimpleNamespace(headers={})
+
+    agent, _ = make_agent(monkeypatch, [FakeProviderLimit()])
+
+    result = agent.run(AgentRunRequest(tmp_path, "do work"))
+
+    assert result.success is False
+    assert result.limited is True
+    assert result.unavailable is False
+    assert result.retry_after_seconds is None
+    assert "LIMITED" in result.error
+
+
+def test_generic_413_without_rate_limit_code_is_not_limited(monkeypatch, tmp_path):
+    class FakePayloadError(Exception):
+        status_code = 413
+
+        def __init__(self):
+            super().__init__("payload too large")
+            self.body = {
+                "error": {
+                    "message": "payload too large",
+                    "code": "payload_too_large",
+                }
+            }
+
+    agent, _ = make_agent(monkeypatch, [FakePayloadError()])
+
+    result = agent.run(AgentRunRequest(tmp_path, "do work"))
+
+    assert result.success is False
+    assert result.limited is False
+    assert result.unavailable is False
+    assert "payload too large" in result.error
+
+
 def test_authentication_error_is_unavailable_not_limited(monkeypatch, tmp_path):
     class FakeAuthError(Exception):
         pass

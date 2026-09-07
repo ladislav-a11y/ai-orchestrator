@@ -611,6 +611,30 @@ def _schema_finalization_instructions(output_schema: dict[str, Any]) -> str:
     return " ".join(instructions)
 
 
+
+def _provider_rate_limit_failure(exc: Exception) -> bool:
+    """Recognize Groq provider quota/rate-limit errors even when HTTP status is not 429."""
+    if isinstance(exc, RateLimitError) or getattr(exc, "status_code", None) == 429:
+        return True
+
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        response = getattr(exc, "response", None)
+        json_method = getattr(response, "json", None)
+        if callable(json_method):
+            try:
+                body = json_method()
+            except Exception:  # noqa: BLE001 - provider diagnostics are best-effort
+                body = None
+    if not isinstance(body, dict):
+        return False
+
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return False
+    return str(error.get("code") or "").casefold() == "rate_limit_exceeded"
+
+
 def _retry_after_seconds(exc: Exception) -> Optional[float]:
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None)
@@ -720,8 +744,7 @@ class GroqAgent(Agent):
             thinking_tokens=usage.get("thinking_tokens"),
             total_tokens=usage.get("total_tokens"),
         )
-        status_code = getattr(exc, "status_code", None)
-        if isinstance(exc, RateLimitError) or status_code == 429:
+        if _provider_rate_limit_failure(exc):
             return AgentRunResult(
                 **common,
                 error=f"LIMITED: {exc}",
