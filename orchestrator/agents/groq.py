@@ -67,7 +67,8 @@ finalization call will be made after tool use.
 """ + NO_COMMIT_INSTRUCTION
 
 _IGNORED_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", "node_modules"}
-_MAX_TOOL_TEXT = 20000
+_MAX_TOOL_TEXT = 6000
+_MAX_TOOL_RESULT_JSON = 7000
 
 
 class _GroqWallClockTimeout(Exception):
@@ -102,7 +103,7 @@ def _tool_schema() -> list[dict[str, Any]]:
                     "properties": {
                         "path": {"type": "string"},
                         "start_line": {"type": "integer", "minimum": 1},
-                        "max_lines": {"type": "integer", "minimum": 1, "maximum": 1000},
+                        "max_lines": {"type": "integer", "minimum": 1, "maximum": 250},
                         "line_start": {
                             "type": "integer",
                             "minimum": 1,
@@ -257,10 +258,10 @@ def _tool_read_file(project_path: Path, args: dict[str, Any]) -> dict[str, Any]:
         end = int(args.get("line_end", start + 399))
         if end < start:
             raise ValueError("line_end must be greater than or equal to line_start")
-        max_lines = min(1000, end - start + 1)
+        max_lines = min(250, end - start + 1)
     else:
         start = max(1, int(args.get("start_line", 1)))
-        max_lines = min(1000, max(1, int(args.get("max_lines", 400))))
+        max_lines = min(250, max(1, int(args.get("max_lines", 120))))
 
     selected = lines[start - 1 : start - 1 + max_lines]
     rendered = "\n".join(f"{start + i}: {line}" for i, line in enumerate(selected))
@@ -387,6 +388,47 @@ _TOOL_HANDLERS = {
 }
 
 
+
+def _bounded_tool_result_payload(result: Any) -> dict[str, Any]:
+    """Return a valid JSON payload that cannot dominate later Groq requests."""
+    payload = {"ok": True, "result": result}
+    rendered = json.dumps(payload, ensure_ascii=False)
+    if len(rendered) <= _MAX_TOOL_RESULT_JSON:
+        return payload
+
+    marker = "\n...[tool output truncated for Groq context budget]..."
+    if isinstance(result, dict):
+        compact = dict(result)
+        for field in ("text", "output"):
+            value = compact.get(field)
+            if isinstance(value, str):
+                available = max(0, _MAX_TOOL_RESULT_JSON - 500 - len(marker))
+                compact[field] = value[:available] + marker
+                compact["truncated"] = True
+                payload = {"ok": True, "result": compact}
+                if len(json.dumps(payload, ensure_ascii=False)) <= _MAX_TOOL_RESULT_JSON:
+                    return payload
+
+        for field in ("results", "entries"):
+            value = compact.get(field)
+            if isinstance(value, list):
+                compact[field] = list(value)
+                while compact[field]:
+                    compact[field] = compact[field][:-1]
+                    compact["truncated"] = True
+                    payload = {"ok": True, "result": compact}
+                    if len(json.dumps(payload, ensure_ascii=False)) <= _MAX_TOOL_RESULT_JSON:
+                        return payload
+
+    return {
+        "ok": True,
+        "result": {
+            "truncated": True,
+            "summary": "Tool output omitted because it exceeded the Groq context budget.",
+        },
+    }
+
+
 def _execute_tool(project_path: Path, name: str, raw_arguments: str) -> str:
     try:
         args = json.loads(raw_arguments or "{}")
@@ -396,7 +438,7 @@ def _execute_tool(project_path: Path, name: str, raw_arguments: str) -> str:
         if handler is None:
             raise ValueError(f"unknown tool: {name}")
         result = handler(project_path, args)
-        return json.dumps({"ok": True, "result": result}, ensure_ascii=False)
+        return json.dumps(_bounded_tool_result_payload(result), ensure_ascii=False)
     except Exception as exc:  # noqa: BLE001 - tool errors are data for the model
         return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
 

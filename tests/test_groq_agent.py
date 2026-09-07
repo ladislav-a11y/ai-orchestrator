@@ -320,6 +320,40 @@ def test_session_context_is_reused_with_same_session_id(monkeypatch, tmp_path):
     assert second.session_id == first.session_id
 
 
+
+def test_read_file_default_window_is_bounded_for_groq_context(tmp_path):
+    path = tmp_path / "large.txt"
+    path.write_text("".join(f"line-{i:04d} " + ("x" * 80) + "\n" for i in range(1, 401)), encoding="utf-8")
+
+    result = json.loads(
+        _execute_tool(tmp_path, "read_file", json.dumps({"path": "large.txt"}))
+    )
+
+    assert result["ok"] is True
+    assert result["result"]["truncated"] is True
+    assert result["result"]["total_lines"] == 400
+    assert len(json.dumps(result, ensure_ascii=False)) <= groq_module._MAX_TOOL_RESULT_JSON
+
+
+def test_large_search_result_is_compacted_as_valid_json(tmp_path):
+    for i in range(80):
+        (tmp_path / f"file-{i:03d}.txt").write_text(
+            "needle " + ("payload " * 100) + "\n",
+            encoding="utf-8",
+        )
+
+    raw = _execute_tool(
+        tmp_path,
+        "search_text",
+        json.dumps({"query": "needle", "max_results": 80}),
+    )
+    result = json.loads(raw)
+
+    assert result["ok"] is True
+    assert result["result"]["truncated"] is True
+    assert len(raw) <= groq_module._MAX_TOOL_RESULT_JSON
+
+
 def test_read_file_accepts_line_start_and_line_end_aliases(tmp_path):
     path = tmp_path / "sample.txt"
     path.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
