@@ -1137,18 +1137,22 @@ def _build_audit_prompt(
         "Pro KAŽDÝ bod si sám urči, jaký druh ověření je pro jeho povahu skutečně vypovídající "
         "- neexistuje jedna univerzální metoda pro všechny body:",
         "- Je-li bod o chování aplikace/služby, ověř ji za běhu (runtime/live spuštění, "
-        "end-to-end scénář) - samotné přečtení kódu nestačí.",
+        "end-to-end scénář) - samotné přečtení kódu nestačí. Toto ověření je odpovědnost "
+        "auditora: sám zvol a proveď vlastní runtime scénář, případně použij dočasný "
+        "testovací harness mimo cílový repozitář a po ověření ho odstraň.",
         "- Je-li bod o artefaktu (soubor, dokument, konfigurační šablona), ověř jeho existenci "
         "a skutečný obsah, ne jen že commit/PR existuje.",
         "- Je-li bod o integraci, konfiguraci, Gitu nebo CI, ověř skutečný aktuální stav (git "
         "log/diff/status, obsah konfigurace, výstup CI) - ne popis v poznámkách nebo tvrzení "
         "implementačního agenta.",
         "Nezávisle over každý bod (přečti relevantní soubory/diff, případně spusť ověřovací "
-        "krok, nespoléhej na poznámky z předchozích iterací) - NEIMPLEMENTUJ nic nového, nic "
-        "neměň. Pokud najdeš bod, který ve skutečnosti splněný není, uveď jeho index. Pokud bod "
-        "nelze žádnou dostupnou metodou nezávisle ověřit (aplikace se nedá spustit, artefakt "
-        "neexistuje, integrace není dostupná), NIKDY ho neoznačuj jako accepted=true - "
-        "neověřitelný bod zůstává accepted=false.",
+        "krok, nespoléhej na poznámky z předchozích iterací) - NEIMPLEMENTUJ nic nového v "
+        "cílovém repozitáři a nic v něm neměň. To, že implementační agent nebo PM nepřipravil "
+        "regresní či klikací runtime test, není samo o sobě důkaz nesplnění; nevyžaduj takový "
+        "artefakt od implementace a test si pro audit připrav/proveď sám. Pokud najdeš bod, "
+        "který ve skutečnosti splněný není, uveď jeho index. Pokud potřebný runtime není "
+        "dostupný, uveď konkrétně `runtime: nedostupné` a accepted=false, ale netvrď, že "
+        "implementace selhala pouze kvůli absenci předem připraveného testu.",
         "",
         "Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný "
         "markdown blok, žádný text před ani za ním) přesně v tomto tvaru:",

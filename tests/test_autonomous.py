@@ -1987,7 +1987,11 @@ def test_audit_prompt_instructs_category_specific_verification_method():
     assert "artefakt" in prompt
     assert "git" in prompt.lower()
     assert '"method"' in prompt
-    assert "neověřitelný bod zůstává accepted=false" in prompt
+    assert "accepted=false" in prompt
+    assert "odpovědnost auditora" in prompt
+    assert "implementační agent nebo PM nepřipravil" in prompt
+    assert "test si pro audit připrav/proveď sám" in prompt
+    assert "runtime: nedostupné" in prompt
 
 
 def test_run_autonomous_waits_when_provider_is_limited(tmp_path):
