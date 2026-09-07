@@ -60,7 +60,9 @@ Make minimal changes directly in the project to satisfy the user's task. For a s
 an existing file, prefer replace_text over rewriting the whole file with write_file. Tool
 arguments must be valid JSON and must contain raw file content, never line-numbered read_file
 output. Never claim a change without verifying it by reading the resulting file or Git diff.
-Do not attempt to run tests;
+The only tools available in this request are list_files, read_file, search_text, write_file,
+replace_text, git_status, and git_diff. Never invent or request run_code, shell, exec, pytest,
+python, or any other tool that is not in that list. Do not attempt to run tests;
 the orchestrator runs them independently after you return. Do not attempt Git commit/push or
 history rewriting. Never access paths outside the supplied project root. When the work is done,
 return a concise final result. If the caller requires a JSON schema, a separate schema-constrained
@@ -814,6 +816,41 @@ def _error_body(exc: Exception) -> Optional[dict[str, Any]]:
     return body if isinstance(body, dict) else None
 
 
+def _unsupported_tool_name(exc: Exception) -> Optional[str]:
+    """Return a model-requested tool name rejected by Groq's tool contract.
+
+    Groq rejects this at the API boundary, before the adapter receives a tool
+    call that it could safely execute. Treating it as a provider-unavailable
+    result lets the central failover move on without adding an unsafe generic
+    execution tool or spending repeated retries on the same incompatibility.
+    """
+    body = _error_body(exc)
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict) or error.get("code") != "tool_use_failed":
+        return None
+    message = str(error.get("message") or "")
+    if "not in request.tools" not in message.casefold():
+        return None
+
+    failed_generation = error.get("failed_generation")
+    if isinstance(failed_generation, str):
+        try:
+            generation = json.loads(failed_generation)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            generation = None
+        if isinstance(generation, dict):
+            name = generation.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+
+    match = re.search(
+        r"attempted\s+to\s+call\s+tool\s+['\"]?([^'\"\s]+)",
+        message,
+        re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else "unknown"
+
+
 def _duration_from_text(text: str) -> Optional[float]:
     """Parse Groq's compact retry text, for example ``21m7.488s``."""
     matches = re.findall(r"(\d+(?:\.\d+)?)\s*(h|m|s)", text.casefold())
@@ -1026,6 +1063,16 @@ class GroqAgent(Agent):
                 limited=True,
                 retry_after_seconds=retry_after_seconds,
                 quota_snapshot=_quota_snapshot(exc, retry_after_seconds),
+            )
+        unsupported_tool = _unsupported_tool_name(exc)
+        if unsupported_tool:
+            return AgentRunResult(
+                **common,
+                error=(
+                    "PROVIDER_INCOMPATIBLE: Groq model requested unsupported tool "
+                    f"{unsupported_tool!r}; no generic code-execution tool is available"
+                ),
+                unavailable=True,
             )
         if isinstance(exc, (APITimeoutError, _GroqWallClockTimeout)):
             return AgentRunResult(**common, error=str(exc), timed_out=True)

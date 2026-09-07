@@ -650,6 +650,38 @@ def test_output_parse_failure_is_retried_with_tool_only_prompt(monkeypatch, tmp_
     assert "Do not narrate your plan" in correction
 
 
+def test_unsupported_tool_call_is_provider_incompatibility_without_retry(monkeypatch, tmp_path):
+    class FakeUnsupportedToolError(Exception):
+        status_code = 400
+
+        def __init__(self):
+            super().__init__("tool call validation failed")
+            self.body = {
+                "error": {
+                    "message": (
+                        "Tool call validation failed: attempted to call tool 'run_code' "
+                        "which was not in request.tools"
+                    ),
+                    "type": "invalid_request_error",
+                    "code": "tool_use_failed",
+                    "failed_generation": (
+                        '{"name":"run_code","arguments":{"code":"pytest -q"}}'
+                    ),
+                }
+            }
+
+    agent, client = make_agent(monkeypatch, [FakeUnsupportedToolError()])
+
+    result = agent.run(AgentRunRequest(tmp_path, "proveď změnu"))
+
+    assert result.success is False
+    assert result.unavailable is True
+    assert result.limited is False
+    assert "PROVIDER_INCOMPATIBLE" in result.error
+    assert "run_code" in result.error
+    assert len(client.calls) == 1
+
+
 def test_rate_limit_maps_to_limited_and_retry_after(monkeypatch, tmp_path):
     class FakeRateLimit(Exception):
         status_code = 429
