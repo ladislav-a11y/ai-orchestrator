@@ -23,13 +23,17 @@
         "model_usage.modelId"
       ],
       "identity_response_paths": ["item.text"],
+      "exact_verification_rule": "Přesné použití požadovaného modelu je potvrzené pouze tehdy, když metadata nebo odpověď identity probe přesně odpovídají požadovanému model_id. Obecné označení rodiny, například gpt-5 místo gpt-5.6-luna, je MISMATCH, nikoli potvrzení.",
       "limit_behavior": "I při chybové události nejdříve použij metadata z předchozích i aktuální události; pokud chybí, model zůstává unknown a chyba se předává beze změny.",
       "future_update_rule": "Při změně Codex JSONL událostí uprav nejprve response_paths/identity_response_paths a command; Python nemá obsahovat další pevné názvy polí."
     },
     "model_catalog": {
-      "method": "not_available_in_cli",
-      "command": null,
-      "output_format": null,
+      "method": "cli_command",
+      "command": "codex debug models",
+      "arguments": ["debug", "models"],
+      "output_format": "JSON object with model entries in models[]; each entry uses slug as the exact model ID",
+      "response_path": "models",
+      "model_id_field": "slug",
       "inference": false
     },
     "model_selection": {

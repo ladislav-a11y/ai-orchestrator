@@ -219,6 +219,53 @@ def _reported_model(
     return None, None
 
 
+def _identity_model_verification(
+    events: list[dict], requested_model: str
+) -> tuple[Optional[str], Optional[str], dict[str, Any]]:
+    """Return the reported model and an exact identity-probe verdict.
+
+    A normal work result may retain the requested/configured model when the
+    CLI omits model metadata. An identity probe must never do that: text such
+    as ``gpt-5`` is not proof that ``gpt-5.6-luna`` was used.
+    """
+    reported_model, _ = _reported_model(events)
+    if not reported_model:
+        identity_paths = _identity_contract()["model_discovery"].get(
+            "identity_response_paths", []
+        )
+        for event in events:
+            candidate = model_from_paths([event], identity_paths)
+            if candidate:
+                reported_model = candidate.strip()
+                break
+
+    requested_model = requested_model.strip()
+    if not reported_model:
+        status = "UNVERIFIED"
+        detail = "Codex v identifikační odpovědi neuvedl model."
+    elif requested_model and reported_model != requested_model:
+        status = "MISMATCH"
+        detail = (
+            f"Codex nahlásil {reported_model!r}, ale požadován byl "
+            f"{requested_model!r}; přesná shoda nebyla potvrzena."
+        )
+    elif requested_model:
+        status = "MATCH"
+        detail = f"Codex přesně nahlásil požadovaný model {requested_model!r}."
+    else:
+        status = "REPORTED"
+        detail = f"Codex nahlásil model {reported_model!r}; požadovaný model nebyl zadán."
+
+    verification = {
+        "status": status,
+        "exact_match": status == "MATCH" if requested_model else None,
+        "requested_model": requested_model or None,
+        "reported_model": reported_model,
+        "detail": detail,
+    }
+    return reported_model, ("reported" if reported_model else None), verification
+
+
 def _detect_quota_limit(raw: dict, error_text: str) -> tuple[bool, Optional[float]]:
     haystack = " ".join(str(part) for part in (raw.get("message"), error_text) if part).lower()
     if not any(marker in haystack for marker in QUOTA_LIMIT_MARKERS):
@@ -387,32 +434,171 @@ class CodexAgent(Agent):
             }
 
         events = _iter_events(proc.stdout)
-        model, model_source = _reported_model(events, effective_model, bool(effective_model))
-        if not model:
-            identity_paths = _identity_contract()["model_discovery"].get("identity_response_paths", [])
-            for event in events:
-                model = model_from_paths([event], identity_paths)
-                if model:
-                    model_source = "reported"
-                    break
-        full_response = {"events": events, "stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode}
+        model, model_source, model_verification = _identity_model_verification(
+            events, effective_model
+        )
+        full_response = {
+            "events": events,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "returncode": proc.returncode,
+            "model_verification": model_verification,
+        }
+        response = (
+            model_verification["detail"]
+            if model_verification["status"] != "REPORTED"
+            else (model or proc.stderr.strip() or note)
+        )
         return {
             "available": proc.returncode == 0 and bool(events),
-            "response": model or proc.stderr.strip() or note,
+            "response": response,
             "model": model,
             "model_source": model_source,
+            "model_verification": model_verification,
             "probe_kind": "identity_request",
             "full_response": full_response,
         }
 
     def list_models(self) -> dict[str, Any]:
-        """The installed Codex CLI exposes --model but no model catalog command."""
+        """Read the account-scoped catalog exposed by the installed Codex CLI."""
+        catalog = _identity_contract().get("model_catalog")
+        if not isinstance(catalog, dict) or catalog.get("method") != "cli_command":
+            return {
+                "state": "UNKNOWN",
+                "source": "langcodex.json",
+                "models": [],
+                "reason": "langcodex.json nepopisuje dostupný katalogový příkaz.",
+                "full_response": {"catalog_contract": catalog},
+            }
+        arguments = catalog.get("arguments")
+        response_path = catalog.get("response_path")
+        model_id_field = catalog.get("model_id_field")
+        if (
+            not isinstance(arguments, list)
+            or not all(isinstance(argument, str) and argument.strip() for argument in arguments)
+            or not isinstance(response_path, str)
+            or not response_path.strip()
+            or not isinstance(model_id_field, str)
+            or not model_id_field.strip()
+        ):
+            return {
+                "state": "ERROR",
+                "source": "langcodex.json",
+                "models": [],
+                "reason": "langcodex.json má neplatný popis katalogového výstupu.",
+                "full_response": {"catalog_contract": catalog},
+            }
+        if not self._cli_path:
+            return {
+                "state": "UNKNOWN",
+                "source": "codex debug models",
+                "models": [],
+                "reason": self._detect_note,
+                "full_response": {"catalog_command": "codex debug models"},
+            }
+
+        command = [*_codex_command_prefix(self._cli_path), *arguments]
+        for forbidden in FORBIDDEN_FLAGS:
+            assert forbidden not in command
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=str(Path.cwd()),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "state": "ERROR",
+                "source": "codex debug models",
+                "models": [],
+                "reason": f"Čtení katalogu Codexu vypršelo po 30 sekundách: {exc}",
+                "full_response": {"exception_type": type(exc).__name__, "exception": str(exc)},
+            }
+        except Exception as exc:  # pragma: no cover - defensive
+            return {
+                "state": "ERROR",
+                "source": "codex debug models",
+                "models": [],
+                "reason": f"Čtení katalogu Codexu selhalo: {exc}",
+                "full_response": {"exception_type": type(exc).__name__, "exception": str(exc)},
+            }
+
+        full_response = {
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "returncode": proc.returncode,
+        }
+        if proc.returncode != 0:
+            return {
+                "state": "ERROR",
+                "source": "codex debug models",
+                "models": [],
+                "reason": f"codex debug models selhalo (kód {proc.returncode}): {proc.stderr.strip()}",
+                "full_response": full_response,
+            }
+        try:
+            payload = json.loads(proc.stdout)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            return {
+                "state": "ERROR",
+                "source": "codex debug models",
+                "models": [],
+                "reason": f"codex debug models vrátil neplatný JSON: {exc}",
+                "full_response": full_response,
+            }
+
+        models_value: Any = payload
+        for part in response_path.split("."):
+            if not isinstance(models_value, dict) or part not in models_value:
+                return {
+                    "state": "ERROR",
+                    "source": "codex debug models",
+                    "models": [],
+                    "reason": f"V katalogu chybí response_path {response_path!r}.",
+                    "full_response": {**full_response, "payload": payload},
+                }
+            models_value = models_value[part]
+        if not isinstance(models_value, list):
+            return {
+                "state": "ERROR",
+                "source": "codex debug models",
+                "models": [],
+                "reason": f"Katalogová cesta {response_path!r} neobsahuje seznam.",
+                "full_response": {**full_response, "payload": payload},
+            }
+
+        models: list[dict[str, Any]] = []
+        for entry in models_value:
+            if not isinstance(entry, dict):
+                return {
+                    "state": "ERROR",
+                    "source": "codex debug models",
+                    "models": [],
+                    "reason": "Katalog obsahuje položku, která není JSON objektem.",
+                    "full_response": {**full_response, "payload": payload},
+                }
+            model_id = entry.get(model_id_field)
+            if not isinstance(model_id, str) or not model_id.strip():
+                return {
+                    "state": "ERROR",
+                    "source": "codex debug models",
+                    "models": [],
+                    "reason": f"Katalogová položka nemá platné ID v poli {model_id_field!r}.",
+                    "full_response": {**full_response, "payload": payload},
+                }
+            normalized = dict(entry)
+            normalized["id"] = model_id.strip()
+            models.append(normalized)
         return {
-            "state": "UNKNOWN",
-            "source": "codex --help",
-            "models": [],
-            "reason": "Instalovaný Codex CLI neposkytuje katalogový příkaz; modely se nesmí domýšlet.",
-            "full_response": {"catalog_command": None},
+            "state": "REPORTED",
+            "source": "codex debug models",
+            "models": models,
+            "reason": f"Codex nahlásil {len(models)} modelů.",
+            "full_response": {**full_response, "payload": payload},
         }
 
     def _effective_model(self, request: AgentRunRequest) -> tuple[str, bool]:

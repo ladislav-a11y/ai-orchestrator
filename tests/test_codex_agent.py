@@ -97,6 +97,104 @@ def test_command_uses_exec_json_and_safe_sandbox():
     assert "--output-schema" not in cmd
 
 
+def test_list_models_reads_debug_catalog_from_lang_contract(monkeypatch):
+    agent = CodexAgent(make_config())
+    captured = {}
+    payload = {
+        "models": [
+            {
+                "slug": "gpt-5.6-sol",
+                "display_name": "GPT-5.6-Sol",
+                "visibility": "list",
+                "supported_reasoning_levels": [{"effort": "low"}],
+            },
+            {
+                "slug": "codex-auto-review",
+                "display_name": "Codex Auto Review",
+                "visibility": "hide",
+            },
+        ]
+    }
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            cmd,
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.list_models()
+
+    assert result["state"] == "REPORTED"
+    assert result["source"] == "codex debug models"
+    assert [model["id"] for model in result["models"]] == [
+        "gpt-5.6-sol",
+        "codex-auto-review",
+    ]
+    assert result["models"][0]["slug"] == "gpt-5.6-sol"
+    assert result["models"][0]["supported_reasoning_levels"] == [{"effort": "low"}]
+    assert captured["cmd"][1:] == ["debug", "models"]
+    assert captured["kwargs"]["timeout"] == 30
+
+
+def test_identity_probe_reports_exact_model_match_without_fallback(monkeypatch):
+    agent = CodexAgent(make_config(model="gpt-5.6-luna"))
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    fake_stdout = jsonl(
+        {"type": "thread.started", "thread_id": "thread-match"},
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "gpt-5.6-luna"},
+        },
+        {"type": "turn.completed"},
+    )
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[cmd.index("--model") + 1] == "gpt-5.6-luna"
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = agent.probe_identity()
+
+    assert result["available"] is True
+    assert result["model"] == "gpt-5.6-luna"
+    assert result["model_source"] == "reported"
+    assert result["model_verification"]["status"] == "MATCH"
+    assert result["model_verification"]["exact_match"] is True
+
+
+def test_identity_probe_does_not_claim_requested_model_on_generic_response(monkeypatch):
+    agent = CodexAgent(make_config(model="gpt-5.6-luna"))
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    fake_stdout = jsonl(
+        {"type": "thread.started", "thread_id": "thread-mismatch"},
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "gpt-5"},
+        },
+        {"type": "turn.completed"},
+    )
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[cmd.index("--model") + 1] == "gpt-5.6-luna"
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = agent.probe_identity()
+
+    assert result["available"] is True
+    assert result["model"] == "gpt-5"
+    assert result["model_source"] == "reported"
+    assert result["model_verification"]["status"] == "MISMATCH"
+    assert result["model_verification"]["exact_match"] is False
+    assert "přesná shoda nebyla potvrzena" in result["response"]
+
+
 def test_run_enforces_and_cleans_up_output_schema(monkeypatch):
     agent = CodexAgent(make_config())
     monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
