@@ -77,6 +77,8 @@ Invocation contract (do not weaken this without updating AGENTS.md too):
 
 from __future__ import annotations
 
+# Jazykový kontrakt vstupu a výstupu tohoto providera: viz langcodex.json.
+
 import hashlib
 import inspect
 import json
@@ -86,9 +88,9 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult
+from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, model_from_paths
 from orchestrator.config import CODEX_ALLOWED_SANDBOX_MODES, CodexAgentConfig
 
 FORBIDDEN_FLAGS = (
@@ -96,6 +98,26 @@ FORBIDDEN_FLAGS = (
     "--yolo",
     "--dangerously-bypass-hook-trust",
 )
+
+
+def _identity_contract() -> dict[str, Any]:
+    contract = json.loads(
+        Path(__file__).with_name("langcodex.json").read_text(encoding="utf-8")
+    )
+    probe = contract["identity_probe"]
+    if not isinstance(probe, dict):
+        raise ValueError("langcodex.json neobsahuje identity_probe objekt")
+    prompt = probe.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("langcodex.json neobsahuje identity_probe.prompt")
+    sandbox = probe.get("sandbox")
+    if not isinstance(sandbox, str) or not sandbox.strip():
+        raise ValueError("langcodex.json neobsahuje identity_probe.sandbox")
+    discovery = probe.get("model_discovery")
+    paths = discovery.get("response_paths") if isinstance(discovery, dict) else None
+    if not isinstance(paths, list) or not all(isinstance(path, str) and path.strip() for path in paths):
+        raise ValueError("langcodex.json neobsahuje model_discovery.response_paths")
+    return probe
 
 # Substrings that, seen anywhere in an "error" event's message text,
 # indicate a quota/rate/session limit rather than an ordinary failure.
@@ -181,18 +203,14 @@ def _reported_model(
 
     See AntigravityAgent._reported_model for the model_source rationale.
     """
+    discovery = _identity_contract()["model_discovery"]
     names: list[str] = []
     for event in events:
-        candidates = [event]
-        for key in ("usage", "model_usage"):
-            value = event.get(key)
-            if isinstance(value, dict):
-                candidates.append(value)
-        for source in candidates:
-            for key in ("model", "model_id", "modelId"):
-                value = source.get(key)
-                if isinstance(value, str) and value.strip() and value.strip() not in names:
-                    names.append(value.strip())
+        model = model_from_paths([event], discovery["response_paths"])
+        if model:
+            for value in model.split(", "):
+                if value not in names:
+                    names.append(value)
     if names:
         return ", ".join(names), "reported"
     effective_model = effective_model.strip()
@@ -314,6 +332,88 @@ class CodexAgent(Agent):
         if proc.returncode != 0:
             return False, f"'{self._cli_path} --version' selhalo (kod {proc.returncode}): {proc.stderr.strip()}"
         return True, f"{proc.stdout.strip()} ({self._detect_note}; launcher={' '.join(command)})"
+
+    def probe_identity(self) -> dict[str, Any]:
+        available, note = self.is_available()
+        if not available:
+            return {
+                "available": False,
+                "response": note,
+                "model": None,
+                "model_source": None,
+                "probe_kind": "version_only",
+                "full_response": {"available": False, "response": note},
+            }
+
+        assert self._cli_path
+        project_path = Path.cwd()
+        effective_model = self.config.model.strip()
+        identity_probe = _identity_contract()
+        command = [
+            *_codex_command_prefix(self._cli_path),
+            "exec",
+            "--json",
+            "--cd",
+            str(project_path),
+            "--ignore-user-config",
+            "--sandbox",
+            identity_probe["sandbox"],
+            "--skip-git-repo-check",
+        ]
+        if effective_model:
+            command += ["--model", effective_model]
+        command += ["-"]
+        for forbidden in FORBIDDEN_FLAGS:
+            assert forbidden not in command
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=str(project_path),
+                input=identity_probe["prompt"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=min(60, max(15, self.config.timeout_seconds)),
+            )
+        except Exception as exc:
+            return {
+                "available": False,
+                "response": f"Identifikační probe Codex selhal: {exc}",
+                "model": None,
+                "model_source": None,
+                "probe_kind": "identity_request",
+                "full_response": {"exception_type": type(exc).__name__, "exception": str(exc)},
+            }
+
+        events = _iter_events(proc.stdout)
+        model, model_source = _reported_model(events, effective_model, bool(effective_model))
+        if not model:
+            identity_paths = _identity_contract()["model_discovery"].get("identity_response_paths", [])
+            for event in events:
+                model = model_from_paths([event], identity_paths)
+                if model:
+                    model_source = "reported"
+                    break
+        full_response = {"events": events, "stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode}
+        return {
+            "available": proc.returncode == 0 and bool(events),
+            "response": model or proc.stderr.strip() or note,
+            "model": model,
+            "model_source": model_source,
+            "probe_kind": "identity_request",
+            "full_response": full_response,
+        }
+
+    def list_models(self) -> dict[str, Any]:
+        """The installed Codex CLI exposes --model but no model catalog command."""
+        return {
+            "state": "UNKNOWN",
+            "source": "codex --help",
+            "models": [],
+            "reason": "Instalovaný Codex CLI neposkytuje katalogový příkaz; modely se nesmí domýšlet.",
+            "full_response": {"catalog_command": None},
+        }
 
     def _effective_model(self, request: AgentRunRequest) -> tuple[str, bool]:
         """Return (model_to_pass, was_explicitly_requested) - see

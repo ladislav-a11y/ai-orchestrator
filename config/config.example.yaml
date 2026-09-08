@@ -111,18 +111,6 @@ codex:
   # Po kolika sekundách bez odpovědi orchestrátor běh Codexu ukončí.
   timeout_seconds: 600
 
-# Nastavení Gemini CLI. Gemini je headless provider s explicitním modelem
-# dostupným ve free tieru; API klíč dodává GEMINI_API_KEY v prostředí.
-gemini:
-  cli_path: ""
-  model: gemini-2.5-flash
-  # api-key = free AI Studio key from GEMINI_API_KEY; oauth-personal is opt-in.
-  auth_mode: api-key
-  approval_mode: auto_edit
-  # Fail fast when Google rejects the project/model; do not hold the PM
-  # implementation slot for the generic ten-minute provider timeout.
-  timeout_seconds: 60
-
 # Nastavení Groq API providera. Groq je první provider v auto/failover pořadí.
 # Tento adapter je striktně free-only: používá pouze ověřený GPT-OSS 120B model,
 # on-demand service tier a při vyčerpání free kvóty vrací LIMITED pro failover.

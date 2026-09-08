@@ -13,6 +13,28 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+def model_from_paths(sources: list[dict[str, Any]], paths: list[str]) -> Optional[str]:
+    """Return the first provider-reported model found in configured JSON paths."""
+    for source in sources:
+        for path in paths:
+            value: Any = source
+            for part in path.split("."):
+                if not isinstance(value, dict) or part not in value:
+                    value = None
+                    break
+                value = value[part]
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if (
+                isinstance(value, dict)
+                and path.rsplit(".", 1)[-1] in {"modelUsage", "model_usage"}
+            ):
+                names = [str(name).strip() for name in value if str(name).strip()]
+                if names:
+                    return ", ".join(names)
+    return None
+
+
 @dataclass
 class AgentRunRequest:
     project_path: Path
@@ -33,6 +55,10 @@ class AgentRunRequest:
     # value is rejected by the underlying CLI like any other bad --model
     # value, surfacing as an ordinary AgentRunResult(success=False, ...).
     requested_model: Optional[str] = None
+    # Capabilities the caller requires from the provider for this request.
+    # A provider with a declared capability set must be rejected before its
+    # API is called when it cannot satisfy these requirements.
+    required_capabilities: frozenset[str] = field(default_factory=frozenset)
     # Opaque, caller-supplied reason for this provider/model request (e.g.
     # "explicit_agent", "default_agent", or a PM-owned task-classification
     # tag). The orchestrator never interprets or validates this string - it
@@ -114,6 +140,10 @@ class AgentRunResult:
     # state). This is distinct from LIMITED so failover can continue without
     # falsely reporting quota exhaustion.
     unavailable: bool = False
+    # True when the provider cannot satisfy the request's declared
+    # capabilities. This is distinct from local/account unavailability and
+    # from provider quota/rate limits.
+    capability_incompatible: bool = False
     # Seconds to wait before retrying, when the provider's own response
     # includes that information. None if unknown/not provided.
     retry_after_seconds: Optional[float] = None
@@ -132,7 +162,7 @@ class AgentRunResult:
     # Machine-passable reason for the ACTUAL provider selection this result
     # represents. Single-provider adapters echo AgentRunRequest.selection_reason
     # unchanged (they have no extra insight of their own). FailoverAgent
-    # overrides this with the real mechanism (e.g. "failover: gemini LIMITED
+    # overrides this with the real mechanism (e.g. "failover: groq LIMITED
     # -> antigravity") whenever it advanced past another provider first, so a
     # caller never has to reconstruct the reason from provider_statuses.
     selection_reason: Optional[str] = None
@@ -142,6 +172,10 @@ class Agent(ABC):
     """Base class for any implementation agent (Claude Code, Codex, ...)."""
 
     name: str = "base-agent"
+    # None means the adapter does not publish a capability contract and the
+    # central failover must not guess. Concrete adapters may publish a finite
+    # set to enable fail-closed preflight checks.
+    supported_capabilities: Optional[frozenset[str]] = None
 
     @abstractmethod
     def is_available(self) -> tuple[bool, str]:

@@ -12,7 +12,6 @@ from orchestrator.agents.antigravity import AntigravityAgent
 from orchestrator.agents.base import Agent
 from orchestrator.agents.claude_code import ClaudeCodeAgent
 from orchestrator.agents.codex import CodexAgent
-from orchestrator.agents.gemini import GeminiAgent
 from orchestrator.agents.groq import GroqAgent
 from orchestrator.config import AVAILABLE_AGENTS, Config
 
@@ -24,28 +23,24 @@ def build_agent(name: str, config: Config) -> Agent:
         return AntigravityAgent(config.antigravity)
     if name == "codex":
         return CodexAgent(config.codex)
-    if name == "gemini":
-        return GeminiAgent(config.gemini)
     if name == "groq":
         return GroqAgent(config.groq)
-    if name in ("auto", "failover"):
-        from orchestrator.agents.failover import build_failover_agent
-        return build_failover_agent(config)
+    if name == "provider-broker":
+        from orchestrator.provider_broker import build_provider_broker
+        return build_provider_broker(config)
     raise ValueError(
         f"Neznámý agent '{name}'. Podporované jsou: {', '.join(AVAILABLE_AGENTS)}."
     )
 
 
-def build_failover_agent(
+def build_provider_broker(
     config: Config,
-    provider_order: list[str] | None = None,
     logger=None,
     agent_builder=None,
 ) -> Agent:
-    from orchestrator.agents.failover import build_failover_agent as _build
+    from orchestrator.provider_broker import build_provider_broker as _build
     return _build(
         config,
-        provider_order=provider_order,
         logger=logger,
         agent_builder=agent_builder,
     )

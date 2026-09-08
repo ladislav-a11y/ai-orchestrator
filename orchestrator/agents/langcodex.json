@@ -1,0 +1,110 @@
+{
+  "contract_version": 1,
+  "provider": "codex",
+  "adapter": "codex.py",
+  "purpose": "Převod společného vstupu AO na neinteraktivní Codex CLI a převod JSONL odpovědi zpět do AO.",
+  "identity_probe": {
+    "method": "probe_identity",
+    "kind": "identity_request",
+    "sandbox": "read-only",
+    "command": "codex exec --json --cd <project_path> --ignore-user-config --sandbox <identity_probe.sandbox> --skip-git-repo-check [--model <configured_model>] -",
+    "prompt": "This is a read-only provider identity probe. Do not inspect files, use tools, edit files, or perform any work. Reply only with the exact model identifier currently used for this response.",
+    "model_discovery": {
+      "instruction": "Nejdřív čti model potvrzený v JSONL metadatech událostí; při limitu zachovej error/turn.failed a hledej model i v již přijatých událostech. Text agent_message se jako model používá jen v samostatném identity probe.",
+      "response_paths": [
+        "model",
+        "model_id",
+        "modelId",
+        "usage.model",
+        "usage.model_id",
+        "usage.modelId",
+        "model_usage.model",
+        "model_usage.model_id",
+        "model_usage.modelId"
+      ],
+      "identity_response_paths": ["item.text"],
+      "limit_behavior": "I při chybové události nejdříve použij metadata z předchozích i aktuální události; pokud chybí, model zůstává unknown a chyba se předává beze změny.",
+      "future_update_rule": "Při změně Codex JSONL událostí uprav nejprve response_paths/identity_response_paths a command; Python nemá obsahovat další pevné názvy polí."
+    },
+    "model_catalog": {
+      "method": "not_available_in_cli",
+      "command": null,
+      "output_format": null,
+      "inference": false
+    },
+    "model_selection": {
+      "method": "cli_argument",
+      "argument": "--model",
+      "value": "přesný model_id doložený providerem",
+      "aliases": false,
+      "ignore_user_config_in_probe": true,
+      "unknown_catalog_rule": "Bez autentizovaného katalogu se modely nesmí domýšlet."
+    },
+    "behavior": "Po kontrole verze provede pouze read-only identifikační dotaz v JSONL režimu a z událostí přečte model."
+  },
+  "input_from_ao": {
+    "type": "AgentRunRequest",
+    "fields": {
+      "project_path": "Pracovní projekt použitý jako cwd i --cd.",
+      "prompt": "Zadání práce.",
+      "context": "Nepovinný doplňující kontext.",
+      "output_schema": "Nepovinné JSON Schema uložené do dočasného souboru a předané přes --output-schema.",
+      "requested_model": "Nepovinný model předaný přes --model.",
+      "session_id": "Vstupní hodnota relace; současný adaptér ji nepoužívá pro exec resume a spouští nový neinteraktivní běh."
+    }
+  },
+  "translation_to_provider": {
+    "command": "codex exec --json --cd <project_path> --ignore-user-config ... -",
+    "prompt_transport": "Prompt se posílá na standardní vstup, nikoli do argumentu příkazové řádky.",
+    "optional_arguments": [
+      "--sandbox",
+      "--approve-for-me",
+      "--model",
+      "--output-schema"
+    ]
+  },
+  "input_from_provider": {
+    "format": "JSONL události",
+    "events": {
+      "thread.started": "ID relace.",
+      "item.completed s agent_message": "Poslední text provideru.",
+      "turn.completed nebo task_complete": "Dokončení.",
+      "error nebo turn.failed": "Chyba."
+    }
+  },
+  "output_to_ao": {
+    "success": {
+      "type": "AgentRunResult",
+      "conditions": [
+        "dokončený běh",
+        "poslední zpráva je dostupná"
+      ],
+      "fields": [
+        "success=True",
+        "poslední zpráva",
+        "raw_response.events",
+        "session_id",
+        "model",
+        "usage"
+      ]
+    },
+    "failure": {
+      "success": false,
+      "fields": [
+        "error",
+        "raw_response",
+        "limited",
+        "retry_after_seconds"
+      ],
+      "conditions": [
+        "chybová událost",
+        "neúplný výstup",
+        "neplatná JSONL událost",
+        "timeout",
+        "nulové rozpoznané události",
+        "chyba spuštění"
+      ],
+      "rule": "Provider nikdy nehlásí úspěch bez dokončovací události."
+    }
+  }
+}

@@ -22,6 +22,8 @@ Invocation contract (do not weaken this without updating AGENTS.md too):
 
 from __future__ import annotations
 
+# Jazykový kontrakt vstupu a výstupu tohoto providera: viz langclaude-code.json.
+
 import json
 import os
 import re
@@ -29,9 +31,9 @@ from datetime import datetime, timedelta
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult
+from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, model_from_paths
 from orchestrator.config import ClaudeCodeAgentConfig
 from orchestrator.hooks.test_command_guard import read_saved_attempts
 
@@ -40,6 +42,26 @@ FORBIDDEN_FLAGS = (
     "--allow-dangerously-skip-permissions",
 )
 FORBIDDEN_PERMISSION_MODE = "bypassPermissions"
+
+
+def _identity_contract() -> dict[str, Any]:
+    contract = json.loads(
+        Path(__file__).with_name("langclaude-code.json").read_text(encoding="utf-8")
+    )
+    probe = contract["identity_probe"]
+    if not isinstance(probe, dict):
+        raise ValueError("langclaude-code.json neobsahuje identity_probe objekt")
+    prompt = probe.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("langclaude-code.json neobsahuje identity_probe.prompt")
+    permission_mode = probe.get("permission_mode")
+    if not isinstance(permission_mode, str) or not permission_mode.strip():
+        raise ValueError("langclaude-code.json neobsahuje identity_probe.permission_mode")
+    discovery = probe.get("model_discovery")
+    paths = discovery.get("response_paths") if isinstance(discovery, dict) else None
+    if not isinstance(paths, list) or not all(isinstance(path, str) and path.strip() for path in paths):
+        raise ValueError("langclaude-code.json neobsahuje model_discovery.response_paths")
+    return probe
 
 # Committing is the orchestrator's job (runner.py/_maybe_commit,
 # autonomous.py/_commit_if_ready), done through its own Git layer only after
@@ -170,18 +192,8 @@ def _reported_model(raw: dict, usage: dict) -> Optional[str]:
     configured catalog value here: missing provider evidence must remain
     visibly unknown.
     """
-    for source in (raw, usage):
-        for key in ("model", "model_id", "modelId"):
-            value = source.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-
-    model_usage = raw.get("modelUsage")
-    if isinstance(model_usage, dict):
-        names = [str(name).strip() for name in model_usage if str(name).strip()]
-        if names:
-            return ", ".join(names)
-    return None
+    discovery = _identity_contract()["model_discovery"]
+    return model_from_paths([raw, usage], discovery["response_paths"])
 
 
 def _version_key(folder_name: str) -> tuple:
@@ -271,6 +283,93 @@ class ClaudeCodeAgent(Agent):
         if proc.returncode != 0:
             return False, f"'{self._cli_path} --version' selhalo (kod {proc.returncode}): {proc.stderr.strip()}"
         return True, f"{proc.stdout.strip()} ({self._detect_note})"
+
+    def probe_identity(self) -> dict[str, Any]:
+        available, note = self.is_available()
+        if not available:
+            return {
+                "available": False,
+                "response": note,
+                "model": None,
+                "model_source": None,
+                "probe_kind": "version_only",
+                "full_response": {"available": False, "response": note},
+            }
+
+        assert self._cli_path
+        project_path = Path.cwd()
+        effective_model = self.config.model.strip()
+        identity_probe = _identity_contract()
+        command = [
+            self._cli_path,
+            "-p",
+            identity_probe["prompt"],
+            "--output-format",
+            "json",
+            "--permission-mode",
+            identity_probe["permission_mode"],
+        ]
+        if effective_model:
+            command += ["--model", effective_model]
+        if self.config.max_budget_usd:
+            command += ["--max-budget-usd", str(self.config.max_budget_usd)]
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=str(project_path),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=min(60, max(15, self.config.timeout_seconds)),
+            )
+        except Exception as exc:
+            return {
+                "available": False,
+                "response": f"Identifikační probe Claude Code selhal: {exc}",
+                "model": None,
+                "model_source": None,
+                "probe_kind": "identity_request",
+                "full_response": {"exception_type": type(exc).__name__, "exception": str(exc)},
+            }
+
+        try:
+            raw = json.loads(proc.stdout)
+        except (json.JSONDecodeError, ValueError):
+            raw = None
+        if not isinstance(raw, dict):
+            return {
+                "available": False,
+                "response": proc.stdout.strip() or proc.stderr.strip(),
+                "model": None,
+                "model_source": None,
+                "probe_kind": "identity_request",
+                "full_response": {"stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode},
+            }
+        usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
+        model = _reported_model(raw, usage)
+        if not model and not bool(raw.get("is_error")):
+            identity_paths = _identity_contract()["model_discovery"].get("identity_response_paths", [])
+            model = model_from_paths([raw], identity_paths)
+        return {
+            "available": proc.returncode == 0 and not bool(raw.get("is_error")),
+            "response": raw.get("result") or raw.get("error") or note,
+            "model": model or (effective_model or None),
+            "model_source": "reported" if model else ("configured" if effective_model else None),
+            "probe_kind": "identity_request",
+            "usage": usage,
+            "full_response": raw,
+        }
+
+    def list_models(self) -> dict[str, Any]:
+        """The installed Claude Code CLI has no authenticated catalog command."""
+        return {
+            "state": "UNKNOWN",
+            "source": "claude --help",
+            "models": [],
+            "reason": "Instalovaná Claude Code CLI neposkytuje katalogový příkaz; modely se nesmí domýšlet.",
+            "full_response": {"catalog_command": None},
+        }
 
     def _effective_model(self, request: AgentRunRequest) -> tuple[str, bool]:
         """Return (model_to_pass, was_explicitly_requested).

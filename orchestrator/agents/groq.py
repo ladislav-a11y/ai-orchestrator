@@ -11,6 +11,8 @@ owned by the orchestrator pipeline.
 
 from __future__ import annotations
 
+# Jazykový kontrakt vstupu a výstupu tohoto providera: viz langgroq.json.
+
 import json
 import os
 import re
@@ -22,7 +24,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult
+from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, model_from_paths
 from orchestrator.config import GROQ_FREE_MODEL, GroqAgentConfig
 
 try:
@@ -76,6 +78,18 @@ _MAX_TOOL_RESULT_JSON = 5000
 # rolling usage of the account is not visible before a call, so keep a fixed
 # request margin and let a real 429 continue through normal failover.
 _GROQ_TPM_LIMIT_TOKENS = 8000
+
+
+def _model_discovery_paths() -> list[str]:
+    contract = json.loads(
+        Path(__file__).with_name("langgroq.json").read_text(encoding="utf-8")
+    )
+    probe = contract.get("identity_probe")
+    discovery = probe.get("model_discovery") if isinstance(probe, dict) else None
+    paths = discovery.get("response_paths") if isinstance(discovery, dict) else None
+    if not isinstance(paths, list) or not all(isinstance(path, str) and path.strip() for path in paths):
+        raise ValueError("langgroq.json neobsahuje model_discovery.response_paths")
+    return paths
 _GROQ_REQUEST_SAFETY_MARGIN_TOKENS = 512
 _MAX_SAFE_REQUEST_TOKENS = _GROQ_TPM_LIMIT_TOKENS - _GROQ_REQUEST_SAFETY_MARGIN_TOKENS
 _TOKEN_ESTIMATE_CHARS_PER_TOKEN = 3
@@ -923,6 +937,17 @@ def _retry_after_seconds(exc: Exception) -> Optional[float]:
 
 class GroqAgent(Agent):
     name = "groq"
+    supported_capabilities = frozenset(
+        {
+            "list_files",
+            "read_file",
+            "search_text",
+            "write_file",
+            "replace_text",
+            "git_status",
+            "git_diff",
+        }
+    )
 
     def __init__(self, config: GroqAgentConfig):
         self.config = config
@@ -940,6 +965,54 @@ class GroqAgent(Agent):
         if not os.environ.get("GROQ_API_KEY", "").strip():
             return False, "Chybí proměnná prostředí GROQ_API_KEY."
         return True, f"Groq API připraveno (model {self.config.model}, free_only={self.config.free_only})."
+
+    def probe_identity(self) -> dict[str, Any]:
+        available, response = self.is_available()
+        return {
+            "available": available,
+            "response": response,
+            "model": self.config.model if available else None,
+            "model_source": "configured" if available else None,
+            "probe_kind": "local_configuration",
+            "full_response": {"available": available, "response": response},
+        }
+
+    def list_models(self) -> dict[str, Any]:
+        """Read Groq's model metadata endpoint; this is not inference."""
+        available, note = self.is_available()
+        if not available:
+            return {
+                "state": "UNKNOWN",
+                "source": "groq.models.list",
+                "models": [],
+                "reason": note,
+                "full_response": {"available": False, "response": note},
+            }
+        try:
+            response = self._client_for(self.config.timeout_seconds).models.list()
+            models = []
+            for item in getattr(response, "data", []) or []:
+                if hasattr(item, "model_dump"):
+                    value = item.model_dump(exclude_none=True)
+                else:
+                    value = {"id": getattr(item, "id", None)}
+                if isinstance(value, dict) and isinstance(value.get("id"), str) and value["id"].strip():
+                    models.append(value)
+            return {
+                "state": "REPORTED",
+                "source": "groq.models.list",
+                "models": models,
+                "reason": f"Groq nahlásil {len(models)} modelů.",
+                "full_response": {"data": models},
+            }
+        except Exception as exc:
+            return {
+                "state": "ERROR",
+                "source": "groq.models.list",
+                "models": [],
+                "reason": f"Katalog Groq selhal: {exc}",
+                "full_response": {"exception_type": type(exc).__name__, "exception": str(exc)},
+            }
 
     def _effective_model(self, request: AgentRunRequest) -> tuple[Optional[str], Optional[str], Optional[str]]:
         requested = (request.requested_model or "").strip()
@@ -1073,6 +1146,7 @@ class GroqAgent(Agent):
                     f"{unsupported_tool!r}; no generic code-execution tool is available"
                 ),
                 unavailable=True,
+                capability_incompatible=True,
             )
         if isinstance(exc, (APITimeoutError, _GroqWallClockTimeout)):
             return AgentRunResult(**common, error=str(exc), timed_out=True)
@@ -1255,7 +1329,11 @@ class GroqAgent(Agent):
                 final_content = getattr(assistant_message, "content", None) or ""
 
             self._sessions[session_id] = messages
-            reported_model = getattr(last_response, "model", None) if last_response else None
+            response_dict = _response_dict(last_response) if last_response else None
+            reported_model = model_from_paths(
+                [response_dict] if response_dict else [],
+                _model_discovery_paths(),
+            )
             return AgentRunResult(
                 success=True,
                 output_text=final_content,

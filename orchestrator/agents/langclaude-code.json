@@ -1,0 +1,100 @@
+{
+  "contract_version": 1,
+  "provider": "claude-code",
+  "adapter": "claude_code.py",
+  "purpose": "Převod společného vstupu AO na neinteraktivní CLI Claude Code a převod odpovědi zpět do AO.",
+  "identity_probe": {
+    "method": "probe_identity",
+    "kind": "identity_request",
+    "permission_mode": "plan",
+    "command": "claude -p <identity_probe.prompt> --output-format json --permission-mode <identity_probe.permission_mode> [--model <configured_model>]",
+    "prompt": "This is a read-only provider identity probe. Do not inspect files, use tools, edit files, or perform any work. Reply only with the exact model identifier currently used for this response.",
+    "model_discovery": {
+      "instruction": "Nejdřív čti model potvrzený providerem z přímých polí nebo klíčů modelUsage; při limitu zachovej api_error_status a celý result/error. Pokud modelUsage chybí nebo je prázdné, výsledek je unknown; --model je pouze configured/requested.",
+      "response_paths": [
+        "model",
+        "model_id",
+        "modelId",
+        "modelUsage"
+      ],
+      "identity_response_paths": ["result"],
+      "limit_behavior": "I při is_error nebo 429 nejdříve přečti response_paths; text result/error není model, pokud provider neposkytl samostatná modelová metadata.",
+      "future_update_rule": "Při změně Claude Code JSON výstupu uprav nejprve tento seznam a jeho command/format; Python nemá obsahovat další pevné názvy polí."
+    },
+    "model_catalog": {
+      "method": "not_available_in_cli",
+      "command": null,
+      "output_format": null,
+      "inference": false
+    },
+    "model_selection": {
+      "method": "cli_argument",
+      "argument": "--model",
+      "fallback_argument": "--fallback-model",
+      "value": "přesný model_id nebo providerem doložený alias",
+      "aliases": true,
+      "unknown_catalog_rule": "Bez autentizovaného katalogu se modely nesmí domýšlet."
+    },
+    "behavior": "Po kontrole verze provede pouze read-only identifikační dotaz v CLI JSON režimu a z odpovědi přečte model."
+  },
+  "input_from_ao": {
+    "type": "AgentRunRequest",
+    "fields": {
+      "project_path": "Pracovní adresář procesu.",
+      "prompt": "Zadání práce.",
+      "context": "Nepovinný doplňující kontext.",
+      "session_id": "Nepovinné ID pro pokračování přes --resume.",
+      "output_schema": "Společné vstupní pole AO; současný adaptér ho nepředává Claude CLI jako samostatný parametr, takže požadavek na strukturu musí být součástí promptu.",
+      "requested_model": "Nepovinný model předaný pouze pro tento běh."
+    }
+  },
+  "translation_to_provider": {
+    "command": "claude -p <prompt> --output-format json",
+    "optional_arguments": [
+      "--resume",
+      "--permission-mode",
+      "--model",
+      "allowed_tools",
+      "disallowed_tools",
+      "configured_cli_limit"
+    ],
+    "prompt": "Obsahuje původní zadání, případný kontext a instrukce provideru."
+  },
+  "input_from_provider": {
+    "format": "Platný JSON objekt",
+    "fields": [
+      "is_error",
+      "result",
+      "session_id",
+      "usage",
+      "modelUsage",
+      "total_cost_usd",
+      "permission_denials"
+    ]
+  },
+  "output_to_ao": {
+    "success": {
+      "type": "AgentRunResult",
+      "fields": [
+        "success=True",
+        "result jako text",
+        "raw_response",
+        "session_id",
+        "model",
+        "usage"
+      ]
+    },
+    "failure": {
+      "success": false,
+      "fields": [
+        "error",
+        "raw_response",
+        "permission_denials",
+        "permission_denial_details",
+        "limited",
+        "retry_after_seconds"
+      ],
+      "rule": "Při is_error, neplatném JSONu, timeoutu nebo nemožnosti spustit CLI se vrací success=False; chybový JSON se nepovažuje za splněný úkol."
+    }
+  }
+}

@@ -676,6 +676,7 @@ def test_unsupported_tool_call_is_provider_incompatibility_without_retry(monkeyp
 
     assert result.success is False
     assert result.unavailable is True
+    assert result.capability_incompatible is True
     assert result.limited is False
     assert "PROVIDER_INCOMPATIBLE" in result.error
     assert "run_code" in result.error

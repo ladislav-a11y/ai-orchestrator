@@ -144,13 +144,6 @@ def test_default_provider_order():
     assert cfg.provider_order == ["groq", "antigravity", "claude-code", "codex"]
 
 
-def test_gemini_defaults_to_explicit_free_tier_model_and_safe_approval_mode():
-    cfg = load_config(EXAMPLE, create_if_missing=False)
-    assert cfg.gemini.model == "gemini-2.5-flash"
-    assert cfg.gemini.approval_mode == "auto_edit"
-    assert cfg.gemini.auth_mode == "api-key"
-
-
 def test_custom_provider_order_parsed(tmp_path):
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(

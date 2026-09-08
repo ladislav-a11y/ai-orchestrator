@@ -1,0 +1,98 @@
+{
+  "contract_version": 1,
+  "provider": "antigravity",
+  "adapter": "antigravity.py",
+  "purpose": "Převod společného vstupu AO na neinteraktivní CLI agy a převod odpovědi zpět do AO.",
+  "identity_probe": {
+    "method": "probe_identity",
+    "kind": "identity_request",
+    "command_mode": "plan",
+    "command": "agy --add-dir <project_path> --print <identity_probe.prompt> --output-format json --mode <identity_probe.command_mode> [--model <configured_model>]",
+    "prompt": "This is a read-only provider identity probe. Do not inspect files, use tools, edit files, or perform any work. Reply only with the exact model identifier currently used for this response.",
+    "model_discovery": {
+      "instruction": "Nejdřív čti model potvrzený providerem z odpovědi; při limitu zachovej přímá metadata a quota/reset chybu. Pokud provider model nepotvrdí, výsledek je unknown; --model je pouze configured/requested.",
+      "response_paths": [
+        "model",
+        "model_id",
+        "modelId",
+        "usage.model",
+        "usage.model_id",
+        "usage.modelId",
+        "init.model",
+        "init.model_id",
+        "init.modelId"
+      ],
+      "identity_response_paths": ["response"],
+      "limit_behavior": "I při status ERROR nebo quota limitu nejdříve přečti response_paths; při chybějícím modelu nehádej a ponech model unknown.",
+      "future_update_rule": "Při změně CLI nebo modelového výstupu uprav nejprve tento seznam a příslušný command/format; Python nemá obsahovat další pevné názvy polí."
+    },
+    "model_catalog": {
+      "method": "cli_command",
+      "command": "agy models",
+      "output_format": "řádek: model_id TAB display_name",
+      "inference": false
+    },
+    "model_selection": {
+      "method": "cli_argument",
+      "argument": "--model",
+      "value": "přesný model_id z brokerovy poznámky",
+      "aliases": false
+    },
+    "behavior": "Po kontrole verze provede pouze read-only identifikační dotaz v CLI JSON režimu a z odpovědi přečte model."
+  },
+  "input_from_ao": {
+    "type": "AgentRunRequest",
+    "fields": {
+      "project_path": "Pracovní projekt přidaný do CLI přes --add-dir.",
+      "prompt": "Zadání práce.",
+      "context": "Nepovinný kontext připojený k zadání.",
+      "session_id": "Nepovinné ID předané jako --conversation.",
+      "requested_model": "Nepovinný model předaný jako --model."
+    }
+  },
+  "translation_to_provider": {
+    "command": "agy --add-dir <project_path> --print <prompt> --output-format json",
+    "optional_arguments": [
+      "--conversation",
+      "--mode",
+      "--model"
+    ],
+    "prompt": "Obsahuje původní zadání, případný kontext a instrukce provideru.",
+    "working_directory": "project_path"
+  },
+  "input_from_provider": {
+    "format": "Jeden JSON objekt",
+    "fields": [
+      "status",
+      "response",
+      "error",
+      "conversation_id",
+      "usage",
+      "model"
+    ],
+    "success_condition": "Pouze status == SUCCESS znamená úspěch."
+  },
+  "output_to_ao": {
+    "success": {
+      "type": "AgentRunResult",
+      "fields": [
+        "success=True",
+        "response jako text",
+        "raw_response",
+        "conversation_id",
+        "model",
+        "usage"
+      ]
+    },
+    "failure": {
+      "success": false,
+      "fields": [
+        "error",
+        "raw_response",
+        "limited",
+        "retry_after_seconds"
+      ],
+      "rule": "Při jiném statusu, neplatném JSONu, timeoutu nebo nemožnosti spustit CLI se vrací success=False a konkrétní error."
+    }
+  }
+}

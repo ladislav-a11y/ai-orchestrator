@@ -49,14 +49,16 @@ Invocation contract (do not weaken this without updating AGENTS.md too):
 
 from __future__ import annotations
 
+# Jazykový kontrakt vstupu a výstupu tohoto providera: viz langantigravity.json.
+
 import json
 import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult
+from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, model_from_paths
 from orchestrator.config import ANTIGRAVITY_ALLOWED_MODES, AntigravityAgentConfig
 
 FORBIDDEN_FLAGS = (
@@ -65,6 +67,26 @@ FORBIDDEN_FLAGS = (
 )
 
 SUCCESS_STATUS = "SUCCESS"
+
+
+def _identity_contract() -> dict[str, Any]:
+    contract = json.loads(
+        Path(__file__).with_name("langantigravity.json").read_text(encoding="utf-8")
+    )
+    probe = contract["identity_probe"]
+    if not isinstance(probe, dict):
+        raise ValueError("langantigravity.json neobsahuje identity_probe objekt")
+    prompt = probe.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("langantigravity.json neobsahuje identity_probe.prompt")
+    mode = probe.get("command_mode")
+    if not isinstance(mode, str) or not mode.strip():
+        raise ValueError("langantigravity.json neobsahuje identity_probe.command_mode")
+    discovery = probe.get("model_discovery")
+    paths = discovery.get("response_paths") if isinstance(discovery, dict) else None
+    if not isinstance(paths, list) or not all(isinstance(path, str) and path.strip() for path in paths):
+        raise ValueError("langantigravity.json neobsahuje model_discovery.response_paths")
+    return probe
 
 # Substrings that, seen anywhere in the CLI's "error"/"response" text,
 # indicate a quota/rate/session limit rather than an ordinary failure - see
@@ -149,11 +171,10 @@ def _reported_model(
     it, and nothing was explicitly sent either, keep the value unknown
     instead of guessing from PM's catalog.
     """
-    for source in (raw, usage):
-        for key in ("model", "model_id", "modelId"):
-            value = source.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip(), "reported"
+    discovery = _identity_contract()["model_discovery"]
+    model = model_from_paths([raw, usage], discovery["response_paths"])
+    if model:
+        return model, "reported"
     effective_model = effective_model.strip()
     if effective_model:
         return effective_model, ("requested" if requested else "configured")
@@ -230,6 +251,148 @@ class AntigravityAgent(Agent):
         if proc.returncode != 0:
             return False, f"'{self._cli_path} --version' selhalo (kod {proc.returncode}): {proc.stderr.strip()}"
         return True, f"{proc.stdout.strip()} ({self._detect_note})"
+
+    def probe_identity(self) -> dict[str, Any]:
+        available, note = self.is_available()
+        if not available:
+            return {
+                "available": False,
+                "response": note,
+                "model": None,
+                "model_source": None,
+                "probe_kind": "version_only",
+                "full_response": {"available": False, "response": note},
+            }
+
+        assert self._cli_path
+        project_path = Path.cwd()
+        effective_model = self.config.model.strip()
+        identity_probe = _identity_contract()
+        command = [
+            self._cli_path,
+            "--add-dir",
+            str(project_path),
+            "--print",
+            identity_probe["prompt"],
+            "--output-format",
+            "json",
+            "--mode",
+            identity_probe["command_mode"],
+        ]
+        if effective_model:
+            command += ["--model", effective_model]
+        for forbidden in FORBIDDEN_FLAGS:
+            assert forbidden not in command
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=str(project_path),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=min(60, max(15, self.config.timeout_seconds)),
+            )
+        except Exception as exc:
+            return {
+                "available": False,
+                "response": f"Identifikační probe Antigravity selhal: {exc}",
+                "model": None,
+                "model_source": None,
+                "probe_kind": "identity_request",
+                "full_response": {"exception_type": type(exc).__name__, "exception": str(exc)},
+            }
+
+        try:
+            raw = json.loads(proc.stdout)
+        except (json.JSONDecodeError, ValueError):
+            raw = None
+        if not isinstance(raw, dict):
+            return {
+                "available": False,
+                "response": proc.stdout.strip() or proc.stderr.strip(),
+                "model": None,
+                "model_source": None,
+                "probe_kind": "identity_request",
+                "full_response": {"stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode},
+            }
+        usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
+        model, model_source = _reported_model(raw, usage, effective_model, bool(effective_model))
+        status = str(raw.get("status") or "").upper()
+        if not model and status == SUCCESS_STATUS:
+            identity_paths = _identity_contract()["model_discovery"].get("identity_response_paths", [])
+            model = model_from_paths([raw], identity_paths)
+            if model:
+                model_source = "reported"
+        response = raw.get("response") or raw.get("error") or note
+        return {
+            "available": proc.returncode == 0 and status == SUCCESS_STATUS,
+            "response": response,
+            "model": model,
+            "model_source": model_source,
+            "probe_kind": "identity_request",
+            "usage": usage,
+            "full_response": raw,
+        }
+
+    def list_models(self) -> dict[str, Any]:
+        """Read Antigravity's account-visible model catalog without generation."""
+        available, note = self.is_available()
+        if not available:
+            return {
+                "state": "UNKNOWN",
+                "source": "agy models",
+                "models": [],
+                "reason": note,
+                "full_response": {"available": False, "response": note},
+            }
+        assert self._cli_path
+        try:
+            proc = subprocess.run(
+                [self._cli_path, "models"],
+                cwd=str(Path.cwd()),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=min(60, max(15, self.config.timeout_seconds)),
+            )
+        except Exception as exc:
+            return {
+                "state": "ERROR",
+                "source": "agy models",
+                "models": [],
+                "reason": f"Katalog Antigravity selhal: {exc}",
+                "full_response": {"exception_type": type(exc).__name__, "exception": str(exc)},
+            }
+        if proc.returncode != 0:
+            return {
+                "state": "ERROR",
+                "source": "agy models",
+                "models": [],
+                "reason": proc.stderr.strip() or proc.stdout.strip() or f"agy models skončilo kódem {proc.returncode}",
+                "full_response": {"stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode},
+            }
+        models = []
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line or line.lower().startswith("fetching available models"):
+                continue
+            model_id, separator, display_name = line.partition("\t")
+            model_id = model_id.strip()
+            if not model_id:
+                continue
+            item = {"id": model_id}
+            if separator and display_name.strip():
+                item["display_name"] = display_name.strip()
+            models.append(item)
+        return {
+            "state": "REPORTED",
+            "source": "agy models",
+            "models": models,
+            "reason": f"Antigravity nahlásil {len(models)} modelů.",
+            "full_response": {"stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode},
+        }
 
     def _effective_model(self, request: AgentRunRequest) -> tuple[str, bool]:
         """Return (model_to_pass, was_explicitly_requested) - see

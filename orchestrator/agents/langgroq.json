@@ -1,0 +1,87 @@
+{
+  "contract_version": 1,
+  "provider": "groq",
+  "adapter": "groq.py",
+  "purpose": "Převod společného vstupu AO na Groq API a převod odpovědi zpět do AO.",
+  "identity_probe": {
+    "method": "probe_identity",
+    "kind": "local_configuration",
+    "prompt": null,
+    "model_discovery": {
+      "instruction": "Groq bez API probe zná pouze model předaný konfigurací; při skutečném API běhu čti model z odpovědi a rozliš reported od configured/requested.",
+      "response_paths": ["model"],
+      "identity_response_paths": [],
+      "limit_behavior": "Při rate limitu zachovej celou chybu a quota údaje; nakonfigurovaný model lze uvést pouze jako configured, nikoli jako providerem potvrzený reported.",
+      "future_update_rule": "Při změně Groq SDK odpovědi uprav nejprve tento seznam a teprve potom adapter."
+    },
+    "model_catalog": {
+      "method": "api_call",
+      "command": "client.models.list()",
+      "output_format": "data[] položky s id a metadata",
+      "inference": false
+    },
+    "model_selection": {
+      "method": "api_field",
+      "field": "model",
+      "value": "přesný model_id z brokerovy poznámky",
+      "aliases": false
+    },
+    "behavior": "Ověří dostupnost bez API požadavku a vrátí nakonfigurovaný model se zdrojem configured."
+  },
+  "input_from_ao": {
+    "type": "AgentRunRequest",
+    "fields": {
+      "project_path": "Kořen pracovního projektu; nástroje smějí pracovat pouze pod tímto adresářem.",
+      "prompt": "Zadání práce.",
+      "context": "Nepovinný doplňující kontext připojený k zadání.",
+      "session_id": "Nepovinné ID relace pro pokračování v historii Groq.",
+      "output_schema": "Nepovinné JSON Schema pro závěrečnou odpověď.",
+      "requested_model": "Nepovinný model; při free_only je přijat pouze nakonfigurovaný free model."
+    }
+  },
+  "translation_to_provider": {
+    "api": "chat.completions.create",
+    "messages": "Systémová zpráva určuje roli implementačního providera a bezpečné meze; uživatelská zpráva obsahuje prompt a context.",
+    "tools": [
+      "list_files",
+      "read_file",
+      "search_text",
+      "write_file",
+      "replace_text",
+      "git_status",
+      "git_diff"
+    ],
+    "tool_execution": "Každý tool call se provede lokálně pod project_path a výsledek se vrací jako další zpráva nástroje.",
+    "output_schema": "Při zadání output_schema se závěr vyžádá samostatným JSON-schema požadavkem bez nástrojů."
+  },
+  "output_to_ao": {
+    "success": {
+      "type": "AgentRunResult",
+      "fields": [
+        "success=True",
+        "output_text",
+        "raw_response",
+        "session_id",
+        "model",
+        "model_source",
+        "token_usage"
+      ]
+    },
+    "failure": {
+      "success": false,
+      "fields": [
+        "error",
+        "output_text",
+        "session_id",
+        "model",
+        "token_usage",
+        "limited",
+        "retry_after_seconds",
+        "unavailable",
+        "capability_incompatible",
+        "timed_out"
+      ],
+      "rule": "Provider nikdy nepředstírá úspěch; při nedokončení AO dostane success=False a skutečný dostupný důvod."
+    }
+  }
+}
