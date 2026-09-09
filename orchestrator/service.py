@@ -12,11 +12,10 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
-from orchestrator.agents.registry import build_agent, build_failover_agent
+from orchestrator.agents.registry import build_agent, build_provider_broker
 from orchestrator.autonomous import (
     AutonomousResult,
     AutonomousStatus,
@@ -44,7 +43,6 @@ from orchestrator.logging_config import setup_logging, write_autonomous_log, wri
 from orchestrator.models import Task, TaskStatus
 from orchestrator.queue import TaskQueue, make_task, new_task_id
 from orchestrator.runner import run_task
-from orchestrator.slack_notify import notify
 
 
 class OrchestratorService:
@@ -200,6 +198,10 @@ class OrchestratorService:
         requested_model: Optional[str] = None,
         selection_reason: Optional[str] = None,
     ) -> Task:
+        if agent_name and agent_name != "provider-broker":
+            raise ValueError("Přímé volání providera je zakázané; použijte provider-broker.")
+        if requested_model:
+            raise ValueError("Model vybírá výhradně provider-broker v AO.")
         entry = self.config.resolve_project(project_ref)
         project_dir = Path(entry.path)
         if not project_dir.exists():
@@ -224,7 +226,7 @@ class OrchestratorService:
             project=entry.name,
             project_path=entry.path,
             prompt=prompt,
-            agent=agent_name or self.config.default_agent,
+            agent="provider-broker",
             test_command=test_command,
             max_fix_attempts=self.config.testing.max_fix_attempts,
             auto_commit_requested=self.config.git.auto_commit if auto_commit is None else auto_commit,
@@ -237,7 +239,7 @@ class OrchestratorService:
             # record whether the provider was explicitly named or fell back
             # to Config.default_agent, so the outbox receipt never has to
             # reconstruct that distinction after the fact.
-            selection_reason=selection_reason or ("explicit_agent" if agent_name else "default_agent"),
+            selection_reason=selection_reason or "provider-broker",
         )
         self.queue.add(task)
         self.logger.info("Task %s zařazen do fronty (projekt=%s, zdroj=%s)", task.id, entry.name, source)
@@ -256,7 +258,11 @@ class OrchestratorService:
     # -- execution ---------------------------------------------------------
 
     def _execute(self, task: Task) -> Task:
-        agent = build_agent(task.agent, self.config)
+        agent = build_provider_broker(
+            self.config,
+            logger=self.logger,
+            agent_builder=build_agent,
+        )
         result_task = run_task(task, self.config, agent, self.queue, self.logger)
         log_path = write_task_log(self.config.logs_dir, result_task)
         result_task.log_file = str(log_path.relative_to(self.config.logs_dir.parent))
@@ -338,52 +344,20 @@ class OrchestratorService:
             test_command = entry.test_command or self.config.testing.test_command or None
 
         if provider_order is not None:
-            normalized_provider_order = [name.strip() for name in provider_order if name.strip()]
-            if not normalized_provider_order:
-                raise ValueError("--provider-order musí obsahovat alespoň jednoho providera.")
-            if len(set(normalized_provider_order)) != len(normalized_provider_order):
-                raise ValueError("--provider-order nesmí obsahovat duplicity.")
-            unknown = [name for name in normalized_provider_order if name not in AVAILABLE_AGENTS]
-            if unknown:
-                raise ValueError(
-                    "--provider-order obsahuje neznámého providera: "
-                    + ", ".join(unknown)
-                )
-            provider_order = normalized_provider_order
+            raise ValueError("Výběr providerů řídí výhradně provider-broker v AO.")
+        if agent_name and agent_name != "provider-broker":
+            raise ValueError("Přímé volání providera je zakázané; použijte provider-broker.")
+        if model_override:
+            raise ValueError("Model vybírá výhradně provider-broker v AO.")
 
-        # ``--agent auto`` is the explicit CLI spelling for a scoped failover
-        # run. It must not enter the single-agent branch, otherwise the
-        # supplied ``--provider-order`` is silently ignored and AO falls back
-        # to its canonical default order.
+        # Provider-broker is the only provider entry point. It owns all
+        # provider checks, model selection, and the single provider call.
         dispatch_config = with_provider_model_overrides(self.config, provider_models)
-        if agent_name and agent_name != "auto":
-            agent_config = dispatch_config
-            if model_override:
-                model = model_override.strip()
-                agent_config = replace(dispatch_config)
-                if agent_name == "claude-code":
-                    agent_config.claude_code = replace(dispatch_config.claude_code, model=model)
-                elif agent_name == "antigravity":
-                    agent_config.antigravity = replace(dispatch_config.antigravity, model=model)
-                elif agent_name == "codex":
-                    agent_config.codex = replace(dispatch_config.codex, model=model)
-                elif agent_name == "gemini":
-                    agent_config.gemini = replace(dispatch_config.gemini, model=model)
-                elif agent_name == "groq":
-                    agent_config.groq = replace(dispatch_config.groq, model=model)
-                else:
-                    raise ValueError(
-                        "--model vyžaduje explicitního podporovaného agenta; "
-                        f"nalezeno {agent_name!r}"
-                    )
-            agent = build_agent(agent_name, agent_config)
-        else:
-            agent = build_failover_agent(
-                dispatch_config,
-                provider_order=provider_order,
-                logger=self.logger,
-                agent_builder=build_agent,
-            )
+        agent = build_provider_broker(
+            dispatch_config,
+            logger=self.logger,
+            agent_builder=build_agent,
+        )
         run_id = run_id or new_task_id()
 
         # Restore already-verified DoD progress from a previous, separate
@@ -473,11 +447,7 @@ class OrchestratorService:
                     project=entry.name,
                     project_path=str(project_dir),
                     prompt=goal_text,
-                    # The autonomous run used failover when no explicit agent was
-                    # supplied.  Persist that strategy, not default_agent
-                    # (claude-code), so a later resume cannot silently lose the
-                    # antigravity/codex fallback.
-                    agent=agent_name or "auto",
+                    agent="provider-broker",
                     test_command=test_command,
                     max_fix_attempts=0,
                     auto_commit_requested=False,
@@ -519,34 +489,6 @@ class OrchestratorService:
                 waiting_task.id,
             )
 
-            # DoD (produkční incident cb501524e47e, 26.8.2026): AI Project
-            # Manager v produkci viděl jen status=in_progress a chyběla
-            # Slack zpráva o tom, proč běh stojí a kdy může pokračovat -
-            # tohle je ta run-úrovňová zpráva (na rozdíl od
-            # FailoverAgent._describe_status_for_notify(), která hlásí stav
-            # jednotlivých providerů). Musí jasně říct i to, jestli tento
-            # proces sám čekání dokončí (trvalý worker), nebo je nutný další
-            # ruční/naplánovaný běh stejného příkazu.
-            if result.retry_after_seconds is not None:
-                retry_note = f"nejbližší známý retry za {result.retry_after_seconds:.0f} s"
-            else:
-                retry_note = "čas dalšího pokusu není znám"
-            if self.auto_resume_active:
-                resume_note = (
-                    "Automatické pokračování JE aktivní (trvalý worker tohoto procesu) - "
-                    "běh sám naváže z checkpointu, jakmile limit vyprší."
-                )
-            else:
-                resume_note = (
-                    "Automatické pokračování NENÍ aktivní (jednorázový běh bez trvalého "
-                    "workeru/scheduleru) - je nutné po resetu spustit stejný příkaz "
-                    f"(`orchestrator.py autonomous ... --run-id {run_id}`) znovu; naváže "
-                    "z uloženého checkpointu, ne od začátku."
-                )
-            notify(
-                f"[AI Orchestrator] Autonomní běh {run_id} (projekt {entry.name}) čeká na "
-                f"providera (WAITING_FOR_PROVIDER): {retry_note}. {resume_note}"
-            )
         elif existing_waiting_task is not None:
             existing_waiting_task.status = (
                 TaskStatus.DONE

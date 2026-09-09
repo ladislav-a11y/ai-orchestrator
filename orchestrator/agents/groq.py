@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, model_from_paths
+from orchestrator.agents.usage_ledger import record_provider_run
 from orchestrator.config import GROQ_FREE_MODEL, GroqAgentConfig
 
 try:
@@ -1154,6 +1155,7 @@ class GroqAgent(Agent):
             return AgentRunResult(**common, error=str(exc), unavailable=True)
         return AgentRunResult(**common, error=str(exc))
 
+    @record_provider_run("groq")
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         available, message = self.is_available()
         if not available:
@@ -1293,13 +1295,25 @@ class GroqAgent(Agent):
                 )
 
             if request.output_schema is not None:
+                finalization_instructions = (
+                    request.receipt_prompt.strip()
+                    if isinstance(request.receipt_prompt, str) and request.receipt_prompt.strip()
+                    else ""
+                )
+                schema_instructions = _schema_finalization_instructions(request.output_schema)
+                if finalization_instructions:
+                    finalization_instructions = (
+                        f"{finalization_instructions}\n\n{schema_instructions}"
+                    )
+                else:
+                    finalization_instructions = schema_instructions
                 messages.append(
                     {
                         "role": "user",
                         "content": (
                             "Return the final result for the orchestrator now. Do not call tools. "
                             "Base it on the work and verification already performed in this conversation. "
-                            + _schema_finalization_instructions(request.output_schema)
+                            + finalization_instructions
                         ),
                     }
                 )

@@ -23,7 +23,14 @@ from orchestrator import service as service_module
 from orchestrator.agents.base import Agent, AgentRunResult
 from orchestrator.autonomous import AUDIT_MARKER
 from orchestrator.config import ApiConfig, Config, GitConfig, PathsConfig, ProjectEntry, TestingConfig
+from orchestrator.context_compaction import ContextOverflowError, require_planner_input
 from orchestrator.service import OrchestratorService
+
+
+def test_planner_input_preserves_canonical_source_or_fails_closed():
+    payload = {"card": {"description": "x" * 16001}}
+    with pytest.raises(ContextOverflowError):
+        require_planner_input(payload)
 
 
 def _audit_response(request):
@@ -241,7 +248,11 @@ def test_plan_inbox_auto_uses_central_failover_and_returns_receipt(monkeypatch, 
                 selection_reason="failover: groq -> codex",
             )
 
-    monkeypatch.setattr(cli, "build_agent", lambda name, config: PlanningFailoverAgent())
+    def build_planning_agent(name, config):
+        seen["config"] = config
+        return PlanningFailoverAgent()
+
+    monkeypatch.setattr(cli, "build_agent", build_planning_agent)
     monkeypatch.setattr(cli, "load_config", lambda: Config())
     monkeypatch.setattr(
         cli.sys,
@@ -253,10 +264,15 @@ def test_plan_inbox_auto_uses_central_failover_and_returns_receipt(monkeypatch, 
         "plan-inbox",
         "--agent", "auto",
         "--provider-order", "groq,codex",
+        "--provider-timeout-seconds", "42.5",
     ]) == 0
 
     envelope = json.loads(capsys.readouterr().out)
     assert seen["request"].failover_on_error is True
+    assert all(
+        getattr(seen["config"], name).timeout_seconds == 42.5
+        for name in ("claude_code", "antigravity", "codex", "groq")
+    )
     assert envelope["provider"] == "codex"
     assert envelope["selected_provider"] == "auto"
     assert envelope["provider_sequence"] == ["groq", "codex"]
@@ -284,10 +300,10 @@ def test_autonomous_cli_accepts_scoped_provider_order():
         "--project", "station-agent",
         "--goal", "cil",
         "--agent", "auto",
-        "--provider-order", "gemini,antigravity,claude-code,codex",
+        "--provider-order", "groq,antigravity,claude-code,codex",
     ])
 
-    assert args.provider_order == "gemini,antigravity,claude-code,codex"
+    assert args.provider_order == "groq,antigravity,claude-code,codex"
 
 
 def test_autonomous_cli_reports_missing_live_evidence(tmp_path, monkeypatch, capsys):

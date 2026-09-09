@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, model_from_paths
+from orchestrator.agents.usage_ledger import record_provider_run
 from orchestrator.config import ANTIGRAVITY_ALLOWED_MODES, AntigravityAgentConfig
 
 FORBIDDEN_FLAGS = (
@@ -428,6 +429,7 @@ class AntigravityAgent(Agent):
 
         return cmd
 
+    @record_provider_run("antigravity")
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         effective_model, model_requested = self._effective_model(request)
         model_source = "requested" if model_requested else ("configured" if effective_model else None)

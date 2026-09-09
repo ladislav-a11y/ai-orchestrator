@@ -21,6 +21,22 @@ Broker prochází provideři vždy v tomto pořadí:
 Vybere prvního providera se stavem `AVAILABLE`. Pokud není dostupný žádný,
 vrátí `NONE_AVAILABLE`.
 
+### Brokerovy poznámky při výběru
+
+Broker vede pro každého aktuálního providera samostatnou strojovou poznámku:
+
+`data/provider-info/<provider>info.json`
+
+Při `select_provider` broker nejprve načte a strukturálně ověří poznámku. Pokud
+poznámka chybí nebo má stav `UNKNOWN` či `ERROR`, osloví pouze příslušného
+providera jeho stavovým `probe_identity()`/dostupnostním dotazem, výsledek uloží
+a pokračuje ve výběru. Pracovní `run()` se touto kontrolou nespouští.
+
+Poznámka je proto jediný přenosný zdroj pro rozhodnutí brokeru: obsahuje stav,
+skutečně zjištěný nebo nakonfigurovaný model, důvod, úplnou odpověď, usage,
+čas kontroly, případný čas dalšího pokusu a poslední známý katalog modelů.
+AO z ní dostane nabídku providera s modelem a důvodem, nikoli domněnku.
+
 ### Příkazy brokeru
 
 #### `select_provider`
@@ -30,12 +46,22 @@ s těmito údaji:
 
 - `provider` — vybraný provider;
 - `model` — model, který má AO předat providerovi;
-- `model_source` — odkud model pochází, například `reported`, `configured` nebo
-  `forced`;
+- `model_source` — odkud model pochází, například `reported`,
+  `reported_receipt`, `configured` nebo `forced`;
 - `selection_mode` — `AUTO` nebo `FORCED`;
 - `state` — stav providera;
 - `reason` — důvod stavu;
 - `info_file` — cesta k brokerově poznámce.
+
+`selection_mode: FORCED` je technický název existujícího brokerového režimu.
+V uživatelském a providerovém popisu znamená `fixed_model_selection`, tedy
+zafixovaný konkrétní model. Samotný tento stav nepotvrzuje, že provider model
+skutečně použil; potvrzení se zjišťuje odděleně z odpovědi nebo metadat providera.
+
+Požadavek na konkrétního providera bez modelu se zadává pouze jeho ID, například
+`{"command":"select_provider","provider":"codex"}`. Broker načte aktuální
+model z jeho poznámky a vrátí AO stejný návod z příslušného `lang*.json`. AO
+model ani komunikační postup nedoplňuje podle vlastního odhadu.
 
 #### `refresh_provider_notes`
 
@@ -95,7 +121,7 @@ Každý provider má vlastní soubor v `data/provider-info/`:
 |---|---|
 | `provider` | Název providera. |
 | `model` | Model naposledy zjištěný nebo nakonfigurovaný providerem. |
-| `model_source` | Zdroj hodnoty modelu, například `reported` nebo `configured`. |
+| `model_source` | Zdroj hodnoty modelu, například `reported`, `reported_receipt` nebo `configured`. |
 | `state` | `AVAILABLE`, `UNAVAILABLE`, `UNKNOWN` nebo `ERROR`. |
 | `checked_at` | Čas poslední kontroly. |
 | `available_at` | Čas, od kterého je provider dostupný, pokud je známý. |
@@ -113,6 +139,18 @@ Každý provider má vlastní soubor v `data/provider-info/`:
 | `selection_mode` | `AUTO` nebo `FORCED`. |
 | `selection_source` | Kdo volbu nastavil, například `ao` nebo `manual`. |
 | `selection_updated_at` | Čas poslední změny volby modelu. |
+
+`LIMITED` není samostatná hodnota pole `state`. Limit se v poznámce zachytí
+jako `UNAVAILABLE` spolu s důvodem v `reason`, celou zdrojovou odpovědí v
+`full_response` a případným absolutním časem v `retry_at`. Pokud provider čas
+obnovení neposkytne, zůstává `retry_at: null` a broker nesmí datum ani čas
+domýšlet.
+
+Aktuální počet a přesná ID modelů se neudržují v tomto guide. Broker je získává
+providerovým katalogovým dotazem, ukládá do `model_catalog` a při refreshi
+porovnává v `model_update`. Proto se po přidání nebo odebrání modelu aktualizuje
+poznámka; guide se mění jen při změně schopnosti nebo datového kontraktu
+brokeru.
 
 ### Stav katalogu modelů
 
@@ -139,6 +177,17 @@ Adapter obsahuje prováděcí logiku. `lang*.json` obsahuje popis, jak s daným
 providerem mluvit. Když se změní rozhraní providera, nejprve se aktualizuje
 jeho jazyk a teprve potom odpovídající adapter.
 
+Každý provider má vedle svého `lang*.json` také dva vlastní JSON soubory spotřeby:
+
+- `usage_<provider>.json` — pouze poslední běh/úloha providera;
+- `usage_<provider>_lifetime.json` — kumulace od prvního záznamu.
+
+Oba soubory mají spotřebu rozdělenou pod přesným úplným ID skutečně použitého
+modelu v `models`. U každého modelu jsou pouze `input_tokens`, `output_tokens`,
+`thinking_tokens`, `total_tokens` a `cost_usd`. Číselná hodnota se zachová;
+`null` se zapisuje jako `0`. Evidence nepoužívá požadovaný nebo zkrácený název
+modelu jako náhradu skutečně reportovaného modelu.
+
 ### Co obsahuje každý `lang*.json`
 
 - `contract_version` — verze kontraktu;
@@ -148,10 +197,35 @@ jeho jazyk a teprve potom odpovídající adapter.
 - `identity_probe.model_catalog` — způsob získání katalogu modelů bez ukládání
   seznamu modelů do jazyka;
 - `identity_probe.model_selection` — jak adapter předá brokerem vybraný model;
+- `task_execution_receipt` — společný způsob, jak si při úkolu vyžádat `answer`
+  a úplné skutečně použité `model`;
 - `input_from_ao` — společný vstup, který provider přijímá od AO;
 - `translation_to_provider` — překlad společného vstupu do API nebo CLI;
 - `input_from_provider` — formát odpovědi providera;
 - `output_to_ao` — převod úspěchu nebo chyby zpět do společného výsledku AO.
+
+### Společný pracovní výsledek při zafixovaném modelu
+
+Každý `lang*.json` obsahuje `task_execution_receipt`. Receipt instrukce se
+nesmí automaticky připojit k pracovní zprávě, pokud provider současně používá
+nástroje. Odesílatel předá podle návodu provideru samostatně původní pracovní
+prompt, `output_schema` a receipt instrukci. Receipt se vyžádá až v závěrečné
+fázi bez nástrojů a výsledkem je jediný JSON objekt:
+
+```json
+{"answer":"<výsledek úkolu>","model":"<skutečně použitý úplný model>"}
+```
+
+`model` se nesmí opsat z požadavku. Konkrétní lang určuje, zda je textový
+receipt autoritativní, nebo pouze diagnostický; pokud provider poskytne
+strojová metadata, mají přednost. Pro Codex je při chybějících metadatech
+přesný model z povinného receipt platným doložením identity.
+Zafixovaný model je požadavek na výběr, ne podmínka přijetí výsledku. Když není
+dostupný nebo je přemapován, úkol se při
+použitelné odpovědi dokončí dostupným modelem a zaznamená se skutečně doložené
+ID nebo stav `UNVERIFIED`. Rozdíl mezi požadovaným a skutečně doloženým modelem
+je `MISMATCH`, který se pouze uloží spolu s oběma ID a nevyvolává odmítnutí,
+failover ani jinou automatickou akci.
 
 ### Aktuální možnosti jazyků
 
@@ -162,6 +236,11 @@ jeho jazyk a teprve potom odpovídající adapter.
 - výběr: přesné `model_id`, bez aliasů;
 - identita: lokální konfigurace nevyžaduje inference požadavek;
 - při limitu se zachovává celá chyba a údaje o kvótě.
+- pracovní fáze používá původní prompt a povolené nástroje;
+- při zafixovaném modelu se `task_execution_receipt` provádí až v tool-free finální fázi
+  přes `AgentRunRequest.output_schema` a `AgentRunRequest.receipt_prompt`;
+- pracovní výsledek je jediný JSON objekt s poli `answer` a `model`; při
+  nedostupnosti zafixovaného modelu stačí skutečné úplné ID dostupného modelu.
 
 #### Antigravity — `langantigravity.json`
 
@@ -170,6 +249,8 @@ jeho jazyk a teprve potom odpovídající adapter.
 - výběr: přesné `model_id`, bez aliasů;
 - identita: neinteraktivní JSON probe;
 - při limitu se zachovává přímá odpověď a informace o resetu.
+- pracovní výsledek: jediný JSON objekt s poli `answer` a `model`; při nedostupnosti
+  vnuceného modelu stačí skutečné úplné ID dostupného modelu.
 
 #### Claude Code — `langclaude-code.json`
 
@@ -179,14 +260,63 @@ jeho jazyk a teprve potom odpovídající adapter.
 - identita: neinteraktivní JSON probe;
 - při limitu se zachovává `api_error_status`, celý `result` nebo `error` a
   údaje o limitu.
+- pracovní výsledek: jediný JSON objekt s poli `answer` a `model`; při nedostupnosti
+  vnuceného modelu stačí skutečné úplné ID dostupného modelu.
 
 #### Codex — `langcodex.json`
 
-- katalog: současné CLI neposkytuje katalogový příkaz, proto je stav `UNKNOWN`;
-- práce s modelem: CLI argument `--model`;
-- výběr: přesné providerem doložené `model_id`, bez aliasů;
-- identita: read-only JSONL probe s ignorováním uživatelské konfigurace;
-- při chybě se zachovají JSONL metadata, chyba a případné údaje o limitu.
+- katalog: read-only příkaz `codex debug models`; vrací JSON objekt s položkami
+  `models[]`, kde `slug` je přesné ID modelu;
+- adapter zachová celý katalog v brokerově `codexinfo.json`, včetně metadat,
+  a broker jej porovná s posledním potvrzeným katalogem;
+- práce s modelem: CLI argument `--model <model_id>`;
+- výběr: přesné providerem doložené `model_id`, bez aliasů; nucený výběr se
+  ukládá jako `FORCED` a broker ho předá AO;
+- identita: read-only JSONL probe s `--ignore-user-config`;
+- ověření identity ukládá skutečně vrácený model a stav `MATCH`, `MISMATCH`
+  nebo `UNVERIFIED`. Probe je diagnostický: `MISMATCH` znamená pouze, že
+  provider vrátil jinou identitu, než bylo požadováno, nikoli že probe nebo
+  provider selhal. Probe musí vyžadovat jediný plain-text řádek s úplným
+  kanonickým ID včetně suffixu nebo jiné specializace, zakázat obecné `GPT-5`
+  a zakázat opsání požadovaného ID. Například při vnucení `gpt-5.6-luna` a
+  odpovědi `gpt-5-codex` nebo `gpt-5.3-codex` se uloží skutečná odpověď jako
+  užitečný důkaz konkrétní varianty Codexu; `MISMATCH` je v tomto případě
+  očekávané diagnostické porovnání. Požadovaný model se nikdy nepovažuje za
+  potvrzený jen proto, že byl předán v `--model`;
+- pracovní úkol při zafixovaném modelu: volající předá `task_execution_receipt`
+  z `langcodex.json` jako samostatné `AgentRunRequest.receipt_prompt` a vyžádá
+  jediný JSON objekt s přesně poli `answer` a `model`. `requested_model`,
+  `metadata_model` a `receipt_model` se evidují odděleně. Za skutečnou identitu
+  se považují metadata, nebo u Codexu při jejich absenci přesný receipt model;
+  ten se přijme jako `reported_receipt`
+  a porovná se jako `MATCH`/`MISMATCH`; `UNVERIFIED` zůstává pouze pro případ,
+  kdy chybí metadata i platný receipt model;
+- `MISMATCH` se pouze zaznamená spolu s požadovaným a skutečně vráceným ID.
+  Nesmí se vyhodnocovat jako chyba ani použít pro odmítnutí úkolu, failover,
+  změnu dostupnosti nebo změnu výběru modelu;
+- při chybě nebo limitu se zachovají JSONL metadata, chyba a případné údaje o
+  limitu. Poslední známý katalog se nemaže.
+
+## Pravidlo aktualizace guide a katalogů
+
+Tento guide popisuje schopnosti, kontrakty a vlastnictví dat; není zdrojem
+aktuálního seznamu modelů. Přesné aktuální katalogy a jejich čas kontroly patří
+výhradně do `data/provider-info/*info.json`.
+
+Při změně rozhraní providera nebo způsobu zjišťování modelů se postupuje takto:
+
+1. nejprve se upraví příslušný `lang*.json` — příkaz, formát, cesty k modelu,
+   limitní chování a pravidla výběru;
+2. potom se upraví odpovídající adapter `.py`, který má pouze technickou
+   implementaci popsaného kontraktu;
+3. provede se řízený refresh katalogů a ověří se uložené `*info.json`;
+4. tento guide se aktualizuje pouze tehdy, když se změnila schopnost, kontrakt
+   nebo vlastnictví dat — ne při každém přidání či odebrání modelu v katalogu.
+
+Pro Codex je katalogový zdroj vždy `codex debug models`; seznam modelů se do
+tohoto guide nekopíruje. Pokud katalog selže, je prázdný nebo není porovnatelný,
+broker zachová poslední známý katalog a jeho stav označí jako
+`NOT_COMPARABLE`, `UNKNOWN` nebo `ERROR` podle skutečného výsledku.
 
 ## Pravidlo vlastnictví dat
 

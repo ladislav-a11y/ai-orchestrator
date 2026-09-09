@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import tempfile
 from dataclasses import replace
@@ -20,6 +21,7 @@ from orchestrator.config import (
 from orchestrator.doctor import run_doctor
 from orchestrator.models import TaskStatus
 from orchestrator.service import OrchestratorService
+from orchestrator.context_compaction import require_planner_input
 
 
 _INBOX_PLANNING_RECIPE_PATH = Path(__file__).with_name("inbox_planning_recipe.md")
@@ -31,6 +33,17 @@ def _load_inbox_planning_recipe() -> str:
     if not recipe:
         raise ValueError("Inbox planning recipe is empty")
     return recipe
+
+
+def _positive_timeout_seconds(raw: str) -> float:
+    """Parse a finite, strictly positive per-provider timeout."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("timeout musí být číslo") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError("timeout musí být konečné kladné číslo")
+    return value
 
 
 def _print_doctor(report) -> int:
@@ -152,12 +165,6 @@ def cmd_autonomous(args: argparse.Namespace) -> int:
             auto_commit=_resolve_auto_commit(args),
             implementation_only=args.implementation_only,
             run_id=args.run_id,
-            provider_order=(
-                [name.strip() for name in args.provider_order.split(",") if name.strip()]
-                if args.provider_order
-                else None
-            ),
-            provider_models=_parse_provider_models(args.provider_models),
         )
     except ValueError as e:
         print(f"Chyba: {e}")
@@ -295,45 +302,6 @@ def cmd_projects(args: argparse.Namespace) -> int:
     return 0
 
 
-def _parse_provider_order(raw: str | None) -> list[str] | None:
-    if raw is None:
-        return None
-    order = [item.strip() for item in raw.split(",") if item.strip()]
-    if not order:
-        raise ValueError("--provider-order musí obsahovat alespoň jednoho providera")
-    if len(set(order)) != len(order):
-        raise ValueError("--provider-order nesmí obsahovat duplicity")
-    unknown = [item for item in order if item not in AVAILABLE_AGENTS]
-    if unknown:
-        raise ValueError(
-            "--provider-order obsahuje neznámého providera: "
-            + ", ".join(unknown)
-        )
-    return order
-
-
-def _parse_provider_models(raw: str | None) -> dict[str, str] | None:
-    """Parse a provider-specific model map without inventing model names."""
-    if raw is None:
-        return None
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"--provider-models musí být platný JSON objekt: {exc.msg}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("--provider-models musí být JSON objekt provider -> model")
-    normalized: dict[str, str] = {}
-    for provider, model in parsed.items():
-        if not isinstance(provider, str) or provider not in AVAILABLE_AGENTS:
-            raise ValueError(f"--provider-models obsahuje neznámého providera: {provider!r}")
-        if not isinstance(model, str) or not model.strip():
-            raise ValueError(
-                f"--provider-models musí mít neprázdný model pro providera {provider!r}"
-            )
-        normalized[provider] = model.strip()
-    return normalized
-
-
 def _planning_usage(result, provider: str | None = None) -> dict:
     fields = ("input_tokens", "output_tokens", "thinking_tokens", "total_tokens", "cost_usd")
     events = list(result.usage_events or [])
@@ -371,35 +339,42 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise ValueError("Inbox planner input must be a JSON object")
+        # The Inbox source and project identities are canonical planning input,
+        # not disposable history: preserve them completely or fail closed.
+        require_planner_input(payload)
         recipe = _load_inbox_planning_recipe()
         config = load_config()
-        provider_order = _parse_provider_order(args.provider_order)
-        provider_models = _parse_provider_models(args.provider_models)
-        central_failover = args.agent == "auto"
-        if central_failover and args.model:
-            raise ValueError("--model nelze použít s centrálním --agent auto")
-        if args.model and provider_models:
-            raise ValueError("--model nelze kombinovat s --provider-models")
-        if not central_failover and provider_order is not None:
-            raise ValueError("--provider-order vyžaduje --agent auto")
+        central_broker = args.agent == "provider-broker"
+        if central_broker and args.model:
+            raise ValueError("--model nelze použít s centrálním provider-brokerem")
         # Planning receives an empty disposable workspace. The provider can
         # reason over the supplied card text but cannot mutate a project
         # checkout. Provider-specific read-only modes add a second guard.
         safe_config = replace(
             config,
-            gemini=replace(config.gemini, approval_mode="plan"),
             antigravity=replace(config.antigravity, mode="plan"),
             codex=replace(config.codex, sandbox_mode="read-only"),
         )
-        if central_failover:
-            safe_config = replace(
-                safe_config,
-                provider_order=provider_order or list(config.provider_order),
-            )
+        if central_broker:
+            if args.provider_timeout_seconds is not None:
+                timeout = args.provider_timeout_seconds
+                safe_config = replace(
+                    safe_config,
+                    claude_code=replace(
+                        safe_config.claude_code, timeout_seconds=timeout
+                    ),
+                    antigravity=replace(
+                        safe_config.antigravity, timeout_seconds=timeout
+                    ),
+                    codex=replace(safe_config.codex, timeout_seconds=timeout),
+                    groq=replace(safe_config.groq, timeout_seconds=timeout),
+                )
+        elif args.provider_timeout_seconds is not None:
+            raise ValueError("--provider-timeout-seconds vyžaduje provider-broker")
+        provider_models = None
         safe_config = with_provider_model_overrides(safe_config, provider_models)
         if args.model:
             config_attr = {
-                "gemini": "gemini",
                 "antigravity": "antigravity",
                 "claude-code": "claude_code",
                 "codex": "codex",
@@ -429,7 +404,7 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                 AgentRunRequest(
                     project_path=Path(workspace),
                     prompt=prompt,
-                    failover_on_error=central_failover,
+                    failover_on_error=False,
                     output_schema={
                         "type": "object",
                         "properties": {
@@ -456,6 +431,43 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                                             "enum": ["implementation", "research", "configuration", "integration", "tests"],
                                         },
                                         "split_reason": {"type": "string", "minLength": 1},
+                                        "source_refs": {
+                                            "type": "array",
+                                            "minItems": 1,
+                                            "maxItems": 16,
+                                            "items": {"type": "string", "minLength": 1},
+                                        },
+                                        "verification": {
+                                            "type": "object",
+                                            "properties": {
+                                                "required": {
+                                                    "type": "array",
+                                                    "minItems": 1,
+                                                    "maxItems": 7,
+                                                    "items": {
+                                                        "type": "string",
+                                                        "enum": [
+                                                            "static", "unit", "integration",
+                                                            "regression", "runtime", "gui", "config",
+                                                        ],
+                                                    },
+                                                },
+                                                "acceptable": {
+                                                    "type": "array",
+                                                    "maxItems": 7,
+                                                    "items": {
+                                                        "type": "string",
+                                                        "enum": [
+                                                            "static", "unit", "integration",
+                                                            "regression", "runtime", "gui", "config",
+                                                        ],
+                                                    },
+                                                },
+                                                "reason": {"type": "string", "minLength": 1},
+                                            },
+                                            "required": ["required", "acceptable", "reason"],
+                                            "additionalProperties": False,
+                                        },
                                         "depends_on": {
                                             "type": "array",
                                             "items": {"type": "integer", "minimum": 0, "maximum": 31},
@@ -464,7 +476,7 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                                     "required": [
                                         "project_key", "scope", "task", "next_step", "priority",
                                         "priority_reason", "work_type", "split_reason",
-                                        "depends_on",
+                                        "source_refs", "verification", "depends_on",
                                     ],
                                     "additionalProperties": False,
                                 },
@@ -484,7 +496,6 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
             "claude-code": "claude_code",
             "antigravity": "antigravity",
             "codex": "codex",
-            "gemini": "gemini",
             "groq": "groq",
         }.get(active_provider)
         model_config = getattr(safe_config, active_config_attr, None)
@@ -563,16 +574,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto.add_argument("--run-id", help="Externí ID běhu předané nadřazeným orchestrátorem")
     p_auto.add_argument("--agent", help="Který agent se má použít (výchozí: default_agent z config.yaml)")
     p_auto.add_argument(
-        "--provider-order",
-        help="Volitelné pořadí providerů pouze pro tento failover běh; výchozí AO pořadí se nemění",
-    )
-    p_auto.add_argument(
         "--model",
         help="Přesný model předaný vybranému explicitnímu agentovi; bez volby se použije konfigurace agenta",
-    )
-    p_auto.add_argument(
-        "--provider-models",
-        help="JSON mapa providerů na jejich vlastní přesné modely pro centrální failover",
     )
     p_auto.add_argument("--test-command", help="Přepíše testovací příkaz pro tento běh")
     p_auto.add_argument(
@@ -605,16 +608,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_projects.set_defaults(func=cmd_projects)
 
     p_plan = sub.add_parser("plan-inbox", help="AI read-only příprava lidského Inbox požadavku")
-    p_plan.add_argument("--agent", required=True, choices=["auto", "gemini", "antigravity", "claude-code", "codex", "groq"])
+    p_plan.add_argument("--agent", required=True, choices=["provider-broker"])
     p_plan.add_argument("--model", help="Přesný model vybraného plánovacího providera")
-    p_plan.add_argument(
-        "--provider-models",
-        help="JSON mapa providerů na jejich vlastní přesné modely pro centrální failover",
-    )
-    p_plan.add_argument(
-        "--provider-order",
-        help="Pořadí providerů pro centrální --agent auto, oddělené čárkami",
-    )
     p_plan.set_defaults(func=cmd_plan_inbox)
 
     return parser

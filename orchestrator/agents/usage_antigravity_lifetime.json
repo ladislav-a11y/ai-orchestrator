@@ -1,0 +1,19 @@
+{
+  "provider": "antigravity",
+  "models": {
+    "gemini-3.0-actual": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "thinking_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0
+    },
+    "agy-task-model": {
+      "input_tokens": 100,
+      "output_tokens": 20,
+      "thinking_tokens": 5,
+      "total_tokens": 125,
+      "cost_usd": 0
+    }
+  }
+}

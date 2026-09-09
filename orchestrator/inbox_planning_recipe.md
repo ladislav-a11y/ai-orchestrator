@@ -94,6 +94,19 @@ testovací změny odpovídající jejímu výsledku a vlastní controllerovou
 finalizaci. Auditor musí nad jednou kartou dostat pouze změny tohoto jednoho
 projektu a tohoto jednoho výsledku.
 
+Každý task musí obsahovat `source_refs`: krátké odkazy na všechny zdrojové
+body, které pokrývá. U číslovaných nebo odrážkových bodů použij jejich stabilní
+čísla; u nečíslovaného textu použij krátký jednoznačný slovní štítek. Každý
+zdrojový bod přiřaď právě jedné kartě a žádný bod nevynechávej. Neopakuj celý
+zdrojový text v `source_refs`.
+
+Každý task musí obsahovat také `verification` se třemi poli: `required` je
+nejmenší důkaz, který má nezávislý auditor požadovat, `acceptable` jsou
+doplňující nebo náhradní důkazy a `reason` stručně vysvětluje volbu. Povolené
+typy jsou `static`, `unit`, `integration`, `regression`, `runtime`, `gui` a
+`config`. Auditor nesmí požadovat GUI u úlohy bez GUI; pokud požadovaný důkaz
+nelze v prostředí provést, musí uvést důvod a použít vhodný náhradní důkaz.
+
 ## 3. Sestav skutečnou posloupnost
 
 - `depends_on` obsahuje zero-based indexy pouze přímých předpokladů stejného
@@ -128,6 +141,9 @@ Před vrácením JSON si beze změny výstupního formátu ověř:
    implementační práci?
 5. Jsou všechny přímé závislosti uvedené v `depends_on` a nevzniká cyklus?
 6. Vysvětluje `split_reason` věcně, proč karta existuje samostatně?
+7. Pokrývají `source_refs` všechny zdrojové body právě jednou?
+8. Odpovídá `verification` skutečné povaze změny a nepožaduje neproveditelný
+   nebo nesouvisející typ testu?
 
 ## 6. Výstup
 

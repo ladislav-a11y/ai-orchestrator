@@ -138,6 +138,9 @@ def test_forced_model_is_persisted_and_used_after_broker_reload(tmp_path):
     assert offer["model"] == "openai/gpt-oss-20b"
     assert offer["model_source"] == "forced"
     assert offer["selection_mode"] == "FORCED"
+    assert offer["lang_file"] == str(lang_dir / "langgroq.json")
+    assert offer["lang"]["provider"] == "groq"
+    assert offer["lang"]["model_selection"] == {"method": "test"}
 
     automatic = reloaded.ask(
         {

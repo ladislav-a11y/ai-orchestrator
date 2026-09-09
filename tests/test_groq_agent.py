@@ -167,7 +167,15 @@ def test_tool_loop_edits_project_and_returns_structured_final_response(monkeypat
         "additionalProperties": False,
     }
 
-    result = agent.run(AgentRunRequest(tmp_path, "create hello.txt", output_schema=schema))
+    receipt_prompt = "Return exactly one JSON object with exactly two string fields: answer and model."
+    result = agent.run(
+        AgentRunRequest(
+            tmp_path,
+            "create hello.txt",
+            output_schema=schema,
+            receipt_prompt=receipt_prompt,
+        )
+    )
 
     assert result.success is True
     assert result.output_text == '{"items":[{"index":0,"done":true}],"notes":"done"}'
@@ -184,6 +192,12 @@ def test_tool_loop_edits_project_and_returns_structured_final_response(monkeypat
     assert "tools" in client.calls[0]
     assert "tools" in client.calls[1]
     assert "tools" not in client.calls[2]
+    assert receipt_prompt not in client.calls[0]["messages"][-1]["content"]
+    assert any(
+        receipt_prompt in message.get("content", "")
+        for message in client.calls[2]["messages"]
+        if message.get("role") == "user"
+    )
     assert client.calls[2]["response_format"]["json_schema"]["strict"] is True
     assert client.calls[2]["response_format"]["json_schema"]["schema"] == schema
 

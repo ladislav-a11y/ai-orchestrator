@@ -46,6 +46,10 @@ class AgentRunRequest:
     # Optional JSON Schema for the provider's final response. Providers with
     # native structured output should enforce it; others may rely on prompt.
     output_schema: Optional[dict[str, Any]] = None
+    # Optional provider-language receipt instruction. It is kept separate from
+    # the work prompt so a tool-enabled provider can apply it only during its
+    # tool-free finalization phase.
+    receipt_prompt: Optional[str] = None
     # Explicit per-call model override (e.g. AI Project Manager routing by
     # task type/complexity). When set and non-empty, a provider that supports
     # passing a model to its CLI uses this instead of its configured default
@@ -148,17 +152,29 @@ class AgentRunResult:
     # includes that information. None if unknown/not provided.
     retry_after_seconds: Optional[float] = None
     # Model identity reported by the provider for this physical call. The PM
-    # must not infer it from a configured catalog when the provider chose the
-    # model itself; this is evidence from the provider receipt.
+    # must not infer it from a configured catalog or requested model. This is
+    # the authoritative provider-confirmed identity when model_source is
+    # "reported" or "reported_receipt". A receipt is accepted for Codex
+    # according to its lang contract; provider-specific authority remains
+    # defined by the provider's lang file.
     model: Optional[str] = None
     # How `model` was established: "reported" when the provider's own CLI
-    # response confirmed it, "requested" when it is only known because this
+    # response confirmed it, "reported_receipt" when the provider's required
+    # task receipt supplied it without machine metadata, "requested" when it is only known because this
     # call's AgentRunRequest.requested_model was passed to the CLI (not yet
     # confirmed by the provider), "configured" when it is only known because
     # config.yaml's static value was passed. None when `model` itself is None
     # (no value was ever sent or reported - never invent one, see
     # claude_code.py's _reported_model()).
     model_source: Optional[str] = None
+    # Model explicitly requested by the caller/broker. This is never evidence
+    # that the provider actually used the model.
+    requested_model: Optional[str] = None
+    # Exact model string returned inside a task receipt. Whether it is
+    # authoritative or diagnostic is defined by the provider's lang contract.
+    receipt_model: Optional[str] = None
+    # Record-only comparison of requested, metadata, and receipt identities.
+    model_verification: Optional[dict[str, Any]] = None
     # Machine-passable reason for the ACTUAL provider selection this result
     # represents. Single-provider adapters echo AgentRunRequest.selection_reason
     # unchanged (they have no extra insight of their own). FailoverAgent

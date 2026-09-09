@@ -3,6 +3,12 @@
   "provider": "groq",
   "adapter": "groq.py",
   "purpose": "Převod společného vstupu AO na Groq API a převod odpovědi zpět do AO.",
+  "usage_files": {
+    "current_run": "usage_groq.json",
+    "lifetime": "usage_groq_lifetime.json",
+    "fields": ["input_tokens", "output_tokens", "thinking_tokens", "total_tokens", "cost_usd"],
+    "null_value_rule": "null se zapisuje jako 0"
+  },
   "identity_probe": {
     "method": "probe_identity",
     "kind": "local_configuration",
@@ -27,6 +33,39 @@
       "aliases": false
     },
     "behavior": "Ověří dostupnost bez API požadavku a vrátí nakonfigurovaný model se zdrojem configured."
+  },
+  "task_execution_receipt": {
+    "required_when_model_selection_is_fixed": true,
+    "model_selection_semantics": "fixed_model_selection",
+    "execution_phase": "finalization_only",
+    "tools_during_receipt": false,
+    "agent_request_fields": {
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "answer": {"type": "string"},
+          "model": {"type": "string"}
+        },
+        "required": ["answer", "model"],
+        "additionalProperties": false
+      },
+      "receipt_prompt": "Předej prompt_wrapper jako samostatné pole AgentRunRequest.receipt_prompt; nepřipojuj jej k pracovnímu promptu."
+    },
+    "purpose": "Každý odesílatel úkolu musí spolu s pracovní odpovědí vyžádat i úplné kanonické ID modelu, který odpověď skutečně vytvořil.",
+    "prompt_wrapper": "Return exactly one JSON object with exactly two string fields: answer and model. Put the requested task result in answer. In model, report the exact full canonical model identifier that actually generated this response, as confirmed by the provider response metadata. Do not copy or infer the requested model value. Do not use a generic family label such as GPT-5. Output no JSON outside this object and no explanation.",
+    "response_format": {
+      "type": "JSON object",
+      "required_fields": [
+        "answer",
+        "model"
+      ],
+      "additional_fields": false,
+      "model_rule": "model je skutečně vrácené úplné ID z odpovědi providera; při nedostupnosti nebo přemapování požadovaného modelu může být jiné než v požadavku."
+    },
+  "fallback_if_fixed_model_unavailable": "Úkol se dokončí dostupným modelem, pokud provider vrátí použitelnou odpověď; vždy se uvede skutečné úplné ID tohoto modelu.",
+    "mismatch_policy": "record_only_no_action",
+    "mismatch_consumer_rule": "Rozdíl mezi požadovaným a skutečně vráceným modelem pouze ulož spolu s oběma ID. Nepoužívej ho jako důvod k odmítnutí úkolu, failoveru, změně dostupnosti nebo změně výběru modelu.",
+    "caller_rule": "Přečti katalog přes client.models.list(), předej přesné model_id v API poli model a původní pracovní prompt ponech nezměněný. Při zafixovaném modelu předej response_format jako AgentRunRequest.output_schema a prompt_wrapper jako AgentRunRequest.receipt_prompt; wrapper se nesmí připojit k pracovní zprávě s nástroji. AO ani volající nesmí hodnotu model doplňovat domněnkou; převezme ji pouze z odpovědi providera nebo jejích potvrzených metadat."
   },
   "input_from_ao": {
     "type": "AgentRunRequest",

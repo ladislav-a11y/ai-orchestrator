@@ -12,6 +12,7 @@ Schopnosti tohoto brokeru:
 * na příkaz ``refresh_provider_notes`` postupně obnoví poznámky všech čtyř
   providerů;
 * AO vrací jméno providera, model, stav, důvod a cestu k poznámce;
+* AO vrací také komunikační recept z příslušného ``lang*.json``;
 * nepřijímá pracovní úkol a nikdy nevolá pracovní ``run()`` providera.
 """
 
@@ -156,6 +157,8 @@ class ProviderOffer:
     state: str
     reason: str
     info_file: Optional[str] = None
+    lang_file: Optional[str] = None
+    lang: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -196,14 +199,19 @@ class ProviderBroker:
     def _lang_path(self, provider: str) -> Path:
         return self.lang_dir / LANG_FILES[provider]
 
-    def _model_selection_contract(self, provider: str) -> dict[str, Any]:
+    def _lang_contract(self, provider: str) -> dict[str, Any]:
         path = self._lang_path(provider)
         try:
             contract = json.loads(path.read_text(encoding="utf-8"))
-            selection = contract.get("model_selection")
-            return dict(selection) if isinstance(selection, dict) else {}
         except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
             return {}
+        if not isinstance(contract, dict) or contract.get("provider") != provider:
+            return {}
+        return contract
+
+    def _model_selection_contract(self, provider: str) -> dict[str, Any]:
+        selection = self._lang_contract(provider).get("model_selection")
+        return dict(selection) if isinstance(selection, dict) else {}
 
     def _save_info(self, info: ProviderInfo) -> None:
         path = self._info_path(info.provider)
@@ -431,6 +439,8 @@ class ProviderBroker:
                 state=info.state,
                 reason=info.reason or "Provider je dostupný.",
                 info_file=str(self._info_path(info.provider)),
+                lang_file=str(self._lang_path(info.provider)),
+                lang=self._lang_contract(info.provider),
             )
         return ProviderOffer(
             provider=None,
@@ -466,6 +476,15 @@ class ProviderBroker:
             if info.state == "AVAILABLE":
                 return self._offer(info)
         return self._first_available(infos)
+
+    def select_named_provider(self, provider: str) -> ProviderOffer:
+        """Return the offer for an explicitly requested provider."""
+        if provider not in PROVIDER_ORDER:
+            raise ValueError(f"Neznámý provider {provider!r}.")
+        info, valid = self._load_info(provider)
+        if not valid or info.state in {"UNKNOWN", "ERROR"}:
+            info = self._probe(provider)
+        return self._offer(info)
 
     def refresh_provider_notes(self) -> dict[str, Any]:
         infos = {
@@ -552,6 +571,13 @@ class ProviderBroker:
     def ask(self, query: str | Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(query, Mapping):
             command = query.get("command")
+            if command == SELECT_PROVIDER_QUERY and query.get("provider"):
+                offer = self.select_named_provider(str(query.get("provider")))
+                return {
+                    "command": SELECT_PROVIDER_QUERY,
+                    "order": list(PROVIDER_ORDER),
+                    "offer": offer.to_dict(),
+                }
             if command == SET_PROVIDER_MODEL_QUERY:
                 return self.set_provider_model(
                     str(query.get("provider") or ""),

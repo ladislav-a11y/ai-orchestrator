@@ -286,7 +286,7 @@ def test_build_command_falls_back_to_configured_model_without_override():
     assert cmd[cmd.index("--model") + 1] == "gpt-5.6"
 
 
-def test_run_model_source_is_requested_when_provider_does_not_confirm(monkeypatch):
+def test_run_does_not_claim_requested_model_when_provider_does_not_confirm(monkeypatch):
     agent = CodexAgent(make_config(model="gpt-5.6"))
     monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
 
@@ -303,11 +303,13 @@ def test_run_model_source_is_requested_when_provider_does_not_confirm(monkeypatc
     result = agent.run(
         AgentRunRequest(project_path=Path("."), prompt="udelej neco", requested_model="gpt-6-preview")
     )
-    assert result.model == "gpt-6-preview"
-    assert result.model_source == "requested"
+    assert result.model is None
+    assert result.model_source is None
+    assert result.requested_model == "gpt-6-preview"
+    assert result.model_verification["status"] == "UNVERIFIED"
 
 
-def test_run_model_source_is_configured_without_override(monkeypatch):
+def test_run_does_not_claim_configured_model_when_provider_does_not_confirm(monkeypatch):
     agent = CodexAgent(make_config(model="gpt-5.6"))
     monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
 
@@ -322,8 +324,126 @@ def test_run_model_source_is_configured_without_override(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
-    assert result.model == "gpt-5.6"
-    assert result.model_source == "configured"
+    assert result.model is None
+    assert result.model_source is None
+    assert result.requested_model == "gpt-5.6"
+    assert result.model_verification["status"] == "UNVERIFIED"
+
+
+def test_run_keeps_receipt_identity_separate_and_records_mismatch(monkeypatch):
+    agent = CodexAgent(make_config(model="gpt-5.6-luna"))
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    fake_stdout = jsonl(
+        {"type": "thread.started", "thread_id": "thread-receipt"},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": '{"answer":"hotovo","model":"gpt-5-codex"}',
+            },
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 10, "output_tokens": 4, "reasoning_output_tokens": 1},
+        },
+    )
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[cmd.index("--model") + 1] == "gpt-5.6-luna"
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = agent.run(
+        AgentRunRequest(
+            project_path=Path("."),
+            prompt="udelej neco",
+            requested_model="gpt-5.6-luna",
+            receipt_prompt="Return exactly one JSON object with answer and model.",
+        )
+    )
+
+    assert result.success is True
+    assert result.model == "gpt-5-codex"
+    assert result.model_source == "reported_receipt"
+    assert result.requested_model == "gpt-5.6-luna"
+    assert result.receipt_model == "gpt-5-codex"
+    assert result.model_verification["status"] == "MISMATCH"
+    assert result.model_verification["metadata_model"] is None
+
+
+def test_run_accepts_exact_receipt_model_as_match_without_metadata(monkeypatch):
+    agent = CodexAgent(make_config(model="gpt-5.6-sol"))
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    fake_stdout = jsonl(
+        {"type": "thread.started", "thread_id": "thread-receipt-match"},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": '{"answer":"hotovo","model":"gpt-5.6-sol"}',
+            },
+        },
+        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 4}},
+    )
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(
+            cmd, returncode=0, stdout=fake_stdout, stderr=""
+        ),
+    )
+    result = agent.run(
+        AgentRunRequest(
+            project_path=Path("."),
+            prompt="udelej neco",
+            requested_model="gpt-5.6-sol",
+            receipt_prompt="Return exactly one JSON object with answer and model.",
+        )
+    )
+    assert result.model == "gpt-5.6-sol"
+    assert result.model_source == "reported_receipt"
+    assert result.model_verification["status"] == "MATCH"
+    assert result.model_verification["authoritative_model"] == "gpt-5.6-sol"
+
+
+def test_run_metadata_model_wins_over_receipt_identity(monkeypatch):
+    agent = CodexAgent(make_config(model="gpt-5.6-luna"))
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    fake_stdout = jsonl(
+        {"type": "thread.started", "thread_id": "thread-metadata"},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": '{"answer":"hotovo","model":"gpt-5-codex"}',
+            },
+        },
+        {
+            "type": "turn.completed",
+            "model": "gpt-5.6-sol",
+            "usage": {"input_tokens": 10, "output_tokens": 4},
+        },
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = agent.run(
+        AgentRunRequest(
+            project_path=Path("."),
+            prompt="udelej neco",
+            requested_model="gpt-5.6-luna",
+            receipt_prompt="Return exactly one JSON object with answer and model.",
+        )
+    )
+
+    assert result.model == "gpt-5.6-sol"
+    assert result.model_source == "reported"
+    assert result.receipt_model == "gpt-5-codex"
+    assert result.model_verification["authoritative_model"] == "gpt-5.6-sol"
+    assert result.model_verification["status"] == "MISMATCH"
 
 
 def test_run_echoes_selection_reason_into_result(monkeypatch):

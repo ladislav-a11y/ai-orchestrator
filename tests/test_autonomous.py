@@ -3,6 +3,8 @@ import logging
 import re
 from pathlib import Path
 
+import pytest
+
 from orchestrator.agents.base import Agent, AgentRunResult
 from orchestrator.autonomous import (
     ABSOLUTE_MAX_ITERATIONS,
@@ -15,6 +17,7 @@ from orchestrator.autonomous import (
     PROTOCOL_ERROR_STREAK_LIMIT,
     _extract_json,
     _build_audit_prompt,
+    _build_iteration_prompt,
     _audit_evidence_has_project_scope,
     _audit_needs_quality_fallback,
     compact_audit_goal,
@@ -26,6 +29,13 @@ from orchestrator.autonomous import (
     run_autonomous_loop,
 )
 from orchestrator.config import Config, GitConfig
+from orchestrator.context_compaction import (
+    ContextOverflowError,
+    MAX_HISTORY_CHARS,
+    MAX_PROJECT_STATUS_CHARS,
+    MAX_TEST_OUTPUT_CHARS,
+    require_canonical_text,
+)
 
 LOGGER = logging.getLogger("test")
 
@@ -211,6 +221,45 @@ def test_audit_prompt_includes_successful_test_output():
     )
 
     assert "324 passed, 4 skipped in 30.77s" in prompt
+
+
+def test_iteration_and_audit_prompts_share_bounded_history_context():
+    dod = parse_definition_of_done("- [ ] implementace")
+    old_notes = "old-note " * 2000
+    newest_note = old_notes + " NEWEST-ACTIONABLE-STATE"
+    iteration = _build_iteration_prompt(
+        "cil",
+        dod,
+        [0],
+        1,
+        2,
+        "status " * 2000,
+        "pytest -q",
+        False,
+        "old-test " * 2000 + " NEWEST-TEST-RESULT",
+        newest_note,
+    )
+    audit = _build_audit_prompt(
+        "cil",
+        dod,
+        "status " * 2000,
+        "pytest -q",
+        False,
+        "old-test " * 2000 + " NEWEST-TEST-RESULT",
+    )
+
+    assert "NEWEST-ACTIONABLE-STATE" in iteration
+    assert "NEWEST-TEST-RESULT" in iteration
+    assert "NEWEST-TEST-RESULT" in audit
+    assert "starší kontext zkrácen" in iteration
+    assert MAX_HISTORY_CHARS < len(newest_note)
+    assert MAX_PROJECT_STATUS_CHARS < len("status " * 2000)
+    assert MAX_TEST_OUTPUT_CHARS < len("old-test " * 2000)
+
+
+def test_canonical_goal_overflow_fails_closed_instead_of_truncating():
+    with pytest.raises(ContextOverflowError):
+        require_canonical_text("x" * 16001, field="goal")
 
 
 def test_audit_prompt_distinguishes_preexisting_paths_from_task_scope():
@@ -1804,7 +1853,7 @@ def test_audit_quality_fallback_rechecks_generic_refusal_with_next_provider(tmp_
 
         def force_failover_on_audit_quality(self, reason):
             self.failover_reasons.append(reason)
-            self.active_provider_name = "gemini"
+            self.active_provider_name = "codex"
             return True
 
         def _run(self, request):

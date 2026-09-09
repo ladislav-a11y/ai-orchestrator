@@ -91,6 +91,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, model_from_paths
+from orchestrator.agents.usage_ledger import record_provider_run
 from orchestrator.config import CODEX_ALLOWED_SANDBOX_MODES, CodexAgentConfig
 
 FORBIDDEN_FLAGS = (
@@ -196,12 +197,11 @@ def _extract_retry_after_seconds(raw: dict, text: str) -> Optional[float]:
     return None
 
 
-def _reported_model(
-    events: list[dict], effective_model: str = "", requested: bool = False
-) -> tuple[Optional[str], Optional[str]]:
-    """Extract (model, model_source) from Codex events without inventing one.
+def _reported_model(events: list[dict]) -> tuple[Optional[str], Optional[str]]:
+    """Extract only provider-confirmed model metadata from Codex events.
 
-    See AntigravityAgent._reported_model for the model_source rationale.
+    Requested/configured values are deliberately not used as a reported
+    identity. A normal Codex work response may omit model metadata entirely.
     """
     discovery = _identity_contract()["model_discovery"]
     names: list[str] = []
@@ -213,10 +213,91 @@ def _reported_model(
                     names.append(value)
     if names:
         return ", ".join(names), "reported"
-    effective_model = effective_model.strip()
-    if effective_model:
-        return effective_model, ("requested" if requested else "configured")
     return None, None
+
+
+def _task_receipt(text: str) -> Optional[dict[str, str]]:
+    """Parse the strict answer/model receipt returned by a work prompt."""
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict) or set(value) != {"answer", "model"}:
+        return None
+    answer = value.get("answer")
+    model = value.get("model")
+    if not isinstance(answer, str) or not isinstance(model, str) or not model.strip():
+        return None
+    return {"answer": answer, "model": model.strip()}
+
+
+def _work_model_verification(
+    requested_model: Optional[str],
+    metadata_model: Optional[str],
+    receipt_model: Optional[str],
+) -> dict[str, Any]:
+    requested = requested_model.strip() if isinstance(requested_model, str) else ""
+    if metadata_model:
+        status = (
+            "REPORTED"
+            if not requested
+            else "MATCH" if metadata_model == requested else "MISMATCH"
+        )
+        detail = (
+            f"Codex metadata nahlásila {metadata_model!r}."
+            if not requested
+            else (
+                f"Codex metadata přesně potvrdila požadovaný model {requested!r}."
+                if status == "MATCH"
+                else f"Codex metadata nahlásila {metadata_model!r}, požadován byl {requested!r}."
+            )
+        )
+        return {
+            "status": status,
+            "exact_match": status == "MATCH" if requested else None,
+            "requested_model": requested or None,
+            "metadata_model": metadata_model,
+            "receipt_model": receipt_model,
+            "authoritative_model": metadata_model,
+            "detail": detail,
+        }
+    if receipt_model:
+        # Codex's lang contract explicitly requires the provider to return the
+        # full canonical model in the task receipt.  When JSONL metadata is
+        # absent, that provider-produced receipt is the available identity
+        # evidence; never replace it with the requested/configured value.
+        status = (
+            "REPORTED"
+            if not requested
+            else "MATCH" if receipt_model == requested else "MISMATCH"
+        )
+        detail = (
+            f"Codex receipt nahlásil model {receipt_model!r}."
+            if not requested
+            else (
+                f"Codex receipt přesně potvrdil požadovaný model {requested!r}; JSONL metadata chybí."
+                if status == "MATCH"
+                else f"Codex receipt nahlásil {receipt_model!r}, požadován byl {requested!r}; JSONL metadata chybí."
+            )
+        )
+        return {
+            "status": status,
+            "exact_match": status == "MATCH" if requested else None,
+            "requested_model": requested or None,
+            "metadata_model": None,
+            "receipt_model": receipt_model,
+            "authoritative_model": receipt_model,
+            "detail": detail,
+        }
+    return {
+        "status": "UNVERIFIED",
+        "exact_match": None,
+        "requested_model": requested or None,
+        "metadata_model": None,
+        "receipt_model": None,
+        "authoritative_model": None,
+        "detail": "Codex neposkytl ani modelová metadata, ani platný task receipt modelu.",
+    }
 
 
 def _identity_model_verification(
@@ -653,6 +734,7 @@ class CodexAgent(Agent):
 
         return cmd
 
+    @record_provider_run("codex")
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         effective_model, model_requested = self._effective_model(request)
         model_source = "requested" if model_requested else ("configured" if effective_model else None)
@@ -668,6 +750,8 @@ class CodexAgent(Agent):
         prompt = request.prompt
         if request.context:
             prompt = f"{request.prompt}\n\n---\n{request.context}"
+        if isinstance(request.receipt_prompt, str) and request.receipt_prompt.strip():
+            prompt = f"{prompt}\n\n---\n{request.receipt_prompt.strip()}"
         prompt = f"{prompt}\n\n---\n{NO_COMMIT_INSTRUCTION}\n\n---\n{TEST_EXECUTION_INSTRUCTION}"
         effective_request = AgentRunRequest(
             project_path=request.project_path,
@@ -675,6 +759,7 @@ class CodexAgent(Agent):
             session_id=request.session_id,
             output_schema=request.output_schema,
             requested_model=request.requested_model,
+            receipt_prompt=request.receipt_prompt,
         )
 
         output_schema_path: Optional[Path] = None
@@ -795,7 +880,25 @@ class CodexAgent(Agent):
             "total_tokens": total_tokens,
         }
         raw_response = {"events": events}
-        reported_model, reported_model_source = _reported_model(events, effective_model, model_requested)
+        metadata_model, metadata_model_source = _reported_model(events)
+        receipt = _task_receipt(last_agent_message) if request.receipt_prompt else None
+        receipt_model = receipt.get("model") if receipt else None
+        model_verification = _work_model_verification(
+            effective_model,
+            metadata_model,
+            receipt_model,
+        )
+        result_model = metadata_model or receipt_model
+        result_model_source = metadata_model_source or (
+            "reported_receipt" if receipt_model else None
+        )
+        identity_fields = {
+            "model": result_model,
+            "model_source": result_model_source,
+            "requested_model": effective_model or None,
+            "receipt_model": receipt_model,
+            "model_verification": model_verification,
+        }
 
         if error_event is not None:
             error_message = error_event.get("message") or "Codex CLI vrátilo chybu."
@@ -809,8 +912,7 @@ class CodexAgent(Agent):
                     error=f"Codex CLI hlásí vyčerpání kvóty/limitu (LIMITED): {error_message}",
                     limited=True,
                     retry_after_seconds=retry_after_seconds,
-                    model=reported_model,
-                    model_source=reported_model_source,
+                    **identity_fields,
                     selection_reason=request.selection_reason,
                     **token_fields,
                 )
@@ -820,8 +922,7 @@ class CodexAgent(Agent):
                 raw_response=raw_response,
                 session_id=session_id,
                 error=f"Codex CLI vrátilo chybu: {error_message}",
-                model=reported_model,
-                model_source=reported_model_source,
+                **identity_fields,
                 selection_reason=request.selection_reason,
                 **token_fields,
             )
@@ -838,8 +939,7 @@ class CodexAgent(Agent):
                     f"neúplný výstup (exit kod {proc.returncode})"
                     + (f": {stderr}" if stderr else ".")
                 ),
-                model=reported_model,
-                model_source=reported_model_source,
+                **identity_fields,
                 selection_reason=request.selection_reason,
                 **token_fields,
             )
@@ -850,8 +950,7 @@ class CodexAgent(Agent):
             raw_response=raw_response,
             session_id=session_id,
             error=None,
-            model=reported_model,
-            model_source=reported_model_source,
+            **identity_fields,
             selection_reason=request.selection_reason,
             **token_fields,
         )

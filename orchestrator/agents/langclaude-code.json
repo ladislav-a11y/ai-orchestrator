@@ -3,6 +3,12 @@
   "provider": "claude-code",
   "adapter": "claude_code.py",
   "purpose": "Převod společného vstupu AO na neinteraktivní CLI Claude Code a převod odpovědi zpět do AO.",
+  "usage_files": {
+    "current_run": "usage_claude-code.json",
+    "lifetime": "usage_claude-code_lifetime.json",
+    "fields": ["input_tokens", "output_tokens", "thinking_tokens", "total_tokens", "cost_usd"],
+    "null_value_rule": "null se zapisuje jako 0"
+  },
   "identity_probe": {
     "method": "probe_identity",
     "kind": "identity_request",
@@ -36,6 +42,24 @@
       "unknown_catalog_rule": "Bez autentizovaného katalogu se modely nesmí domýšlet."
     },
     "behavior": "Po kontrole verze provede pouze read-only identifikační dotaz v CLI JSON režimu a z odpovědi přečte model."
+  },
+  "task_execution_receipt": {
+    "required_for_forced_model": true,
+    "purpose": "Každý odesílatel úkolu musí spolu s pracovní odpovědí vyžádat i úplné kanonické ID modelu, který odpověď skutečně vytvořil.",
+    "prompt_wrapper": "Return exactly one JSON object with exactly two string fields: answer and model. Put the requested task result in answer. In model, report the exact full canonical model identifier that actually generated this response, as confirmed by the provider response metadata or modelUsage. Do not copy or infer the requested --model value. Do not use a generic family label such as GPT-5. Output no JSON outside this object and no explanation.",
+    "response_format": {
+      "type": "JSON object",
+      "required_fields": [
+        "answer",
+        "model"
+      ],
+      "additional_fields": false,
+      "model_rule": "model je skutečně vrácené úplné ID z odpovědi providera nebo modelUsage; při nedostupnosti nebo přemapování požadovaného modelu může být jiné než v --model."
+    },
+    "fallback_if_forced_model_unavailable": "Úkol se dokončí dostupným modelem, pokud provider vrátí použitelnou odpověď; vždy se uvede skutečné úplné ID tohoto modelu.",
+    "mismatch_policy": "record_only_no_action",
+    "mismatch_consumer_rule": "Rozdíl mezi požadovaným a skutečně vráceným modelem pouze ulož spolu s oběma ID. Nepoužívej ho jako důvod k odmítnutí úkolu, failoveru, změně dostupnosti nebo změně výběru modelu.",
+    "caller_rule": "Předej přesné providerem doložené ID přes CLI argument --model a k původnímu zadání připoj prompt_wrapper. AO ani volající nesmí hodnotu model doplňovat domněnkou; převezme ji pouze z odpovědi providera nebo jejích potvrzených metadat. --fallback-model použij jen jako výslovně zvolenou záložní strategii, ne jako tvrzení o skutečně použitém modelu."
   },
   "input_from_ao": {
     "type": "AgentRunRequest",

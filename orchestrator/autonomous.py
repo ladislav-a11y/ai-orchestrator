@@ -82,6 +82,29 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from orchestrator.agents.base import Agent, AgentRunRequest
+from orchestrator.context_compaction import (
+    MAX_HISTORY_CHARS,
+    MAX_PROJECT_STATUS_CHARS,
+    MAX_TEST_OUTPUT_CHARS,
+    compact_history,
+    require_canonical_text,
+)
+
+
+AUTONOMOUS_IMPLEMENTATION_CAPABILITIES = frozenset(
+    {
+        "list_files",
+        "read_file",
+        "search_text",
+        "write_file",
+        "replace_text",
+        "git_status",
+        "git_diff",
+    }
+)
+AUTONOMOUS_AUDIT_CAPABILITIES = frozenset(
+    {"list_files", "read_file", "search_text", "git_status", "git_diff"}
+)
 from orchestrator.config import Config
 from orchestrator.git_utils import (
     GitError,
@@ -95,7 +118,6 @@ from orchestrator.git_utils import (
     status_porcelain,
 )
 from orchestrator.runner import run_test_command, tail_text
-from orchestrator.slack_notify import notify
 
 DEFAULT_MAX_ITERATIONS = 10
 # Sanity ceiling - independent of what a caller/CLI flag requests, so a typo
@@ -908,6 +930,7 @@ def _build_audit_repair_prompt(
     re-listing of every DoD item's full text unless the item text is short.
     The contract (schema shape) is restated because that is what broke.
     """
+    previous_test_output = compact_history(previous_test_output, MAX_TEST_OUTPUT_CHARS)
     lines = [
         "Tvá předchozí audit odpověď nebyla platný JSON podle zadaného kontraktu.",
         "NEDĚLEJ žádnou novou kontrolu, nic neměň - jen znovu pošli svůj výsledek "
@@ -1023,6 +1046,10 @@ def _build_iteration_prompt(
     previous-iteration notes carry whatever continuity is needed. The Claude
     Code session itself is resumed (`--resume`) so conversational context
     from earlier iterations is not lost either."""
+    goal = require_canonical_text(goal, field="goal")
+    project_status = compact_history(project_status, MAX_PROJECT_STATUS_CHARS)
+    test_output = compact_history(test_output, MAX_TEST_OUTPUT_CHARS) if test_output else test_output
+    previous_notes = compact_history(previous_notes, MAX_HISTORY_CHARS)
     done_count = sum(1 for item in dod_items if item.done)
     total = len(dod_items)
     lines = [
@@ -1096,6 +1123,9 @@ def _build_audit_prompt(
     exactly once, right before a commit) but explicitly forbids making any
     changes: this is a read-only review pass (Manager/Executor/Auditor
     style), not a second implementation attempt."""
+    goal = require_canonical_text(goal, field="goal")
+    project_status = compact_history(project_status, MAX_PROJECT_STATUS_CHARS)
+    test_output = compact_history(test_output, MAX_TEST_OUTPUT_CHARS) if test_output else test_output
     lines = [
         f"{AUDIT_MARKER} (nezávislá kontrola před dokončením běhu - NEDĚLEJ žádné změny v kódu "
         "ani v souborech, pouze ověřuj).",
@@ -1427,6 +1457,7 @@ def _run_audit(
             prompt=prompt,
             session_id=session_id,
             output_schema=audit_schema,
+            required_capabilities=AUTONOMOUS_AUDIT_CAPABILITIES,
         )
     )
     new_session_id = result.session_id or session_id
@@ -1497,128 +1528,15 @@ def _run_audit(
 
     missing_scope = not _audit_evidence_has_project_scope(goal, project_path, evidence_lines)
     if _audit_needs_quality_fallback(rejected, evidence_lines, len(dod_items)) or missing_scope:
-        fallback_reason = (
-            "audit vrátil zamítnutí všech bodů bez konkrétního ověření checkoutu"
-            if not missing_scope
-            else "auditní evidence neobsahuje konkrétní důkaz vztahující se k cíli projektu"
-        )
-        force_quality_failover = getattr(agent, "force_failover_on_audit_quality", None)
-        if callable(force_quality_failover) and force_quality_failover(fallback_reason):
-            logger.warning(
-                "Autonomní běh %s: iterace %s - první auditní odpověď je věcně "
-                "nedostatečná, opakuji audit u dalšího providera.",
-                run_id, iteration,
-            )
-            fallback_result = agent.run(
-                AgentRunRequest(
-                    project_path=project_path,
-                    prompt=prompt,
-                    # Do not carry the first provider's audit session into the
-                    # independent fallback call.
-                    session_id=None,
-                    output_schema=audit_schema,
-                )
-            )
-            fallback_session_id = fallback_result.session_id
-            fallback_provider = getattr(
-                agent, "active_provider_name", getattr(agent, "name", None)
-            )
-            audit_usage.extend(
-                _usage_from_result(
-                    fallback_result, fallback_provider, "audit-fallback", iteration
-                )
-            )
-            if not fallback_result.success:
-                detail = fallback_result.error or "záložní auditní provider nevrátil bližší důvod"
-                if fallback_result.limited:
-                    return AuditOutcome(
-                        [],
-                        f"První audit byl věcně nedostatečný; záložní audit narazil na limit: {detail}",
-                        True,
-                        fallback_session_id or new_session_id,
-                        saved,
-                        limited=True,
-                        retry_after_seconds=fallback_result.retry_after_seconds,
-                        error=detail,
-                        usage_events=audit_usage,
-                    )
-                return AuditOutcome(
-                    [],
-                    f"První audit byl věcně nedostatečný; záložní audit selhal: {detail}",
-                    True,
-                    fallback_session_id or new_session_id,
-                    saved,
-                    error=detail,
-                    usage_events=audit_usage,
-                )
-
-            fallback_parsed = _extract_json(fallback_result.output_text)
-            if not fallback_parsed:
-                return AuditOutcome(
-                    [],
-                    "První audit byl věcně nedostatečný; záložní audit nevrátil JSON.",
-                    True,
-                    fallback_session_id or new_session_id,
-                    saved,
-                    error="záložní audit nevrátil JSON",
-                    usage_events=audit_usage,
-                )
-            fallback_protocol_error, fallback_rejected, fallback_evidence = _validate_audit_response(
-                fallback_parsed, expected_indices, len(dod_items),
-            )
-            if fallback_protocol_error:
-                return AuditOutcome(
-                    [],
-                    "První audit byl věcně nedostatečný; záložní audit porušil auditní JSON kontrakt.",
-                    True,
-                    fallback_session_id or new_session_id,
-                    saved,
-                    error="záložní audit porušil JSON kontrakt",
-                    usage_events=audit_usage,
-                )
-            if not _audit_evidence_has_project_scope(goal, project_path, fallback_evidence):
-                return AuditOutcome(
-                    [],
-                    "Záložní audit také neobsahoval konkrétní důkaz vztahující se k cíli projektu.",
-                    True,
-                    fallback_session_id or new_session_id,
-                    saved,
-                    error="auditní evidence bez relevance k cíli projektu",
-                    usage_events=audit_usage,
-                )
-            fallback_notes = fallback_parsed.get("notes")
-            fallback_notes = fallback_notes if isinstance(fallback_notes, str) else ""
-            combined_evidence = [
-                f"první auditní provider: {fallback_reason}",
-                *fallback_evidence,
-            ]
-            fallback_notes = (fallback_notes + " | " + " ; ".join(combined_evidence)).strip(" |")
-            logger.info(
-                "Autonomní běh %s: iterace %s - záložní nezávislý audit dokončen, "
-                "zamítnuto %s bod(ů).",
-                run_id, iteration, len(fallback_rejected),
-            )
-            return AuditOutcome(
-                fallback_rejected,
-                fallback_notes,
-                False,
-                fallback_session_id or new_session_id,
-                saved,
-                usage_events=audit_usage,
-            )
-
-        # In a forced single-provider run, do not turn a generic refusal into
-        # a real rejection that would reopen implementation work. Without an
-        # actual independent verdict the run must stop fail-closed.
         logger.warning(
             "Autonomní běh %s: iterace %s - auditní odpověď je věcně nedostatečná "
-            "a není nakonfigurován dostupný auditní fallback.",
+            "nebo bez konkrétní relevance k cíli; běh se zastavuje fail-closed.",
             run_id, iteration,
         )
         return AuditOutcome(
             [],
             "Auditní odpověď byla formálně platná, ale neobsahovala konkrétní nezávislé "
-            "ověření; žádný auditní fallback není dostupný. | " + notes,
+            "ověření nebo relevanci k cíli projektu. | " + notes,
             True,
             new_session_id,
             saved,
@@ -1704,6 +1622,7 @@ def _audit_with_repair(
             prompt=repair_prompt,
             session_id=new_session_id,
             output_schema=_audit_response_schema(len(dod_items)),
+            required_capabilities=AUTONOMOUS_AUDIT_CAPABILITIES,
         )
     )
     repair_usage = _usage_from_result(repair_result, provider, "audit-repair", iteration)
@@ -2066,6 +1985,7 @@ def run_autonomous_loop(
                     prompt=prompt,
                     session_id=session_id,
                     output_schema=_dod_response_schema(requested_indices),
+                    required_capabilities=AUTONOMOUS_IMPLEMENTATION_CAPABILITIES,
                 )
             )
             provider_name = getattr(agent, "active_provider_name", getattr(agent, "name", None))
@@ -2116,6 +2036,7 @@ def run_autonomous_loop(
                         prompt=repair_prompt,
                         session_id=session_id,
                         output_schema=_dod_response_schema(repair_targets),
+                        required_capabilities=AUTONOMOUS_IMPLEMENTATION_CAPABILITIES,
                     )
                 )
                 repair_usage = _usage_from_result(
@@ -2427,35 +2348,15 @@ def run_autonomous_loop(
                 "(i po repair pokusu) - jde o protokolovou nekompatibilitu, ne o chybějící "
                 "pokrok v úkolu."
             )
-            # A repeated protocol violation is a provider-side
-            # incompatibility, exactly like a quota/rate limit - so it gets
-            # the same right to fail over to another configured provider
-            # (see agents/failover.py's FailoverAgent), not just quota/rate
-            # limits. Plain single-agent callers (no failover configured)
-            # have no such method and fall straight through to stopping.
-            force_failover = getattr(agent, "force_failover_on_protocol_error", None)
-            if callable(force_failover) and force_failover(reason):
-                logger.warning(
-                    "Autonomní běh %s: iterace %s/%s - %s Failover proveden, pokračuji dalším "
-                    "providerem.",
-                    run_id, i, max_iterations, reason,
-                )
-                protocol_error_streak = 0
-            else:
-                logger.error(
-                    "Autonomní běh %s: iterace %s/%s - %s Žádný další provider není k dispozici, "
-                    "zastavuji běh jako PROTOCOL_ERROR místo dalšího plýtvání iteracemi/limitem.",
-                    run_id, i, max_iterations, reason,
-                )
-                notify(
-                    f"[AI Orchestrator] Autonomní běh {run_id} zastaven (PROTOCOL_ERROR): {reason} "
-                    f"Odhadovaná promarněná spotřeba: ~{protocol_error_wasted_chars // 4} tokenů "
-                    f"přes {protocol_error_total} protokolově chybných iterací."
-                )
-                final = snapshot(AutonomousStatus.PROTOCOL_ERROR, error=reason)
-                if on_iteration:
-                    on_iteration(final)
-                return final
+            logger.error(
+                "Autonomní běh %s: iterace %s/%s - %s Provider broker vybírá právě jednoho "
+                "providera; při porušení protokolu se běh zastavuje.",
+                run_id, i, max_iterations, reason,
+            )
+            final = snapshot(AutonomousStatus.PROTOCOL_ERROR, error=reason)
+            if on_iteration:
+                on_iteration(final)
+            return final
 
         # Per-job, provider-specific financial hard cap (see
         # ClaudeCodeAgentConfig/AntigravityAgentConfig/CodexAgentConfig/
@@ -2487,10 +2388,6 @@ def run_autonomous_loop(
                         "Autonomní běh %s: iterace %s/%s - %s Žádný další provider není k "
                         "dispozici, zastavuji běh jako BUDGET_EXCEEDED.",
                         run_id, i, max_iterations, budget_reason,
-                    )
-                    notify(
-                        f"[AI Orchestrator] Autonomní běh {run_id} zastaven (BUDGET_EXCEEDED): "
-                        f"{budget_reason}"
                     )
                     final = snapshot(AutonomousStatus.BUDGET_EXCEEDED, error=budget_reason)
                     if on_iteration:

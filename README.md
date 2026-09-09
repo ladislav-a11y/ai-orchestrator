@@ -6,10 +6,16 @@ zadaný úkol, spustí testy, a pokud vše projde a ty to povolíš, vytvoří G
 commit. Nic se neděje bez tvého vědomí a nic se nikdy neposílá na internet
 mimo volání samotného AI modelu.
 
-Autoritativní podklad pro explicitní volbu modelu, validaci skutečné nabídky a
-vyhodnocení provider receipt je v `PROVIDER_MODEL_CAPABILITIES.md`. Statický seznam
-modelů se záměrně neudržuje, protože dostupnost je vlastností konkrétního CLI, účtu a
-okamžiku ověření.
+Provozní pravidla provider-brokeru, komunikace přes `lang*.json`, volba přesného
+modelu a evidence provider receipt jsou v `PROVIDER_BROKER_GUIDE.md`. Aktuální
+stavy a katalogy modelů jsou pouze v `data/provider-info/*info.json`; statický
+seznam modelů se v dokumentaci nekopíruje.
+
+Pracovní úkol vždy prochází brokerem. Broker pouze nabídne AO dostupného
+providera, model a příslušný návod z `lang*.json`; AO potom podle tohoto návodu
+zavolá vybraného providera. Broker pracovní úkol neprovádí ani nekontroluje jeho
+výsledek. Každý provider má také `usage_<provider>.json` pro poslední běh a
+`usage_<provider>_lifetime.json` pro kumulovanou spotřebu podle přesného modelu.
 
 Tento návod nepředpokládá, že umíš programovat nebo pracovat s Gitem -
 všechny příkazy níže stačí zkopírovat a spustit.
@@ -145,10 +151,11 @@ necommitovat, když testy selžou".
 .venv\Scripts\python orchestrator.py run "Přidej do README.md sekci Instalace" --project muj-projekt
 ```
 
-Orchestrátor spustí Claude Code na daném projektu, počká na výsledek, podle
-konfigurace spustí testy, a vypíše, co se stalo (výsledek, výstup testů,
-zda vznikl commit). Detailní log najdeš v `logs/tasks/<id>.log` a strojově
-čitelný výsledek v `outbox/<id>.json`.
+Orchestrátor požádá provider-broker o nabídku, podle vráceného `lang*.json`
+předá úkol vybranému providerovi, počká na výsledek, podle konfigurace spustí
+testy a vypíše, co se stalo (výsledek, výstup testů, zda vznikl commit).
+Detailní log najdeš v `logs/tasks/<id>.log` a strojově čitelný výsledek v
+`outbox/<id>.json`.
 
 ## 6. Autonomní vývojový režim
 

@@ -3,11 +3,15 @@
 ## Cílový pracovní tok
 
 ```
-uživatel
+uživatel / AO
     |
-orchestrátor
+OrchestratorService
     |
-implementační agent   (ClaudeCodeAgent, GeminiAgent, CodexAgent)
+provider broker (výběr a nabídka)
+    |
+AO převezme provider, model a návod z lang*.json
+    |
+vybraný provider provede úkol
     |
 testy                 (volitelný test_command daného projektu)
     |
@@ -137,20 +141,16 @@ jako u ostatních `permission_mode`/`FORBIDDEN_*` kontrol.
 ## Volba providera a modelu per požadavek a provider receipt
 
 Navazuje na rešerši v `PROVIDER_MODEL_ROUTING_RESEARCH.md` (kap. 6): AI
-Project Manager (nebo jiný volající) musí umět pro jeden konkrétní
-požadavek zvolit model bez úpravy `config.yaml`, a zpětně z výsledku
-spolehlivě zjistit, který provider/model byl skutečně použit a proč.
-AI Orchestrator zůstává "dumb pipe" - nevaliduje `requested_model` proti
-žádnému katalogu (žádný v repozitáři neexistuje), jen ho předá dál a
-reportuje, co se skutečně stalo.
+Project Manager (nebo jiný volající) předá požadavek brokeru. Broker vlastní
+stav providerů, katalogy modelů, pořadí výběru i případné zafixování modelu.
+Broker pracovní úkol nespouští; AO od něj převezme nabídku providera, přesný
+model a návod z příslušného `lang*.json`, podle kterého vybraného providera
+zavolá přímo. Produkční tok proto neobchází broker přímým výběrem providera.
 
-- `AgentRunRequest.requested_model` (`agents/base.py`) - nepovinný per-volání
-  override modelu. Když je vyplněný a neprázdný, provider ho použije místo
-  `config.<provider>.model` jen pro toto volání; prázdná/blank hodnota se
-  chová jako "žádný override". Provider, který dostane hodnotu, jakou jeho
-  CLI nezná, ji předá dál beze změny - bezpečné chování je, že CLI samo
-  vrátí chybu a adaptér ji zabalí do běžného `AgentRunResult(success=False,
-  ...)`, nikdy nespadne ani netiše neignoruje požadavek.
+- `AgentRunRequest.requested_model` (`agents/base.py`) - model předaný AO
+  brokerem podle jeho nabídky. Prázdná/blank hodnota znamená, že AO přijímá
+  model vybraný providerem. Produkční caller model neurčuje mimo broker; adapter
+  pouze použije hodnotu, kterou od AO obdržel.
 - `AgentRunRequest.selection_reason` - opakní, orchestrátorem
   nevalidovaný důvod volby (např. `"explicit_agent"`, `"default_agent"`,
   nebo PM vlastní klasifikační štítek úlohy). Prochází beze změny až do
@@ -158,13 +158,14 @@ reportuje, co se skutečně stalo.
   níže).
 - `AgentRunResult.model`/`model_source` - `model` nese nejlepší dostupnou
   evidenci o skutečně použitém modelu; `model_source` rozlišuje `"reported"`
-  (provider to sám potvrdil ve své JSON odpovědi), `"requested"` (jen víme,
+  (provider to sám potvrdil ve své JSON odpovědi), `"reported_receipt"`
+  (přesný model z platného receipt, pokud metadata chybí), `"requested"` (jen víme,
   že jsme poslali `requested_model`, provider to nepotvrdil) a
   `"configured"` (poslali jsme statickou `config.yaml` hodnotu, opět
   nepotvrzenou). `None`/`None`, když provider nic neposlal ani nic
   nekonfiguroval - hodnota se nikdy nevymýšlí (viz `claude_code.py`'s
   `_reported_model()`, který u Claude Code záměrně NIKDY nepoužije
-  `requested`/`configured` fallback, protože Claude Code smí zvolit model
+  `requested`/`configured` fallback, protože provider smí zvolit model
   sám i když `--model` nedostal).
 - `FailoverAgent._compose_selection_reason()` (`agents/failover.py`) - když
   výsledné volání proběhlo na prvním zkoušeném provideru, důvod se jen
@@ -192,9 +193,9 @@ reportuje, co se skutečně stalo.
   `inbox/` stejně nevalidovaně jako `submit()`.
 
 Mimo rozsah (viz rešerše kap. 6 bod 5 a `inbox_planning_recipe.md`):
-klasifikace úlohy podle typu/složitosti a její promítnutí do konkrétní
-`requested_model`/`selection_reason` hodnoty je vlastnictví AI Project
-Manageru, ne tohoto orchestrátoru. Samostatný, dřívější mechanismus
+klasifikace úlohy podle typu/složitosti zůstává vlastnictvím AI Project Manageru,
+ale vlastní výběr dostupného providera a modelu v produkčním toku provádí broker.
+Samostatný, dřívější mechanismus
 `OrchestratorService.run_autonomous(..., model_override=...)` (per-run
 override modelu pro autonomní smyčku přes dočasně nahrazenou kopii
 `Config`, nikdy ne mutaci originálu) zůstává beze změny vedle tohoto
