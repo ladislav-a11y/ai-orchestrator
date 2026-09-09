@@ -2,24 +2,24 @@
   "provider": "codex",
   "models": {
     "gpt-5.6-sol": {
-      "input_tokens": 197298,
-      "output_tokens": 1783,
-      "thinking_tokens": 703,
-      "total_tokens": 199081,
+      "input_tokens": 316275,
+      "output_tokens": 4159,
+      "thinking_tokens": 1404,
+      "total_tokens": 320434,
       "cost_usd": 0
     },
     "gpt-5.6": {
-      "input_tokens": 23437,
-      "output_tokens": 130,
-      "thinking_tokens": 25,
-      "total_tokens": 23592,
+      "input_tokens": 45045,
+      "output_tokens": 216,
+      "thinking_tokens": 40,
+      "total_tokens": 45301,
       "cost_usd": 0
     },
     "gpt-5-codex": {
-      "input_tokens": 86258,
-      "output_tokens": 919,
-      "thinking_tokens": 451,
-      "total_tokens": 87177,
+      "input_tokens": 304480,
+      "output_tokens": 4069,
+      "thinking_tokens": 1634,
+      "total_tokens": 308549,
       "cost_usd": 0
     },
     "gpt-5.3-codex": {
@@ -27,6 +27,27 @@
       "output_tokens": 290,
       "thinking_tokens": 106,
       "total_tokens": 23237,
+      "cost_usd": 0
+    },
+    "gpt-5.6-sol-codex": {
+      "input_tokens": 47534,
+      "output_tokens": 471,
+      "thinking_tokens": 114,
+      "total_tokens": 48005,
+      "cost_usd": 0
+    },
+    "gpt-5.4": {
+      "input_tokens": 23749,
+      "output_tokens": 26,
+      "thinking_tokens": 0,
+      "total_tokens": 23775,
+      "cost_usd": 0
+    },
+    "gpt-5.4-codex": {
+      "input_tokens": 21308,
+      "output_tokens": 201,
+      "thinking_tokens": 170,
+      "total_tokens": 21509,
       "cost_usd": 0
     }
   }

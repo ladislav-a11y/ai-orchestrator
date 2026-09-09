@@ -47,6 +47,7 @@
   },
   "task_execution_receipt": {
     "required_for_forced_model": true,
+    "required_for_all_runs": true,
     "identity_sources": {
       "metadata": "authoritative",
       "receipt": "authoritative_when_metadata_missing",
@@ -56,7 +57,7 @@
       "receipt_prompt": "Předej prompt_wrapper jako samostatné pole AgentRunRequest.receipt_prompt; nepřepisuj jím requested_model.",
       "requested_model": "Přesné brokerem zafixované model_id; není potvrzením skutečného použití."
     },
-    "purpose": "Každý odesílatel úkolu musí spolu s pracovní odpovědí vyžádat i úplné kanonické ID uvedené providerem. Autoritativní potvrzení identity se odděluje od textového receipt.",
+    "purpose": "Každý odesílatel úkolu musí spolu s pracovní odpovědí vyžádat i úplné kanonické ID uvedené providerem, i když nebyl zafixován konkrétní model. Autoritativní potvrzení identity se odděluje od textového receipt.",
     "prompt_wrapper": "Return exactly one JSON object with exactly two string fields: answer and model. Put the requested task result in answer. In model, report the exact full canonical model identifier that actually generated this response, including the Codex suffix or other specialization. Do not copy or infer the requested --model value. Do not use a generic family label such as GPT-5. Output no JSON outside this object and no explanation.",
     "response_format": {
       "type": "JSON object",
@@ -67,7 +68,7 @@
     "fallback_if_forced_model_unavailable": "Úkol se dokončí dostupným modelem, pokud Codex vrátí použitelnou odpověď; vždy se uvede skutečné úplné ID tohoto modelu.",
     "mismatch_policy": "record_only_no_action",
     "mismatch_consumer_rule": "Rozdíl mezi požadovaným a skutečně vráceným modelem pouze ulož spolu s oběma ID. Nepoužívej ho jako důvod k odmítnutí úkolu, failoveru, změně dostupnosti nebo změně výběru modelu.",
-  "caller_rule": "Nejdříve přečti katalog a vyber přesné providerem doložené ID, předej ho přes --model a prompt_wrapper předej jako AgentRunRequest.receipt_prompt. Pokud Codex požadovaný model nepoužije nebo ho nepodporuje, úkol neodmítej kvůli MISMATCH; zaznamenej requested_model, metadata_model a receipt_model odděleně. Za skutečnou identitu považuj JSONL metadata; pokud chybí, přesný model z povinného task receipt je skutečně doložená identita. AO ani volající nesmí požadovaný model vydávat za skutečně použitý.",
+  "caller_rule": "Nejdříve přečti katalog a vyber přesné providerem doložené ID, pokud broker nějaké poskytne; předej ho přes --model. U každého pracovního běhu, i bez zafixovaného modelu, předej prompt_wrapper jako AgentRunRequest.receipt_prompt a output_schema jako AgentRunRequest.output_schema. Pokud Codex požadovaný model nepoužije nebo ho nepodporuje, úkol neodmítej kvůli MISMATCH; zaznamenej requested_model, metadata_model a receipt_model odděleně. Za skutečnou identitu považuj JSONL metadata; pokud chybí, přesný model z povinného task receipt je skutečně doložená identita. AO ani volající nesmí požadovaný model vydávat za skutečně použitý.",
     "example": {
       "requested_model": "gpt-5.6-luna",
       "response": {

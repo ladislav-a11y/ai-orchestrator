@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 venv/
 config/config.yaml
+config/slack_bot_token.txt
 .claude/settings.local.json
 data/
 logs/*.log

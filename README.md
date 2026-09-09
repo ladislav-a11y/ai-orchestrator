@@ -17,6 +17,12 @@ zavolá vybraného providera. Broker pracovní úkol neprovádí ani nekontroluj
 výsledek. Každý provider má také `usage_<provider>.json` pro poslední běh a
 `usage_<provider>_lifetime.json` pro kumulovanou spotřebu podle přesného modelu.
 
+Po každém běhu provider odešle ještě před návratem stručnou notifikaci do
+`#ai-status` s časem, akcí, providerem, přesným úplným ID LLM, tokeny a cenou.
+Notifikace používá hodnoty z právě dokončeného providerového výsledku, broker ji
+neřídí a její případné selhání neovlivní úlohu. Úspěch se potvrzuje Slack JSON
+`ok: true`, nikoli samotným HTTP statusem.
+
 Tento návod nepředpokládá, že umíš programovat nebo pracovat s Gitem -
 všechny příkazy níže stačí zkopírovat a spustit.
 

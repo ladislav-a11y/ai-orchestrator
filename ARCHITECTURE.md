@@ -192,6 +192,26 @@ zavolá přímo. Produkční tok proto neobchází broker přímým výběrem pr
 - `import_inbox()` čte `requested_model`/`selection_reason` z JSON souboru v
   `inbox/` stejně nevalidovaně jako `submit()`.
 
+### Providerové Slack notifikace
+
+Každý providerový adaptér (`groq`, `codex`, `claude-code`, `antigravity`) má
+notifikační wrapper nad usage wrapperem. Po zapsání aktuálního usage snapshotu,
+ale ještě před návratem z `run()`, odešle do `#ai-status` stručnou zprávu.
+Zpráva obsahuje čas, providera, akci, přesné úplné ID použitého LLM a tokeny
+(`input`, `output`, `thinking`, `total`) včetně ceny. Hodnoty pocházejí ze
+stejného výsledku, který provider právě předal usage ledgeru; JSON snapshot se
+kvůli notifikaci znovu nečte.
+
+Codex proto podle `langcodex.json` vyžaduje pracovní receipt s polem `model` i
+v režimu bez zafixovaného modelu; tím má notifikace vždy k dispozici úplné ID,
+pokud ho Codex vrátí v receipt nebo JSONL metadatech.
+
+Odeslání je best-effort a nikdy nesmí změnit `AgentRunResult`. Modul
+`orchestrator/agents/slack_provider_notifications.py` nečte environment
+proměnné ani nepoužívá samotný HTTP status jako potvrzení. Za úspěšné doručení
+se považuje pouze Slack API odpověď s `ok: true`. Token je lokálně uložený v
+`config/slack_bot_token.txt`, mimo Git.
+
 Mimo rozsah (viz rešerše kap. 6 bod 5 a `inbox_planning_recipe.md`):
 klasifikace úlohy podle typu/složitosti zůstává vlastnictvím AI Project Manageru,
 ale vlastní výběr dostupného providera a modelu v produkčním toku provádí broker.

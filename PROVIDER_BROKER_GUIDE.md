@@ -188,6 +188,23 @@ modelu v `models`. U každého modelu jsou pouze `input_tokens`, `output_tokens`
 `null` se zapisuje jako `0`. Evidence nepoužívá požadovaný nebo zkrácený název
 modelu jako náhradu skutečně reportovaného modelu.
 
+### Providerová notifikace do Slacku
+
+Každý provider po dokončení svého běhu zapíše usage a ještě před návratem z
+`run()` odešle stručnou zprávu do kanálu `#ai-status`. Odeslání je součástí
+providerového adaptéru, broker se ho neúčastní. Zpráva obsahuje datum a čas,
+název providera, akci (`completed`, `failed`, `limited` nebo `unavailable`),
+přesné úplné ID použitého LLM, `input_tokens`, `output_tokens`,
+`thinking_tokens`, `total_tokens` a `cost_usd`.
+
+Notifikace používá stejné hodnoty, které provider předal usage ledgeru, a usage
+JSON znovu nečte. `null` nebo chybějící hodnota se zobrazí jako `0`. Slack je
+best-effort observability: chyba odeslání nesmí změnit výsledek úlohy. Úspěch
+se potvrzuje pouze JSON odpovědí Slack API s `ok: true`, nikoli samotným HTTP
+status kódem. Přístupový token se načítá z lokálního neveřejného souboru
+`config/slack_bot_token.txt`; do repozitáře ani do environment proměnných se
+neukládá.
+
 ### Co obsahuje každý `lang*.json`
 
 - `contract_version` — verze kontraktu;
@@ -283,9 +300,10 @@ failover ani jinou automatickou akci.
   užitečný důkaz konkrétní varianty Codexu; `MISMATCH` je v tomto případě
   očekávané diagnostické porovnání. Požadovaný model se nikdy nepovažuje za
   potvrzený jen proto, že byl předán v `--model`;
-- pracovní úkol při zafixovaném modelu: volající předá `task_execution_receipt`
-  z `langcodex.json` jako samostatné `AgentRunRequest.receipt_prompt` a vyžádá
-  jediný JSON objekt s přesně poli `answer` a `model`. `requested_model`,
+- pracovní úkol: volající předá `task_execution_receipt` z `langcodex.json`
+  jako samostatné `AgentRunRequest.receipt_prompt` u každého běhu, i když model
+  není zafixovaný, a vyžádá jediný JSON objekt s přesně poli `answer` a `model`.
+  `requested_model`,
   `metadata_model` a `receipt_model` se evidují odděleně. Za skutečnou identitu
   se považují metadata, nebo u Codexu při jejich absenci přesný receipt model;
   ten se přijme jako `reported_receipt`

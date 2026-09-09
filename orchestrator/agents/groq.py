@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, model_from_paths
+from orchestrator.agents.slack_provider_notifications import notify_provider_run
 from orchestrator.agents.usage_ledger import record_provider_run
 from orchestrator.config import GROQ_FREE_MODEL, GroqAgentConfig
 
@@ -1155,6 +1156,7 @@ class GroqAgent(Agent):
             return AgentRunResult(**common, error=str(exc), unavailable=True)
         return AgentRunResult(**common, error=str(exc))
 
+    @notify_provider_run("groq")
     @record_provider_run("groq")
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         available, message = self.is_available()

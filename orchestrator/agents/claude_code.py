@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, model_from_paths
+from orchestrator.agents.slack_provider_notifications import notify_provider_run
 from orchestrator.agents.usage_ledger import record_provider_run
 from orchestrator.config import ClaudeCodeAgentConfig
 from orchestrator.hooks.test_command_guard import read_saved_attempts
@@ -409,6 +410,7 @@ class ClaudeCodeAgent(Agent):
 
         return cmd
 
+    @notify_provider_run("claude-code")
     @record_provider_run("claude-code")
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         available, note = self.is_available()
