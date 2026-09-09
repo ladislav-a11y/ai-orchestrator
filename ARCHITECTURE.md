@@ -197,8 +197,10 @@ zavolá přímo. Produkční tok proto neobchází broker přímým výběrem pr
 Každý providerový adaptér (`groq`, `codex`, `claude-code`, `antigravity`) má
 notifikační wrapper nad usage wrapperem. Po zapsání aktuálního usage snapshotu,
 ale ještě před návratem z `run()`, odešle do `#ai-status` stručnou zprávu.
-Zpráva obsahuje čas, providera, akci, přesné úplné ID použitého LLM a tokeny
-(`input`, `output`, `thinking`, `total`) včetně ceny. Hodnoty pocházejí ze
+Zpráva obsahuje čas, providera, konkrétní úkol převzatý z původního AO promptu,
+samostatný stav (`completed`, `failed`, `limited` nebo `unavailable`), přesné
+úplné ID použitého LLM a tokeny (`input`, `output`, `thinking`, `total`) včetně ceny.
+Hodnoty pocházejí ze
 stejného výsledku, který provider právě předal usage ledgeru; JSON snapshot se
 kvůli notifikaci znovu nečte.
 

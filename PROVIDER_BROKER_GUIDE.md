@@ -193,9 +193,10 @@ modelu jako náhradu skutečně reportovaného modelu.
 Každý provider po dokončení svého běhu zapíše usage a ještě před návratem z
 `run()` odešle stručnou zprávu do kanálu `#ai-status`. Odeslání je součástí
 providerového adaptéru, broker se ho neúčastní. Zpráva obsahuje datum a čas,
-název providera, akci (`completed`, `failed`, `limited` nebo `unavailable`),
-přesné úplné ID použitého LLM, `input_tokens`, `output_tokens`,
-`thinking_tokens`, `total_tokens` a `cost_usd`.
+název providera, konkrétní `úkol` převzatý z původního AO promptu, samostatný
+`stav` (`completed`, `failed`, `limited` nebo `unavailable`), přesné úplné ID
+použitého LLM, `input_tokens`, `output_tokens`, `thinking_tokens`,
+`total_tokens` a `cost_usd`.
 
 Notifikace používá stejné hodnoty, které provider předal usage ledgeru, a usage
 JSON znovu nečte. `null` nebo chybějící hodnota se zobrazí jako `0`. Slack je

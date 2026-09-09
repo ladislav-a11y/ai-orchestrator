@@ -35,9 +35,13 @@ def test_message_uses_provider_result_and_keeps_full_llm_name():
             "total_tokens": result.total_tokens,
             "cost_usd": result.cost_usd,
         }],
+        task="V jedné větě vysvětli, co je API.",
         now=datetime.fromisoformat("2026-09-09T10:20:30+02:00"),
     )[0]
     assert "[2026-09-09T10:20:30+02:00]" in message
+    assert "úkol: V jedné větě vysvětli, co je API." in message
+    assert "stav: `completed`" in message
+    assert "akce:" not in message
     assert "LLM: `openai/gpt-oss-120b`" in message
     assert "input 11" in message
     assert "output 0" in message
@@ -74,3 +78,26 @@ def test_slack_json_ok_is_required_even_when_request_returns(tmp_path, monkeypat
     )
     assert called["request"].full_url.endswith("chat.postMessage")
     assert called["timeout"] == 3.0
+
+
+def test_task_is_compacted_and_missing_task_is_explicit():
+    result = Result()
+    result.model = "gpt-5.6-sol"
+    result.input_tokens = 0
+    result.output_tokens = 0
+    result.thinking_tokens = 0
+    result.total_tokens = 0
+    result.cost_usd = 0
+    long_task = "slovo " * 250
+    message = format_messages(
+        "codex",
+        result,
+        [{"model": result.model}],
+        task=long_task,
+    )[0]
+    assert "úkol: " in message
+    assert "stav: `completed`" in message
+    assert len(message) < 1500
+
+    missing = format_messages("codex", result, [{"model": result.model}])[0]
+    assert "úkol: neuvedený úkol" in missing

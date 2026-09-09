@@ -18,7 +18,8 @@ výsledek. Každý provider má také `usage_<provider>.json` pro poslední běh
 `usage_<provider>_lifetime.json` pro kumulovanou spotřebu podle přesného modelu.
 
 Po každém běhu provider odešle ještě před návratem stručnou notifikaci do
-`#ai-status` s časem, akcí, providerem, přesným úplným ID LLM, tokeny a cenou.
+`#ai-status` s časem, konkrétním úkolem z AO promptu, samostatným stavem,
+providerem, přesným úplným ID LLM, tokeny a cenou.
 Notifikace používá hodnoty z právě dokončeného providerového výsledku, broker ji
 neřídí a její případné selhání neovlivní úlohu. Úspěch se potvrzuje Slack JSON
 `ok: true`, nikoli samotným HTTP statusem.

@@ -64,7 +64,7 @@ def _usage_from_result(result: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _action(result: Any) -> str:
+def _status(result: Any) -> str:
     if getattr(result, "success", False):
         return "completed"
     if getattr(result, "limited", False) or getattr(result, "token_budget_exceeded", False):
@@ -72,6 +72,15 @@ def _action(result: Any) -> str:
     if getattr(result, "unavailable", False):
         return "unavailable"
     return "failed"
+
+
+def _task_text(task: Any) -> str:
+    if not isinstance(task, str) or not task.strip():
+        return "neuvedený úkol"
+    compact = " ".join(task.split()).replace("`", "'")
+    if len(compact) > 1000:
+        return compact[:997] + "..."
+    return compact
 
 
 def _format_cost(value: int | float) -> str:
@@ -85,6 +94,7 @@ def format_messages(
     result: Any,
     usage: Iterable[Mapping[str, Any]],
     *,
+    task: str | None = None,
     now: datetime | None = None,
 ) -> list[str]:
     """Format one concise human-readable message per usage model bucket."""
@@ -107,7 +117,8 @@ def format_messages(
         model_part = f" | LLM: `{model}`" if isinstance(model, str) and model else ""
         messages.append(
             f"[{timestamp}] provider: `{provider}`{model_part} | "
-            f"akce: `{_action(result)}` | "
+            f"úkol: {_task_text(task)} | "
+            f"stav: `{_status(result)}` | "
             f"tokeny: input {_number(row.get('input_tokens'))}, "
             f"output {_number(row.get('output_tokens'))}, "
             f"thinking {_number(row.get('thinking_tokens'))}, "
@@ -142,10 +153,16 @@ def notify_provider_result(
     provider: str,
     result: Any,
     *,
+    task: str | None = None,
     token_path: Path | None = None,
 ) -> bool:
     """Send one provider-run notification without rereading the usage JSON."""
-    messages = format_messages(provider, result, _usage_from_result(result))
+    messages = format_messages(
+        provider,
+        result,
+        _usage_from_result(result),
+        task=task,
+    )
     delivered = True
     for message in messages:
         delivered = _post(message, token_path=token_path) and delivered
@@ -159,7 +176,11 @@ def notify_provider_run(provider: str):
         def wrapped(self: Any, request: Any, *args: Any, **kwargs: Any) -> _T:
             result = run(self, request, *args, **kwargs)
             try:
-                notify_provider_result(provider, result)
+                notify_provider_result(
+                    provider,
+                    result,
+                    task=getattr(request, "prompt", None),
+                )
             except Exception:
                 # Slack is observability only; never alter the provider result.
                 pass
