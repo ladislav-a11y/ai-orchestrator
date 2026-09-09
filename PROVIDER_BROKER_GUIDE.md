@@ -206,6 +206,13 @@ status kódem. Přístupový token se načítá z lokálního neveřejného soub
 `config/slack_bot_token.txt`; do repozitáře ani do environment proměnných se
 neukládá.
 
+Identita LLM se pro Slack bere výhradně z providerem potvrzeného výsledku:
+nejdříve z `result.model`, potom z přesného `receipt_model` nebo z odpovědi
+providera (`model` či jednoznačný klíč `modelUsage`). `requested_model` se jako
+skutečně použitý model nikdy nepoužije. Providerová odpověď může být při
+zpracování obalena Markdownovým blokem ` ```json `; tento obal se při čtení
+receiptu ignoruje, ale obsah musí stále obsahovat přesné celé ID modelu.
+
 ### Co obsahuje každý `lang*.json`
 
 - `contract_version` — verze kontraktu;
@@ -272,8 +279,18 @@ failover ani jinou automatickou akci.
 
 #### Claude Code — `langclaude-code.json`
 
-- katalog: současné CLI neposkytuje katalogový příkaz, proto je stav `UNKNOWN`;
+- katalog: broker používá výhradně read-only Anthropic Models API `GET /v1/models`,
+  pokud je dostupný `ANTHROPIC_API_KEY`; providerový adapter tento klíč nikdy
+  nepoužívá. Bez klíče broker použije CLI picker a přesná metadata z probe;
+- `ANTHROPIC_API_KEY` vlastní pouze broker a smí být použit pouze při refreshi
+  katalogu modelů. Nesmí se předat do identity probe ani do pracovního běhu;
+  Claude Code provider se pro práci vždy autentizuje přihlášením Claude CLI;
 - práce s modelem: `--model`, případně `--fallback-model`;
+- nucení modelu: broker přijme `set_provider_model` s `provider: claude-code`,
+  přesným `model_id` z katalogu `REPORTED`, `source: user` a `mode: FORCED`.
+  AO následně předá `selected_model` jako `AgentRunRequest.requested_model` a
+  adapter ho použije přesně jako `--model <model_id>`. Alias se při nuceném
+  výběru nepoužívá; skutečná identita se stále potvrzuje až z odpovědi providera;
 - výběr: přesné providerem doložené ID nebo doložený alias;
 - identita: neinteraktivní JSON probe;
 - při limitu se zachovává `api_error_status`, celý `result` nebo `error` a

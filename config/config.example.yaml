@@ -115,6 +115,9 @@ codex:
 # Tento adapter je striktně free-only: používá pouze ověřený GPT-OSS 120B model,
 # on-demand service tier a při vyčerpání free kvóty vrací LIMITED pro failover.
 groq:
+  # v2 provider-local rolling guard for 30 RPM / 1,000 RPD / 8,000 TPM /
+  # 200,000 TPD. The broker only consumes the resulting status.
+  rate_limit_state_path: orchestrator/agents/groq_rate_limit.json
   model: openai/gpt-oss-120b
   free_only: true
   reasoning_effort: low

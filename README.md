@@ -23,6 +23,8 @@ providerem, přesným úplným ID LLM, tokeny a cenou.
 Notifikace používá hodnoty z právě dokončeného providerového výsledku, broker ji
 neřídí a její případné selhání neovlivní úlohu. Úspěch se potvrzuje Slack JSON
 `ok: true`, nikoli samotným HTTP statusem.
+Model ve Slacku se bere pouze z providerem potvrzené identity nebo přesného
+task receiptu; `requested_model` se nikdy nevydává za skutečně použitý model.
 
 Tento návod nepředpokládá, že umíš programovat nebo pracovat s Gitem -
 všechny příkazy níže stačí zkopírovat a spustit.

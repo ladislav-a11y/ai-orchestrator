@@ -58,7 +58,13 @@ import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
-from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, model_from_paths
+from orchestrator.agents.base import (
+    Agent,
+    AgentRunRequest,
+    AgentRunResult,
+    model_from_paths,
+    with_provider_status,
+)
 from orchestrator.agents.slack_provider_notifications import notify_provider_run
 from orchestrator.agents.usage_ledger import record_provider_run
 from orchestrator.config import ANTIGRAVITY_ALLOWED_MODES, AntigravityAgentConfig
@@ -432,6 +438,7 @@ class AntigravityAgent(Agent):
 
     @notify_provider_run("antigravity")
     @record_provider_run("antigravity")
+    @with_provider_status("antigravity")
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         effective_model, model_requested = self._effective_model(request)
         model_source = "requested" if model_requested else ("configured" if effective_model else None)

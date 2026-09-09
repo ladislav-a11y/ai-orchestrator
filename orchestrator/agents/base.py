@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
 
@@ -125,6 +127,10 @@ class AgentRunResult:
     # separate from usage totals because a rejected request has no usage
     # event, but its quota evidence is still needed by central failover.
     quota_snapshot: Optional[dict[str, Any]] = None
+    # v2 provider-owned availability/quota status. AO publishes this evidence
+    # to the offer-only broker after the direct provider call; the broker
+    # stores it but never evaluates the provider's task result.
+    provider_status: Optional[dict[str, Any]] = None
     # True if the provider's failure looks like a quota/rate/session limit
     # rather than an ordinary error (e.g. Antigravity's RESOURCE_EXHAUSTED /
     # "quota has been exceeded" responses) - callers (autonomous.py) can use
@@ -182,6 +188,62 @@ class AgentRunResult:
     # -> antigravity") whenever it advanced past another provider first, so a
     # caller never has to reconstruct the reason from provider_statuses.
     selection_reason: Optional[str] = None
+
+
+def with_provider_status(provider: str):
+    """v2 provider boundary: attach a broker-publishable status to every run."""
+
+    def decorator(function):
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            result = function(*args, **kwargs)
+            if not isinstance(result, AgentRunResult) or result.provider_status is not None:
+                return result
+            if result.success:
+                state = "AVAILABLE"
+                response_kind = "available"
+                reason = f"Provider {provider} dokončil požadavek."
+            elif result.limited:
+                state = "LIMITED"
+                response_kind = "limited"
+                reason = result.error or f"Provider {provider} nahlásil limit."
+            elif result.unavailable:
+                state = "UNAVAILABLE"
+                response_kind = "unavailable"
+                reason = result.error or f"Provider {provider} není dostupný."
+            else:
+                state = "ERROR"
+                response_kind = "error"
+                reason = result.error or f"Provider {provider} selhal."
+            retry_at = None
+            if result.retry_after_seconds is not None:
+                retry_at = (
+                    datetime.now(timezone.utc)
+                    + timedelta(seconds=max(0.0, float(result.retry_after_seconds)))
+                ).isoformat()
+            result.provider_status = {
+                "state": state,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "available_at": datetime.now(timezone.utc).isoformat()
+                if state == "AVAILABLE"
+                else None,
+                "retry_at": retry_at,
+                "reason": reason,
+                "response_kind": response_kind,
+                "status_details": result.quota_snapshot or {},
+                "full_response": {
+                    "provider": provider,
+                    "model": result.model,
+                    "model_source": result.model_source,
+                    "error": result.error,
+                },
+                "source": "provider_result",
+            }
+            return result
+
+        return wrapped
+
+    return decorator
 
 
 class Agent(ABC):

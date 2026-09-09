@@ -1,8 +1,16 @@
 {
   "contract_version": 1,
+  "architecture_version": "v2",
   "provider": "antigravity",
   "adapter": "antigravity.py",
   "purpose": "Převod společného vstupu AO na neinteraktivní CLI agy a převod odpovědi zpět do AO.",
+  "v2_status_contract": {
+    "owner": "antigravity_provider",
+    "ao_action": "Po přímém běhu providera předá AgentRunResult.provider_status brokeru k uložení.",
+    "states": ["AVAILABLE", "LIMITED", "UNAVAILABLE", "ERROR"],
+    "broker_rule": "Broker stav pouze uloží a podle něj filtruje nabídky; výsledek úkolu neposuzuje.",
+    "refresh_command": "refresh_provider_notes znovu provede probe a obnoví potvrzené poznámky providerů."
+  },
   "usage_files": {
     "current_run": "usage_antigravity.json",
     "lifetime": "usage_antigravity_lifetime.json",

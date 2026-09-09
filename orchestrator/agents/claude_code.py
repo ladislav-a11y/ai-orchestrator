@@ -33,7 +33,13 @@ import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
-from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, model_from_paths
+from orchestrator.agents.base import (
+    Agent,
+    AgentRunRequest,
+    AgentRunResult,
+    model_from_paths,
+    with_provider_status,
+)
 from orchestrator.agents.slack_provider_notifications import notify_provider_run
 from orchestrator.agents.usage_ledger import record_provider_run
 from orchestrator.config import ClaudeCodeAgentConfig
@@ -44,6 +50,19 @@ FORBIDDEN_FLAGS = (
     "--allow-dangerously-skip-permissions",
 )
 FORBIDDEN_PERMISSION_MODE = "bypassPermissions"
+BROKER_ONLY_API_KEY = "ANTHROPIC_API_KEY"
+
+
+def _cli_environment() -> dict[str, str]:
+    """Return CLI environment without the broker-owned Models API key.
+
+    Claude Code work and identity probes must use the user's CLI login.  The
+    API key belongs exclusively to provider-broker's read-only model catalog
+    refresh and must never alter the authentication of a provider run.
+    """
+    environment = os.environ.copy()
+    environment.pop(BROKER_ONLY_API_KEY, None)
+    return environment
 
 
 def _identity_contract() -> dict[str, Any]:
@@ -64,6 +83,14 @@ def _identity_contract() -> dict[str, Any]:
     if not isinstance(paths, list) or not all(isinstance(path, str) and path.strip() for path in paths):
         raise ValueError("langclaude-code.json neobsahuje model_discovery.response_paths")
     return probe
+
+
+def _task_receipt_contract() -> dict[str, Any]:
+    contract = json.loads(
+        Path(__file__).with_name("langclaude-code.json").read_text(encoding="utf-8")
+    )
+    receipt = contract.get("task_execution_receipt")
+    return receipt if isinstance(receipt, dict) else {}
 
 # Committing is the orchestrator's job (runner.py/_maybe_commit,
 # autonomous.py/_commit_if_ready), done through its own Git layer only after
@@ -195,7 +222,62 @@ def _reported_model(raw: dict, usage: dict) -> Optional[str]:
     visibly unknown.
     """
     discovery = _identity_contract()["model_discovery"]
-    return model_from_paths([raw, usage], discovery["response_paths"])
+    response_paths = discovery["response_paths"]
+    direct_paths = [path for path in response_paths if path.rsplit(".", 1)[-1] not in {"modelUsage", "model_usage"}]
+    direct_model = model_from_paths([raw, usage], direct_paths)
+    if direct_model:
+        return direct_model
+
+    receipt_contract = _task_receipt_contract()
+    response_format = receipt_contract.get("response_format", {}) if isinstance(receipt_contract, dict) else {}
+    required_fields = response_format.get("required_fields", []) if isinstance(response_format, dict) else []
+    receipt_model_field = "model" if "model" in required_fields else None
+    if receipt_model_field and isinstance(raw.get("result"), str):
+        try:
+            receipt = json.loads(raw["result"])
+        except (json.JSONDecodeError, TypeError, ValueError):
+            receipt = None
+        if isinstance(receipt, dict):
+            receipt_model = receipt.get(receipt_model_field)
+            if isinstance(receipt_model, str) and receipt_model.strip():
+                return receipt_model.strip()
+
+    model_usage_paths = [
+        path for path in response_paths
+        if path.rsplit(".", 1)[-1] in {"modelUsage", "model_usage"}
+    ]
+    model_from_usage = model_from_paths([raw, usage], model_usage_paths)
+    return model_from_usage if model_from_usage and ", " not in model_from_usage else None
+
+
+def _exact_models_from_provider_response(raw: Any) -> list[dict[str, Any]]:
+    """Extract only exact model identifiers confirmed by Claude's response."""
+    if not isinstance(raw, dict):
+        return []
+    usage = raw.get("modelUsage") if isinstance(raw.get("modelUsage"), dict) else {}
+    models: list[dict[str, Any]] = []
+    for model_id, details in usage.items():
+        if not isinstance(model_id, str) or not model_id.strip():
+            continue
+        entry: dict[str, Any] = {"id": model_id.strip(), "evidence": "modelUsage"}
+        if isinstance(details, dict):
+            for source_key, target_key in (
+                ("canonicalModel", "canonical_model"),
+                ("provider", "provider"),
+                ("contextWindow", "context_window"),
+                ("maxOutputTokens", "max_output_tokens"),
+            ):
+                value = details.get(source_key)
+                if value is not None:
+                    entry[target_key] = value
+        models.append(entry)
+
+    direct_model = raw.get("model")
+    if isinstance(direct_model, str) and direct_model.strip() and not any(
+        item["id"] == direct_model.strip() for item in models
+    ):
+        models.append({"id": direct_model.strip(), "evidence": "provider_response.model"})
+    return models
 
 
 def _version_key(folder_name: str) -> tuple:
@@ -269,6 +351,7 @@ class ClaudeCodeAgent(Agent):
             )
         self.config = config
         self._cli_path, self._detect_note = find_claude_cli(config.cli_path)
+        self._last_probe_response: Optional[dict[str, Any]] = None
 
     def is_available(self) -> tuple[bool, str]:
         if not self._cli_path:
@@ -279,6 +362,7 @@ class ClaudeCodeAgent(Agent):
                 capture_output=True,
                 text=True,
                 timeout=15,
+                env=_cli_environment(),
             )
         except Exception as e:  # pragma: no cover - defensive
             return False, f"nepodařilo se spustit '{self._cli_path} --version': {e}"
@@ -287,6 +371,7 @@ class ClaudeCodeAgent(Agent):
         return True, f"{proc.stdout.strip()} ({self._detect_note})"
 
     def probe_identity(self) -> dict[str, Any]:
+        self._last_probe_response = None
         available, note = self.is_available()
         if not available:
             return {
@@ -324,6 +409,7 @@ class ClaudeCodeAgent(Agent):
                 encoding="utf-8",
                 errors="replace",
                 timeout=min(60, max(15, self.config.timeout_seconds)),
+                env=_cli_environment(),
             )
         except Exception as exc:
             return {
@@ -348,6 +434,7 @@ class ClaudeCodeAgent(Agent):
                 "probe_kind": "identity_request",
                 "full_response": {"stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode},
             }
+        self._last_probe_response = raw
         usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
         model = _reported_model(raw, usage)
         if not model and not bool(raw.get("is_error")):
@@ -364,13 +451,165 @@ class ClaudeCodeAgent(Agent):
         }
 
     def list_models(self) -> dict[str, Any]:
-        """The installed Claude Code CLI has no authenticated catalog command."""
+        """Return the provider's read-only picker hints without inventing a catalog.
+
+        Claude Code has no documented account-catalog command.  Its printable
+        ``/model`` command does, however, expose the model choices currently
+        known by the CLI session.  The picker is therefore useful broker
+        evidence, but it is deliberately kept ``UNKNOWN`` until Claude returns
+        exact account model IDs through provider metadata.
+        """
+        if not self._cli_path:
+            return {
+                "state": "UNKNOWN",
+                "source": "claude /model picker",
+                "models": [],
+                "picker_choices": [],
+                "reason": "Claude CLI nebylo nalezeno; modely se nesmí domýšlet.",
+                "full_response": {"catalog_command": None, "known_aliases": []},
+            }
+
+        contract = _identity_contract().get("model_catalog", {})
+        picker = contract.get("picker", {}) if isinstance(contract, dict) else {}
+        picker_prompt = picker.get("prompt", "/model") if isinstance(picker, dict) else "/model"
+        picker_permission_mode = (
+            picker.get("permission_mode", "plan") if isinstance(picker, dict) else "plan"
+        )
+        picker_command = [
+            self._cli_path,
+            "-p",
+            picker_prompt,
+            "--output-format",
+            "json",
+            "--no-session-persistence",
+            "--permission-mode",
+            picker_permission_mode,
+            "--tools",
+            "",
+        ]
+        try:
+            proc = subprocess.run(
+                picker_command,
+                cwd=str(Path.cwd()),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=min(90, max(30, self.config.timeout_seconds)),
+                env=_cli_environment(),
+            )
+        except Exception as exc:
+            picker_error = {
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+                "command": picker_command[1:],
+            }
+        else:
+            picker_error = None
+
+        raw = None
+        picker_result = ""
+        if picker_error is None:
+            try:
+                raw = json.loads(proc.stdout)
+            except (json.JSONDecodeError, ValueError):
+                raw = None
+            if isinstance(raw, dict):
+                picker_result = str(raw.get("result") or raw.get("error") or "")
+
+        exact_models = _exact_models_from_provider_response(self._last_probe_response)
+
+        available_match = re.search(
+            r"Available:\s*(?P<items>.*?),\s*or\s+a\s+full\s+model\s+ID\.?\s*$",
+            picker_result,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if available_match:
+            aliases = [
+                item.strip()
+                for item in available_match.group("items").split(",")
+                if item.strip()
+            ]
+            aliases = list(dict.fromkeys(aliases))
+            current_match = re.search(
+                r"Current model:\s*(?P<current>.+?)(?:\n|$)",
+                picker_result,
+                re.IGNORECASE,
+            )
+            return {
+                "state": "PARTIAL" if exact_models else "UNKNOWN",
+                "source": "claude -p /model",
+                "models": exact_models,
+                "picker_choices": aliases,
+                "reason": (
+                    "Claude providerová odpověď potvrdila přesná použitá modelová ID; "
+                    "picker doplnil volby relace, nikoli úplný účetní katalog."
+                    if exact_models
+                    else "Claude picker vrátil volby relace, ne úplný účetní katalog přesných modelových ID."
+                ),
+                "full_response": {
+                    "catalog_command": None,
+                    "picker_command": picker_command[1:],
+                    "known_aliases": aliases,
+                    "exact_models_from_probe": exact_models,
+                    "current_model_label": current_match.group("current").strip() if current_match else None,
+                    "picker_result": picker_result,
+                    "raw": raw,
+                },
+            }
+
+        # A picker failure must not erase the last known evidence.  Fall back
+        # to the CLI help, which is still useful for its explicitly documented
+        # aliases but is not an account catalog either.
+        try:
+            help_proc = subprocess.run(
+                [self._cli_path, "--help"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                env=_cli_environment(),
+            )
+        except Exception as exc:
+            return {
+                "state": "UNKNOWN",
+                "source": "claude /model picker",
+                "models": [],
+                "picker_choices": [],
+                "reason": f"Claude model picker i --help selhaly: {exc}",
+                "full_response": {"picker_error": picker_error, "help_error": str(exc)},
+            }
+        help_text = help_proc.stdout or help_proc.stderr
+        model_help = re.search(
+            r"--model\s+<model>.*?(?=\n\s*-[a-z]|\n\s*--|\Z)",
+            help_text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        model_section = model_help.group(0) if model_help else ""
+        aliases = re.findall(r"'([a-z][a-z0-9]*(?:\[1m\])?)'", model_section, re.IGNORECASE)
+        aliases = list(dict.fromkeys(aliases))
         return {
-            "state": "UNKNOWN",
+            "state": "PARTIAL" if exact_models else "UNKNOWN",
             "source": "claude --help",
-            "models": [],
-            "reason": "Instalovaná Claude Code CLI neposkytuje katalogový příkaz; modely se nesmí domýšlet.",
-            "full_response": {"catalog_command": None},
+            "models": exact_models,
+            "picker_choices": aliases,
+            "reason": (
+                "Claude providerová odpověď potvrdila přesná použitá modelová ID; "
+                "picker nebyl dostupný."
+                if exact_models
+                else "Claude model picker neposkytl seznam; help pouze potvrzuje aliasy, modely se nesmí domýšlet."
+            ),
+            "full_response": {
+                "catalog_command": None,
+                "picker_command": picker_command[1:],
+                "picker_error": picker_error,
+                "picker_result": picker_result,
+                "exact_models_from_probe": exact_models,
+                "known_aliases": aliases,
+                "model_option_help": model_section,
+                "returncode": help_proc.returncode,
+            },
         }
 
     def _effective_model(self, request: AgentRunRequest) -> tuple[str, bool]:
@@ -412,6 +651,7 @@ class ClaudeCodeAgent(Agent):
 
     @notify_provider_run("claude-code")
     @record_provider_run("claude-code")
+    @with_provider_status("claude-code")
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         available, note = self.is_available()
         if not available:
@@ -441,6 +681,7 @@ class ClaudeCodeAgent(Agent):
                 encoding="utf-8",
                 errors="replace",
                 timeout=self.config.timeout_seconds,
+                env=_cli_environment(),
             )
         except subprocess.TimeoutExpired as e:
             timeout_output = e.stdout or e.output or b""

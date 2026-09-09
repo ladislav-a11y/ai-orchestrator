@@ -1,4 +1,4 @@
-"""Offer-only broker for the four currently configured providers.
+"""v2 offer-only broker for the four currently configured providers.
 
 Schopnosti tohoto brokeru:
 
@@ -11,9 +11,14 @@ Schopnosti tohoto brokeru:
 * ukládá úplnou odpověď kontroly a odděluje známé a neznámé odpovědi;
 * na příkaz ``refresh_provider_notes`` postupně obnoví poznámky všech čtyř
   providerů;
+* ``refresh_provider_notes`` je v2 aktivní výzkum stavu: znovu provede
+  providerové probe/katalogové dotazy a zapíše aktuální potvrzené odpovědi,
+  limity a modely do poznámek;
 * AO vrací jméno providera, model, stav, důvod a cestu k poznámce;
 * AO vrací také komunikační recept z příslušného ``lang*.json``;
 * nepřijímá pracovní úkol a nikdy nevolá pracovní ``run()`` providera.
+* přijímá providerem/AO publikovaný v2 status a ukládá jej do poznámky;
+  broker status pouze eviduje a podle něj filtruje nabídky.
 """
 
 from __future__ import annotations
@@ -21,8 +26,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 
 PROVIDER_ORDER = ("groq", "antigravity", "claude-code", "codex")
@@ -35,13 +44,28 @@ LANG_FILES = {
 SELECT_PROVIDER_QUERY = "select_provider"
 REFRESH_PROVIDER_NOTES_QUERY = "refresh_provider_notes"
 SET_PROVIDER_MODEL_QUERY = "set_provider_model"
+REPORT_PROVIDER_STATUS_QUERY = "report_provider_status"
 USER_MODEL_SELECTION_SOURCE = "user"
-VALID_STATES = {"AVAILABLE", "UNAVAILABLE", "UNKNOWN", "ERROR"}
-MODEL_CATALOG_STATES = {"REPORTED", "UNKNOWN", "ERROR"}
+VALID_STATES = {"AVAILABLE", "LIMITED", "UNAVAILABLE", "UNKNOWN", "ERROR"}
+MODEL_CATALOG_STATES = {"REPORTED", "PARTIAL", "UNKNOWN", "ERROR"}
+BROKER_MODEL_API_PROVIDERS = {"claude-code"}
+BROKER_ONLY_API_KEY = "ANTHROPIC_API_KEY"
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _retry_due(value: Optional[str]) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        retry_at = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) >= retry_at.astimezone(timezone.utc)
 
 
 def _json_safe(value: Any) -> Any:
@@ -120,6 +144,9 @@ def _compare_catalogs(previous: Any, current: dict[str, Any]) -> dict[str, Any]:
 @dataclass
 class ProviderInfo:
     provider: str
+    # v2 note format; older notes are upgraded in memory and gain this field
+    # on the next broker write.
+    architecture_version: str = "v2"
     model: Optional[str] = None
     model_source: Optional[str] = None
     state: str = "UNKNOWN"
@@ -131,6 +158,9 @@ class ProviderInfo:
     response_kind: str = "unknown"
     probe_kind: Optional[str] = None
     usage: Any = None
+    # v2 evidence received from the provider/AO; broker never evaluates task
+    # output and never invents a quota state.
+    status_details: dict[str, Any] = field(default_factory=dict)
     known_responses: dict[str, int] = field(default_factory=dict)
     unknown_responses: list[dict[str, Any]] = field(default_factory=list)
     model_catalog: dict[str, Any] = field(
@@ -242,6 +272,7 @@ class ProviderBroker:
                 raise ValueError("unknown_responses musí být seznam")
             info = ProviderInfo(
                 provider=provider,
+                architecture_version="v2",
                 model=raw.get("model", self.models.get(provider)),
                 model_source=raw.get("model_source"),
                 state=state,
@@ -253,6 +284,11 @@ class ProviderBroker:
                 response_kind=raw.get("response_kind", "unknown"),
                 probe_kind=raw.get("probe_kind"),
                 usage=raw.get("usage"),
+                status_details=(
+                    raw.get("status_details")
+                    if isinstance(raw.get("status_details"), dict)
+                    else {}
+                ),
                 known_responses=known_responses,
                 unknown_responses=unknown_responses,
                 model_catalog=(
@@ -330,10 +366,29 @@ class ProviderBroker:
         info.model_source = probe.get("model_source") if isinstance(probe, dict) else None
         info.probe_kind = probe.get("probe_kind") if isinstance(probe, dict) else None
         info.usage = probe.get("usage") if isinstance(probe, dict) else None
+        info.status_details = (
+            probe.get("status_details", probe.get("status", {}))
+            if isinstance(probe, dict)
+            and isinstance(probe.get("status_details", probe.get("status", {})), dict)
+            else {}
+        )
         info.checked_at = _now()
         available = probe.get("available") if isinstance(probe, dict) else None
         response = probe.get("response") if isinstance(probe, dict) else None
         info.full_response = probe.get("full_response", probe) if isinstance(probe, dict) else probe
+        reported_status = probe.get("status") if isinstance(probe, dict) else None
+        if isinstance(reported_status, dict) and reported_status.get("state") == "LIMITED":
+            info.state = "LIMITED"
+            info.available_at = None
+            info.retry_at = reported_status.get("retry_at")
+            info.reason = str(reported_status.get("reason") or "Provider je omezen.")
+            info.response_kind = "limited"
+            info.known_responses[info.response_kind] = (
+                info.known_responses.get(info.response_kind, 0) + 1
+            )
+            self._save_info(info)
+            self._log(f"{provider}: {info.state} — {info.reason}")
+            return info
         if isinstance(available, bool) and isinstance(response, str):
             info.state = "AVAILABLE" if available else "UNAVAILABLE"
             info.available_at = info.checked_at if available else None
@@ -353,26 +408,206 @@ class ProviderBroker:
         self._log(f"{provider}: {info.state} — {info.reason}")
         return info
 
+    def report_provider_status(
+        self,
+        provider: str,
+        status: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Persist a v2 provider status; AO remains the direct task caller."""
+        if provider not in PROVIDER_ORDER:
+            raise ValueError(f"Neznámý provider {provider!r}.")
+        if not isinstance(status, Mapping):
+            raise ValueError("status providera musí být objekt.")
+        state = str(status.get("state") or "UNKNOWN").upper()
+        if state not in VALID_STATES:
+            raise ValueError(f"Neplatný stav providera {state!r}.")
+        info, _ = self._load_info(provider)
+        checked_at = status.get("checked_at")
+        if not isinstance(checked_at, str) or not checked_at.strip():
+            checked_at = _now()
+        info.state = state
+        info.checked_at = checked_at
+        info.reason = str(status.get("reason") or f"Provider nahlásil stav {state}.")
+        info.response_kind = str(status.get("response_kind") or state.casefold())
+        info.probe_kind = "provider_status"
+        info.full_response = _json_safe(status.get("full_response", dict(status)))
+        details = status.get("status_details", status.get("quota_snapshot", {}))
+        info.status_details = _json_safe(details) if isinstance(details, dict) else {}
+        if isinstance(status.get("usage"), dict):
+            info.usage = _json_safe(status["usage"])
+        model = status.get("model")
+        if isinstance(model, str) and model.strip():
+            info.model = model.strip()
+        model_source = status.get("model_source")
+        if isinstance(model_source, str) and model_source.strip():
+            info.model_source = model_source.strip()
+        if state == "AVAILABLE":
+            info.available_at = checked_at
+            info.retry_at = None
+        elif state == "LIMITED":
+            info.available_at = None
+            retry_at = status.get("retry_at")
+            info.retry_at = retry_at if isinstance(retry_at, str) and retry_at.strip() else None
+        else:
+            info.available_at = None
+            info.retry_at = status.get("retry_at") if isinstance(status.get("retry_at"), str) else None
+        info.known_responses[info.response_kind] = info.known_responses.get(info.response_kind, 0) + 1
+        self._save_info(info)
+        self._log(f"{provider}: {info.state} — {info.reason}")
+        return {
+            "command": REPORT_PROVIDER_STATUS_QUERY,
+            "success": True,
+            "provider": provider,
+            "state": info.state,
+            "reason": info.reason,
+            "retry_at": info.retry_at,
+            "info_file": str(self._info_path(provider)),
+        }
+
+    def report_provider_result(self, provider: str, result: Any) -> Optional[dict[str, Any]]:
+        """v2 AO handoff: publish provider-owned status after a direct run."""
+        status = getattr(result, "provider_status", None)
+        if not isinstance(status, Mapping):
+            return None
+        payload = dict(status)
+        model = getattr(result, "model", None)
+        model_source = getattr(result, "model_source", None)
+        if model and "model" not in payload:
+            payload["model"] = model
+        if model_source and "model_source" not in payload:
+            payload["model_source"] = model_source
+        return self.report_provider_status(provider, payload)
+
+    def _list_models_from_broker_api(
+        self, provider: str
+    ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+        """Read a provider catalog through the broker-owned API boundary.
+
+        The API credential is deliberately handled here, not by a provider
+        adapter.  This path is read-only and is used only for model catalog
+        refresh.  Provider identity probes and work remain CLI calls.
+        """
+        if provider not in BROKER_MODEL_API_PROVIDERS:
+            return None, None
+        provider_contract = self._lang_contract(provider)
+        identity_probe = provider_contract.get("identity_probe", {})
+        contract = identity_probe.get("model_catalog", {}) if isinstance(identity_probe, dict) else {}
+        api = contract.get("api", {}) if isinstance(contract, dict) else {}
+        if not isinstance(api, dict):
+            return None, None
+        key_env = str(api.get("api_key_env") or BROKER_ONLY_API_KEY)
+        if key_env != BROKER_ONLY_API_KEY:
+            return None, {
+                "kind": "configuration_error",
+                "reason": "Broker Models API musí používat pouze ANTHROPIC_API_KEY.",
+            }
+        api_key = os.environ.get(BROKER_ONLY_API_KEY, "").strip()
+        if not api_key:
+            return None, None
+
+        base_url_env = str(api.get("base_url_env") or "ANTHROPIC_MODELS_API_BASE_URL")
+        base_url = os.environ.get(base_url_env, "").strip() or str(
+            api.get("default_base_url") or "https://api.anthropic.com"
+        )
+        path = str(api.get("path") or "/v1/models")
+        version = str(api.get("anthropic_version") or "2023-06-01")
+        try:
+            page_limit = max(1, min(1000, int(api.get("page_limit", 1000))))
+        except (TypeError, ValueError):
+            page_limit = 1000
+        models: list[dict[str, Any]] = []
+        pages: list[dict[str, Any]] = []
+        after_id: Optional[str] = None
+        seen_cursors: set[str] = set()
+        try:
+            timeout = min(90, max(10, int(self.providers[provider].config.timeout_seconds)))
+        except (AttributeError, TypeError, ValueError):
+            timeout = 60
+
+        while True:
+            query = {"limit": str(page_limit)}
+            if after_id:
+                query["after_id"] = after_id
+            request = Request(
+                f"{base_url.rstrip('/')}{path}?{urlencode(query)}",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "anthropic-version": version,
+                    "accept": "application/json",
+                },
+                method="GET",
+            )
+            workspace_env = str(api.get("workspace_env") or "ANTHROPIC_WORKSPACE_ID")
+            workspace_id = os.environ.get(workspace_env, "").strip()
+            if workspace_id:
+                request.add_header("anthropic-workspace-id", workspace_id)
+            try:
+                with urlopen(request, timeout=timeout) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                return None, {"kind": "http_error", "status": exc.code, "reason": str(exc.reason)}
+            except (URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
+                return None, {"kind": "request_error", "type": type(exc).__name__, "reason": str(exc)}
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                return None, {"kind": "response_error", "reason": "Models API nevrátilo očekávané pole data."}
+            page_models = [item for item in payload["data"] if isinstance(item, dict)]
+            models.extend(page_models)
+            pages.append({
+                "count": len(page_models),
+                "first_id": payload.get("first_id"),
+                "last_id": payload.get("last_id"),
+                "has_more": bool(payload.get("has_more")),
+            })
+            if not payload.get("has_more"):
+                break
+            next_after = payload.get("last_id")
+            if not isinstance(next_after, str) or not next_after.strip() or next_after in seen_cursors:
+                return None, {"kind": "pagination_error", "reason": "Models API vrátilo neplatný stránkovací kurzor."}
+            seen_cursors.add(next_after)
+            after_id = next_after
+
+        return {
+            "state": "REPORTED",
+            "source": "anthropic_models_api",
+            "models": models,
+            "picker_choices": [],
+            "reason": f"Broker přes Anthropic Models API potvrdil úplný katalog ({len(models)} modelů).",
+            "full_response": {
+                "catalog_endpoint": path,
+                "page_count": len(pages),
+                "pages": pages,
+                "complete_account_catalog": True,
+            },
+        }, None
+
     def _refresh_model_catalog(self, provider: str, info: ProviderInfo) -> ProviderInfo:
-        catalog_probe = getattr(self.providers[provider], "list_models", None)
         previous = info.model_catalog
         checked_at = _now()
-        try:
-            result = catalog_probe() if callable(catalog_probe) else {
-                "state": "UNKNOWN",
-                "source": "adapter",
-                "models": [],
-                "reason": "Provider adapter katalog modelů neposkytuje.",
-                "full_response": {},
-            }
-        except Exception as exc:
-            result = {
-                "state": "ERROR",
-                "source": "adapter",
-                "models": [],
-                "reason": f"Čtení katalogu selhalo: {exc}",
-                "full_response": {"exception_type": type(exc).__name__, "exception": str(exc)},
-            }
+        result, api_error = self._list_models_from_broker_api(provider)
+        if result is None:
+            catalog_probe = getattr(self.providers[provider], "list_models", None)
+            try:
+                result = catalog_probe() if callable(catalog_probe) else {
+                    "state": "UNKNOWN",
+                    "source": "adapter",
+                    "models": [],
+                    "reason": "Provider adapter katalog modelů neposkytuje.",
+                    "full_response": {},
+                }
+            except Exception as exc:
+                result = {
+                    "state": "ERROR",
+                    "source": "adapter",
+                    "models": [],
+                    "reason": f"Čtení katalogu selhalo: {exc}",
+                    "full_response": {"exception_type": type(exc).__name__, "exception": str(exc)},
+                }
+            if api_error and isinstance(result, dict):
+                result = dict(result)
+                full_response = result.get("full_response")
+                full_response = dict(full_response) if isinstance(full_response, dict) else {"provider_result": full_response}
+                full_response["broker_api_error"] = api_error
+                result["full_response"] = full_response
         if not isinstance(result, dict):
             result = {
                 "state": "ERROR",
@@ -384,7 +619,7 @@ class ProviderBroker:
         state = str(result.get("state") or "UNKNOWN").upper()
         if state not in MODEL_CATALOG_STATES:
             state = "ERROR"
-        reported = state == "REPORTED"
+        reported = state in {"REPORTED", "PARTIAL"}
         previous_models = previous.get("models", []) if isinstance(previous, dict) else []
         reported_models = result.get("models")
         previous_has_models = bool(_catalog_index(previous_models))
@@ -412,7 +647,8 @@ class ProviderBroker:
             "source": result.get("source"),
             "checked_at": checked_at,
             "models": models,
-            "models_source": "last_known" if retained_previous else ("provider_catalog" if reported else ("last_known" if models else None)),
+            "picker_choices": result.get("picker_choices", []),
+            "models_source": "last_known" if retained_previous else ("provider_response" if state == "PARTIAL" else ("provider_catalog" if reported else ("last_known" if models else None))),
             "reason": reason,
             "selection": self._model_selection_contract(provider),
             "full_response": _json_safe(result.get("full_response", result)),
@@ -470,7 +706,11 @@ class ProviderBroker:
         infos: dict[str, ProviderInfo] = {}
         for provider in PROVIDER_ORDER:
             info, valid = self._load_info(provider)
-            if not valid or info.state in {"UNKNOWN", "ERROR"}:
+            if (
+                not valid
+                or info.state in {"UNKNOWN", "ERROR"}
+                or (info.state == "LIMITED" and _retry_due(info.retry_at))
+            ):
                 info = self._probe(provider)
             infos[provider] = info
             if info.state == "AVAILABLE":
@@ -482,7 +722,11 @@ class ProviderBroker:
         if provider not in PROVIDER_ORDER:
             raise ValueError(f"Neznámý provider {provider!r}.")
         info, valid = self._load_info(provider)
-        if not valid or info.state in {"UNKNOWN", "ERROR"}:
+        if (
+            not valid
+            or info.state in {"UNKNOWN", "ERROR"}
+            or (info.state == "LIMITED" and _retry_due(info.retry_at))
+        ):
             info = self._probe(provider)
         return self._offer(info)
 
@@ -584,6 +828,11 @@ class ProviderBroker:
                     query.get("model_id"),
                     source=str(query.get("source") or "ao"),
                     mode=str(query.get("mode") or "FORCED"),
+                )
+            if command == REPORT_PROVIDER_STATUS_QUERY:
+                return self.report_provider_status(
+                    str(query.get("provider") or ""),
+                    query.get("status") if isinstance(query.get("status"), Mapping) else query,
                 )
             raise ValueError(f"Neznámý příkaz brokeru {command!r}.")
         if query == REFRESH_PROVIDER_NOTES_QUERY:

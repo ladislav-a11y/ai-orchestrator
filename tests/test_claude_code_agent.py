@@ -45,6 +45,94 @@ def test_find_claude_cli_missing_explicit_path():
     assert "neexistuje" in note
 
 
+def test_list_models_uses_read_only_model_picker(monkeypatch):
+    agent = ClaudeCodeAgent(make_config())
+    picker_response = json.dumps(
+        {
+            "is_error": False,
+            "result": (
+                "Current model: `Sonnet 5 (default)`\n"
+                "Usage: /model <name>. Available: sonnet, opus, haiku, or a full model ID."
+            ),
+            "total_cost_usd": 0,
+        }
+    )
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=picker_response, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.list_models()
+
+    assert result["state"] == "UNKNOWN"
+    assert result["models"] == []
+    assert result["picker_choices"] == ["sonnet", "opus", "haiku"]
+    assert result["full_response"]["current_model_label"] == "`Sonnet 5 (default)`"
+    command = calls[0][0]
+    assert command[command.index("-p") + 1] == "/model"
+    assert "--no-session-persistence" in command
+    assert command[command.index("--permission-mode") + 1] == "plan"
+    assert command[command.index("--tools") + 1] == ""
+
+
+def test_list_models_prefers_exact_models_from_provider_response(monkeypatch):
+    agent = ClaudeCodeAgent(make_config())
+    agent._last_probe_response = {
+        "modelUsage": {
+            "claude-sonnet-5": {
+                "canonicalModel": "claude-sonnet-5",
+                "contextWindow": 1_000_000,
+            },
+            "claude-haiku-4-5-20251001": {
+                "canonicalModel": "claude-haiku-4-5",
+                "contextWindow": 200_000,
+            },
+        }
+    }
+    picker_response = json.dumps(
+        {
+            "is_error": False,
+            "result": "Usage: /model <name>. Available: sonnet, opus, haiku, or a full model ID.",
+        }
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=picker_response, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.list_models()
+
+    assert result["state"] == "PARTIAL"
+    assert [item["id"] for item in result["models"]] == [
+        "claude-sonnet-5",
+        "claude-haiku-4-5-20251001",
+    ]
+    assert result["models"][0]["evidence"] == "modelUsage"
+    assert result["picker_choices"] == ["sonnet", "opus", "haiku"]
+
+
+def test_provider_cli_never_inherits_broker_api_key(monkeypatch):
+    agent = ClaudeCodeAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-a-real-secret")
+    calls = []
+    fake_stdout = json.dumps({"is_error": False, "result": "hotovo", "model": "claude-sonnet-5"})
+
+    def fake_run(cmd, **kwargs):
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+
+    assert result.success is True
+    assert calls[0]["env"].get("ANTHROPIC_API_KEY") is None
+
+
 def test_command_never_contains_forbidden_flags():
     agent = ClaudeCodeAgent(make_config())
     cmd = agent._build_command(AgentRunRequest(project_path=Path("."), prompt="hello"))
@@ -138,6 +226,31 @@ def test_run_reports_model_selected_by_claude_in_model_usage(monkeypatch):
 
     assert result.success is True
     assert result.model == "claude-haiku-4-5"
+
+
+def test_run_prefers_exact_task_receipt_model_over_multiple_model_usage_entries(monkeypatch):
+    agent = ClaudeCodeAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    fake_stdout = json.dumps(
+        {
+            "is_error": False,
+            "result": json.dumps({"answer": "hotovo", "model": "claude-sonnet-5"}),
+            "modelUsage": {
+                "claude-haiku-4-5-20251001": {"inputTokens": 10, "outputTokens": 20},
+                "claude-sonnet-5": {"inputTokens": 10, "outputTokens": 20},
+            },
+            "usage": {"input_tokens": 20, "output_tokens": 40},
+        }
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="udelej neco"))
+
+    assert result.success is True
+    assert result.model == "claude-sonnet-5"
 
 
 def test_run_reports_model_source_reported_when_confirmed(monkeypatch):

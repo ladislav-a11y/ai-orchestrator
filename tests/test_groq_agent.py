@@ -7,6 +7,7 @@ import pytest
 import orchestrator.agents.groq as groq_module
 from orchestrator.agents.base import AgentRunRequest
 from orchestrator.agents.groq import GroqAgent, _execute_tool
+from orchestrator.agents.groq_rate_limiter import GroqRateLimiter
 from orchestrator.config import DEFAULT_PROVIDER_ORDER, GROQ_FREE_MODEL, GroqAgentConfig, load_config
 
 
@@ -74,9 +75,10 @@ def tool_call(name, arguments, call_id="call-1"):
 
 def make_agent(monkeypatch, responses, **overrides):
     monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    rate_limiter = overrides.pop("rate_limiter", None)
     values = {"model": GROQ_FREE_MODEL, "free_only": True}
     values.update(overrides)
-    agent = GroqAgent(GroqAgentConfig(**values))
+    agent = GroqAgent(GroqAgentConfig(**values), rate_limiter=rate_limiter)
     client = FakeClient(responses)
     agent._client = client
     monkeypatch.setattr(groq_module, "Groq", object)
@@ -116,6 +118,22 @@ def test_missing_api_key_is_unavailable(monkeypatch):
 
     assert ok is False
     assert "GROQ_API_KEY" in message
+
+
+def test_local_v2_limiter_blocks_before_groq_api_call(monkeypatch):
+    limiter = GroqRateLimiter()
+    limiter.reserve(8000)
+    agent, client = make_agent(monkeypatch, [], rate_limiter=limiter)
+
+    result = agent.run(
+        AgentRunRequest(project_path=Path("."), prompt="Krátký test limiteru.")
+    )
+
+    assert result.success is False
+    assert result.limited is True
+    assert result.provider_status["state"] == "LIMITED"
+    assert "tpm" in result.provider_status["limited_dimensions"]
+    assert client.calls == []
 
 
 def test_requested_model_override_is_rejected_in_free_only_mode(monkeypatch, tmp_path):

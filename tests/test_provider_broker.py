@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from orchestrator import provider_broker as provider_broker_module
 from orchestrator.provider_broker import ProviderBroker
 
 
@@ -71,6 +72,58 @@ def test_refresh_stores_and_compares_catalog_without_writing_models_to_lang(tmp_
     assert second["model_updates"]["groq"]["added"] == ["groq-two"]
     assert second["model_updates"]["groq"]["removed"] == []
     assert all(path.read_text(encoding="utf-8") == lang_before[path.name] for path in lang_dir.glob("lang*.json"))
+
+
+def test_broker_owns_anthropic_models_api_and_provider_does_not_call_it(tmp_path, monkeypatch):
+    catalog = {name: [{"id": f"{name}-one"}] for name in ("groq", "antigravity", "claude-code", "codex")}
+    providers = [FakeProvider(name, catalog[name]) for name in catalog]
+    lang_dir = _lang_dir(tmp_path)
+    (lang_dir / "langclaude-code.json").write_text(
+        json.dumps(
+            {
+                "provider": "claude-code",
+                "identity_probe": {
+                    "model_catalog": {
+                        "api": {
+                            "path": "/v1/models",
+                            "api_key_env": "ANTHROPIC_API_KEY",
+                            "default_base_url": "https://api.anthropic.com",
+                            "anthropic_version": "2023-06-01",
+                            "page_limit": 1000,
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-a-real-secret")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"data": [{"id": "claude-opus-5"}], "has_more": False}).encode("utf-8")
+
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((request, timeout))
+        return FakeResponse()
+
+    monkeypatch.setattr(provider_broker_module, "urlopen", fake_urlopen)
+    broker = ProviderBroker(providers, info_dir=tmp_path / "info", lang_dir=lang_dir)
+    refreshed = broker.refresh_provider_notes()
+    claude = refreshed["providers"]["claude-code"]
+
+    assert claude["model_catalog"]["state"] == "REPORTED"
+    assert claude["model_catalog"]["source"] == "anthropic_models_api"
+    assert claude["model_catalog"]["models"] == [{"id": "claude-opus-5"}]
+    assert calls[0][0].get_header("Authorization") == "Bearer test-key-not-a-real-secret"
 
 
 def test_forced_model_is_persisted_and_used_after_broker_reload(tmp_path):
@@ -186,3 +239,35 @@ def test_empty_reported_catalog_keeps_last_known_models(tmp_path):
     offer = reloaded.ask("select_provider")["offer"]
     assert offer["provider"] == "groq"
     assert note["model_catalog"]["models"] == [{"id": "groq-one"}]
+
+
+def test_v2_provider_status_is_stored_and_limited_provider_is_not_offered(tmp_path):
+    catalog = {
+        name: [{"id": f"{name}-one"}]
+        for name in ("groq", "antigravity", "claude-code", "codex")
+    }
+    providers = [FakeProvider(name, catalog[name]) for name in catalog]
+    lang_dir = _lang_dir(tmp_path)
+    broker = ProviderBroker(providers, info_dir=tmp_path / "info", lang_dir=lang_dir)
+    broker.refresh_provider_notes()
+
+    reported = broker.ask(
+        {
+            "command": "report_provider_status",
+            "provider": "groq",
+            "status": {
+                "state": "LIMITED",
+                "checked_at": "2026-09-09T10:00:00+00:00",
+                "retry_at": "2099-09-09T10:00:00+00:00",
+                "reason": "TPM vyčerpán",
+                "status_details": {"limited_dimensions": ["tpm"]},
+            },
+        }
+    )
+
+    assert reported["success"] is True
+    note = json.loads((tmp_path / "info" / "groqinfo.json").read_text(encoding="utf-8"))
+    assert note["state"] == "LIMITED"
+    assert note["retry_at"] == "2099-09-09T10:00:00+00:00"
+    assert note["status_details"] == {"limited_dimensions": ["tpm"]}
+    assert broker.ask("select_provider")["offer"]["provider"] == "antigravity"

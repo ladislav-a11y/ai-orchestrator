@@ -1,8 +1,16 @@
 {
   "contract_version": 1,
+  "architecture_version": "v2",
   "provider": "codex",
   "adapter": "codex.py",
   "purpose": "Převod společného vstupu AO na neinteraktivní Codex CLI a převod JSONL odpovědi zpět do AO.",
+  "v2_status_contract": {
+    "owner": "codex_provider",
+    "ao_action": "Po přímém běhu providera předá AgentRunResult.provider_status brokeru k uložení.",
+    "states": ["AVAILABLE", "LIMITED", "UNAVAILABLE", "ERROR"],
+    "broker_rule": "Broker stav pouze uloží a podle něj filtruje nabídky; výsledek úkolu neposuzuje.",
+    "refresh_command": "refresh_provider_notes znovu provede probe a obnoví potvrzené poznámky providerů."
+  },
   "usage_files": {
     "current_run": "usage_codex.json",
     "lifetime": "usage_codex_lifetime.json",

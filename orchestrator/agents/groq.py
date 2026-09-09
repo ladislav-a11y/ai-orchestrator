@@ -24,7 +24,18 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, model_from_paths
+from orchestrator.agents.base import (
+    Agent,
+    AgentRunRequest,
+    AgentRunResult,
+    model_from_paths,
+    with_provider_status,
+)
+from orchestrator.agents.groq_rate_limiter import (
+    GroqRateLimitExceeded,
+    GroqRateLimiter,
+    GroqReservation,
+)
 from orchestrator.agents.slack_provider_notifications import notify_provider_run
 from orchestrator.agents.usage_ledger import record_provider_run
 from orchestrator.config import GROQ_FREE_MODEL, GroqAgentConfig
@@ -876,6 +887,28 @@ def _duration_from_text(text: str) -> Optional[float]:
     return sum(float(value) * multipliers[unit] for value, unit in matches)
 
 
+def _rate_limit_headers(exc: Exception) -> dict[str, Any]:
+    """Read only the Groq rate-limit headers actually returned by the API."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return {}
+    wanted = {
+        "x-ratelimit-limit-requests",
+        "x-ratelimit-remaining-requests",
+        "x-ratelimit-reset-requests",
+        "x-ratelimit-limit-tokens",
+        "x-ratelimit-remaining-tokens",
+        "x-ratelimit-reset-tokens",
+        "retry-after",
+    }
+    return {
+        str(key).lower(): value
+        for key, value in headers.items()
+        if str(key).casefold() in wanted
+    }
+
+
 def _quota_snapshot(exc: Exception, retry_after_seconds: Optional[float]) -> Optional[dict[str, Any]]:
     """Extract provider-reported daily quota evidence from a Groq error."""
     body = _error_body(exc)
@@ -889,6 +922,9 @@ def _quota_snapshot(exc: Exception, retry_after_seconds: Optional[float]) -> Opt
         re.IGNORECASE | re.DOTALL,
     )
     snapshot: dict[str, Any] = {}
+    rate_limit_headers = _rate_limit_headers(exc)
+    if rate_limit_headers:
+        snapshot["rate_limit_headers"] = rate_limit_headers
     if match:
         snapshot.update(
             {
@@ -931,13 +967,36 @@ def _retry_after_seconds(exc: Exception) -> Optional[float]:
                     return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
                 except (TypeError, ValueError, OverflowError):
                     pass
+        reset_values = [
+            headers.get("x-ratelimit-reset-requests")
+            or headers.get("X-RateLimit-Reset-Requests"),
+            headers.get("x-ratelimit-reset-tokens")
+            or headers.get("X-RateLimit-Reset-Tokens"),
+        ]
+        durations = [_duration_from_text(str(value)) for value in reset_values if value]
+        durations = [duration for duration in durations if duration is not None]
+        if durations:
+            return max(0.0, max(durations))
     body = _error_body(exc)
     error = body.get("error") if isinstance(body, dict) else None
     message = str(error.get("message") if isinstance(error, dict) else "")
     return _duration_from_text(message or str(exc))
 
 
+def _parse_retry_at(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 class GroqAgent(Agent):
+    """v2 Groq provider: owns request limiting and reports status to AO."""
     name = "groq"
     supported_capabilities = frozenset(
         {
@@ -951,7 +1010,12 @@ class GroqAgent(Agent):
         }
     )
 
-    def __init__(self, config: GroqAgentConfig):
+    def __init__(
+        self,
+        config: GroqAgentConfig,
+        *,
+        rate_limiter: Optional[GroqRateLimiter] = None,
+    ):
         self.config = config
         if config.free_only and config.model != GROQ_FREE_MODEL:
             raise ValueError(
@@ -960,6 +1024,10 @@ class GroqAgent(Agent):
             )
         self._client = None
         self._sessions: dict[str, list[dict[str, Any]]] = {}
+        if rate_limiter is not None:
+            self._rate_limiter = rate_limiter
+        else:
+            self._rate_limiter = GroqRateLimiter(config.rate_limit_state_path)
 
     def is_available(self) -> tuple[bool, str]:
         if Groq is None:
@@ -970,12 +1038,35 @@ class GroqAgent(Agent):
 
     def probe_identity(self) -> dict[str, Any]:
         available, response = self.is_available()
+        if available:
+            limited = self._rate_limiter.status()
+            if limited is not None:
+                return {
+                    "available": False,
+                    "response": limited["reason"],
+                    "model": self.config.model,
+                    "model_source": "configured",
+                    "probe_kind": "local_rate_limiter",
+                    "status": limited,
+                    "status_details": limited,
+                    "full_response": limited,
+                }
         return {
             "available": available,
             "response": response,
             "model": self.config.model if available else None,
             "model_source": "configured" if available else None,
             "probe_kind": "local_configuration",
+            "status_details": {
+                "provider_limits": {
+                    "rpm": 30,
+                    "rpd": 1000,
+                    "tpm": 8000,
+                    "tpd": 200000,
+                    "source": "groq_free_plan_configuration",
+                },
+                "local_rate_limiter": self._rate_limiter.snapshot(),
+            },
             "full_response": {"available": available, "response": response},
         }
 
@@ -1047,6 +1138,7 @@ class GroqAgent(Agent):
         remaining_total_tokens: Optional[int],
         tools: Optional[list[dict[str, Any]]] = None,
         response_format: Optional[dict[str, Any]] = None,
+        reservations: Optional[list[GroqReservation]] = None,
     ):
         configured_output_tokens = max(1, int(self.config.max_output_tokens))
         minimum_output_tokens = min(_MIN_OUTPUT_TOKENS, configured_output_tokens)
@@ -1094,8 +1186,26 @@ class GroqAgent(Agent):
             kwargs["parallel_tool_calls"] = False
         if response_format is not None:
             kwargs["response_format"] = response_format
+        reservation = self._rate_limiter.reserve(input_tokens + effective_output_tokens)
+        if reservations is not None:
+            reservations.append(reservation)
         client = self._client_for(remaining_seconds)
         return client.chat.completions.create(**kwargs)
+
+    def _settle_reservation(
+        self,
+        reservations: list[GroqReservation],
+        response: Any,
+    ) -> None:
+        if not reservations:
+            return
+        reservation = reservations.pop()
+        _, _, _, total_tokens = _usage_values(response)
+        self._rate_limiter.settle(
+            reservation,
+            total_tokens,
+            uncertain=total_tokens is None,
+        )
 
     def _failure_result(
         self,
@@ -1130,14 +1240,53 @@ class GroqAgent(Agent):
                 error=f"LIMITED: {exc}",
                 limited=True,
             )
-        if _provider_rate_limit_failure(exc):
-            retry_after_seconds = _retry_after_seconds(exc)
+        if isinstance(exc, GroqRateLimitExceeded):
+            status = dict(exc.status)
+            retry_after_seconds = None
+            retry_at = status.get("retry_at")
+            if isinstance(retry_at, str):
+                parsed_retry_at = _parse_retry_at(retry_at)
+                if parsed_retry_at is not None:
+                    retry_after_seconds = max(
+                        0.0,
+                        (parsed_retry_at - datetime.now(timezone.utc)).total_seconds(),
+                    )
             return AgentRunResult(
                 **common,
                 error=f"LIMITED: {exc}",
                 limited=True,
                 retry_after_seconds=retry_after_seconds,
-                quota_snapshot=_quota_snapshot(exc, retry_after_seconds),
+                quota_snapshot=status,
+                provider_status=status,
+            )
+        if _provider_rate_limit_failure(exc):
+            retry_after_seconds = _retry_after_seconds(exc)
+            quota_snapshot = _quota_snapshot(exc, retry_after_seconds)
+            provider_status: dict[str, Any] = {
+                "state": "LIMITED",
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "retry_after_seconds": retry_after_seconds,
+                "retry_at": (
+                    quota_snapshot.get("retry_at")
+                    if isinstance(quota_snapshot, dict)
+                    else None
+                ),
+                "reason": str(exc),
+                "response_kind": "rate_limited",
+                "status_details": quota_snapshot or {},
+                "full_response": _error_body(exc) or {
+                    "exception_type": type(exc).__name__,
+                    "exception": str(exc),
+                },
+                "source": "groq_provider",
+            }
+            return AgentRunResult(
+                **common,
+                error=f"LIMITED: {exc}",
+                limited=True,
+                retry_after_seconds=retry_after_seconds,
+                quota_snapshot=quota_snapshot,
+                provider_status=provider_status,
             )
         unsupported_tool = _unsupported_tool_name(exc)
         if unsupported_tool:
@@ -1158,6 +1307,7 @@ class GroqAgent(Agent):
 
     @notify_provider_run("groq")
     @record_provider_run("groq")
+    @with_provider_status("groq")
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         available, message = self.is_available()
         if not available:
@@ -1200,6 +1350,7 @@ class GroqAgent(Agent):
         max_total_tokens = max(1, int(max_total_tokens))
         last_response = None
         final_content = ""
+        pending_reservations: list[GroqReservation] = []
 
         try:
             for _ in range(self.config.max_tool_rounds):
@@ -1215,6 +1366,7 @@ class GroqAgent(Agent):
                         remaining_seconds=remaining,
                         remaining_total_tokens=max_total_tokens - _usage_total_tokens(usage),
                         tools=_tool_schema(),
+                        reservations=pending_reservations,
                     )
                 except Exception as exc:
                     if _schema_finalization_tool_failure(exc, request.output_schema):
@@ -1259,6 +1411,7 @@ class GroqAgent(Agent):
                         continue
                     raise
                 last_response = response
+                self._settle_reservation(pending_reservations, response)
                 _add_usage(usage, response)
                 choice = response.choices[0]
                 assistant_message = choice.message
@@ -1329,6 +1482,7 @@ class GroqAgent(Agent):
                     model=model,
                     remaining_seconds=remaining,
                     remaining_total_tokens=max_total_tokens - _usage_total_tokens(usage),
+                    reservations=pending_reservations,
                     response_format={
                         "type": "json_schema",
                         "json_schema": {
@@ -1339,6 +1493,7 @@ class GroqAgent(Agent):
                     },
                 )
                 last_response = response
+                self._settle_reservation(pending_reservations, response)
                 _add_usage(usage, response)
                 assistant_message = response.choices[0].message
                 messages.append(_message_dict(assistant_message))
@@ -1362,7 +1517,23 @@ class GroqAgent(Agent):
                 output_tokens=usage.get("output_tokens"),
                 thinking_tokens=usage.get("thinking_tokens"),
                 total_tokens=usage.get("total_tokens"),
+                provider_status={
+                    "state": "AVAILABLE",
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                    "available_at": datetime.now(timezone.utc).isoformat(),
+                    "reason": "Groq dokončil požadavek.",
+                    "response_kind": "available",
+                    "status_details": self._rate_limiter.snapshot(),
+                    "full_response": {
+                        "model": reported_model or model,
+                        "model_source": "reported" if reported_model else model_source,
+                    },
+                    "source": "groq_provider",
+                },
             )
         except Exception as exc:  # expected provider/network failures are normalized below
+            for reservation in pending_reservations:
+                self._rate_limiter.settle(reservation, None, uncertain=True)
+            pending_reservations.clear()
             self._sessions[session_id] = messages
             return self._failure_result(exc, request, model, model_source, session_id, usage)

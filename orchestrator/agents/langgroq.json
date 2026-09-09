@@ -1,8 +1,23 @@
 {
   "contract_version": 1,
+  "architecture_version": "v2",
   "provider": "groq",
   "adapter": "groq.py",
   "purpose": "Převod společného vstupu AO na Groq API a převod odpovědi zpět do AO.",
+  "v2_status_contract": {
+    "owner": "groq_provider",
+    "ao_action": "Po přímém běhu providera předá AgentRunResult.provider_status brokeru k uložení.",
+    "states": ["AVAILABLE", "LIMITED", "UNAVAILABLE", "ERROR"],
+    "broker_rule": "Broker stav pouze uloží a podle něj filtruje nabídky; výsledek úkolu neposuzuje.",
+    "refresh_command": "refresh_provider_notes znovu provede probe a obnoví potvrzené poznámky providerů."
+  },
+  "groq_rate_limits": {
+    "static_limits": {"rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000},
+    "static_limit_source": "Groq Free Plan pro openai/gpt-oss-120b",
+    "local_guard": "Provider před každým fyzickým API požadavkem rezervuje odhad request/tokenů v rolling 60sekundovém a 24hodinovém okně; po odpovědi jej srovná s usage.",
+    "remote_usage_rule": "Aktuální vzdálené čerpání není staticky známo; použij lokální snapshot a providerem vrácené x-ratelimit-* hlavičky nebo 429 evidence, jinak hodnotu ponech unknown.",
+    "limit_result": "Při zasažení kteréhokoli rozměru vrať LIMITED, limited_dimensions, reason, retry_at pokud je znám a celý dostupný status_details."
+  },
   "usage_files": {
     "current_run": "usage_groq.json",
     "lifetime": "usage_groq_lifetime.json",

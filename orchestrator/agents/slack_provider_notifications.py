@@ -49,12 +49,65 @@ def _number(value: Any) -> int | float:
     return max(0, value)
 
 
+def _reported_model(result: Any) -> str:
+    """Return only a model identity confirmed by the provider result.
+
+    ``model`` is the primary provider-reported identity.  Some adapters keep
+    the same exact identity separately as ``receipt_model`` when the provider
+    returned it in the task receipt but omitted it from top-level metadata.
+    As a final provider-response fallback, inspect only the response's own
+    ``model``/single-entry ``modelUsage`` fields.  Never use
+    ``requested_model`` here: Slack must not turn a request into evidence.
+    """
+    for value in (
+        getattr(result, "model", None),
+        getattr(result, "receipt_model", None),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    raw = getattr(result, "raw_response", None)
+    if not isinstance(raw, Mapping):
+        return ""
+
+    direct_model = raw.get("model")
+    if isinstance(direct_model, str) and direct_model.strip():
+        return direct_model.strip()
+
+    for value in (raw.get("result"), getattr(result, "output_text", None)):
+        if not isinstance(value, str) or not value.strip():
+            continue
+        candidate = value.strip()
+        if candidate.startswith("```") and candidate.endswith("```"):
+            lines = candidate.splitlines()
+            if lines and lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            candidate = "\n".join(lines).strip()
+        try:
+            receipt = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if isinstance(receipt, Mapping):
+            receipt_model = receipt.get("model")
+            if isinstance(receipt_model, str) and receipt_model.strip():
+                return receipt_model.strip()
+
+    model_usage = raw.get("modelUsage")
+    if isinstance(model_usage, Mapping) and len(model_usage) == 1:
+        model_id = next(iter(model_usage), None)
+        if isinstance(model_id, str) and model_id.strip():
+            return model_id.strip()
+    return ""
+
+
 def _usage_from_result(result: Any) -> list[dict[str, Any]]:
     """Use the exact in-memory values that the usage ledger just persisted."""
-    model = getattr(result, "model", None)
+    model = _reported_model(result)
     return [
         {
-            "model": model.strip() if isinstance(model, str) and model.strip() else "",
+            "model": model,
             "input_tokens": _number(getattr(result, "input_tokens", None)),
             "output_tokens": _number(getattr(result, "output_tokens", None)),
             "thinking_tokens": _number(getattr(result, "thinking_tokens", None)),

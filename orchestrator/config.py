@@ -121,6 +121,10 @@ class CodexAgentConfig:
 
 @dataclass
 class GroqAgentConfig:
+    # v2: provider owns the persisted rolling RPM/RPD/TPM/TPD guard. None is
+    # intentionally an in-memory limiter for isolated tests; production v2
+    # config points to a provider-local state file beside this adapter.
+    rate_limit_state_path: Optional[str] = None
     # Strict free-only provider contract. The adapter rejects any per-call
     # model override while free_only is true unless it matches this model.
     model: str = GROQ_FREE_MODEL
@@ -378,6 +382,7 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
             "low/medium/high."
         )
     groq = GroqAgentConfig(
+        rate_limit_state_path=groq_raw.get("rate_limit_state_path"),
         model=str(groq_raw.get("model", GROQ_FREE_MODEL)),
         free_only=bool(groq_raw.get("free_only", True)),
         reasoning_effort=groq_reasoning_effort,

@@ -1,8 +1,16 @@
 {
   "contract_version": 1,
+  "architecture_version": "v2",
   "provider": "claude-code",
   "adapter": "claude_code.py",
   "purpose": "Převod společného vstupu AO na neinteraktivní CLI Claude Code a převod odpovědi zpět do AO.",
+  "v2_status_contract": {
+    "owner": "claude-code_provider",
+    "ao_action": "Po přímém běhu providera předá AgentRunResult.provider_status brokeru k uložení.",
+    "states": ["AVAILABLE", "LIMITED", "UNAVAILABLE", "UNKNOWN", "ERROR"],
+    "broker_rule": "Broker stav pouze uloží a podle něj filtruje nabídky; výsledek úkolu neposuzuje.",
+    "refresh_command": "refresh_provider_notes znovu provede probe a obnoví potvrzené poznámky providerů."
+  },
   "usage_files": {
     "current_run": "usage_claude-code.json",
     "lifetime": "usage_claude-code_lifetime.json",
@@ -28,10 +36,59 @@
       "future_update_rule": "Při změně Claude Code JSON výstupu uprav nejprve tento seznam a jeho command/format; Python nemá obsahovat další pevné názvy polí."
     },
     "model_catalog": {
-      "method": "not_available_in_cli",
-      "command": null,
-      "output_format": null,
-      "inference": false
+      "method": "anthropic_models_api_with_cli_fallback",
+      "api": {
+        "method": "GET",
+        "path": "/v1/models",
+        "default_base_url": "https://api.anthropic.com",
+        "base_url_env": "ANTHROPIC_MODELS_API_BASE_URL",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "workspace_env": "ANTHROPIC_WORKSPACE_ID",
+        "anthropic_version": "2023-06-01",
+        "page_limit": 1000,
+        "pagination": "after_id/last_id",
+        "success_state": "REPORTED",
+        "models_field": "data",
+        "exact_id_field": "id",
+        "capability_fields": ["capabilities", "display_name", "created_at", "max_input_tokens", "max_tokens"]
+      },
+      "api_rule": "Je-li dostupný ANTHROPIC_API_KEY, vždy nejprve načti všechny stránky GET /v1/models; výsledek je úplný katalog přesných ID a broker jej může porovnat s předchozí poznámkou.",
+      "credential_boundary": {
+        "owner": "provider-broker",
+        "credential": "ANTHROPIC_API_KEY",
+        "allowed_operation": "Pouze brokerem řízený read-only refresh GET /v1/models.",
+        "forbidden_operations": [
+          "identity_probe",
+          "task_execution",
+          "jakýkoli pracovní běh Claude CLI"
+        ],
+        "provider_cli_authentication": "Claude CLI přihlášení bez ANTHROPIC_API_KEY."
+      },
+      "command": "claude -p \"/model\" --output-format json --no-session-persistence --permission-mode plan --tools \"\"",
+      "output_format": "Claude CLI JSON; picker choices are in result",
+      "picker": {
+        "prompt": "/model",
+        "permission_mode": "plan",
+        "no_session_persistence": true,
+        "tools": [],
+        "result_path": "result",
+        "available_prefix": "Available:",
+        "full_model_id_suffix": "or a full model ID"
+      },
+      "known_aliases_verified_in_cli": ["sonnet", "opus", "haiku", "fable", "best", "sonnet[1m]", "opus[1m]", "fable[1m]", "opusplan", "default"],
+      "picker_choices_field": "model_catalog.picker_choices",
+      "picker_choices_are_exact_model_ids": false,
+      "provider_response_evidence": {
+        "primary_source": "probe_identity JSON response",
+        "exact_model_paths": ["model", "modelUsage.<exact_model_id>"],
+        "catalog_state_when_found": "PARTIAL",
+        "models_field_rule": "Do model_catalog.models zapiš pouze přesná ID potvrzená v provider_response.model nebo v klíčích modelUsage; metadata z modelUsage lze připojit.",
+        "completeness_rule": "modelUsage je seznam modelů použitých v konkrétní odpovědi, ne záruka úplného účtu; proto PARTIAL, nikoli úplný katalog.",
+        "selection_rule": "PARTIAL modely jsou pozorovaná přesná ID a lze je předat jako kandidáty; broker je nesmí vydávat za úplný allowlist."
+      },
+      "complete_account_catalog": false,
+      "inference": false,
+      "rule": "Nejprve použij přesná ID z providerové odpovědi/modelUsage a zapiš je jako PARTIAL; picker potvrzuje pouze volby aktuální CLI relace a slouží jako doplňková evidence aliasů. Úplný účetní katalog se bez Models API nebo jiného přímého katalogového endpointu nesmí tvrdit. Při neúspěchu pickeru se použije claude --help pouze jako záložní evidence aliasů."
     },
     "model_selection": {
       "method": "cli_argument",
@@ -39,6 +96,20 @@
       "fallback_argument": "--fallback-model",
       "value": "přesný model_id nebo providerem doložený alias",
       "aliases": true,
+      "forced_selection": {
+        "broker_command": "set_provider_model",
+        "request": {
+          "command": "set_provider_model",
+          "provider": "claude-code",
+          "model_id": "<přesné ID z posledního katalogu state=REPORTED>",
+          "source": "user",
+          "mode": "FORCED"
+        },
+        "required_model_rule": "FORCED vyžaduje přesné úplné modelové ID z brokerem potvrzeného katalogu; alias se pro nucený výběr nepoužívá.",
+        "ao_transport": "Broker předá AO selected_model; AO jej předá jako AgentRunRequest.requested_model.",
+        "provider_command": "claude -p <prompt> --output-format json --model <přesné_modelové_ID>",
+        "actual_model_rule": "--model je požadavek. Skutečně použitý model se převezme pouze z odpovědi nebo metadat providera a případný rozdíl se uloží jako MISMATCH."
+      },
       "unknown_catalog_rule": "Bez autentizovaného katalogu se modely nesmí domýšlet."
     },
     "behavior": "Po kontrole verze provede pouze read-only identifikační dotaz v CLI JSON režimu a z odpovědi přečte model."
