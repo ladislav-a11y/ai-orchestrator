@@ -5,6 +5,7 @@ from pathlib import Path
 
 from orchestrator.agents.slack_provider_notifications import (
     format_messages,
+    format_provider_wait_message,
     notify_provider_result,
 )
 
@@ -101,3 +102,47 @@ def test_task_is_compacted_and_missing_task_is_explicit():
 
     missing = format_messages("codex", result, [{"model": result.model}])[0]
     assert "úkol: neuvedený úkol" in missing
+
+
+def test_failed_provider_message_contains_reason_and_retry():
+    result = Result()
+    result.success = False
+    result.limited = True
+    result.model = "openai/gpt-oss-120b"
+    result.error = "Groq odmítl požadavek: TPM limit byl překročen."
+    result.retry_after_seconds = 42
+    result.input_tokens = 0
+    result.output_tokens = 0
+    result.thinking_tokens = 0
+    result.total_tokens = 0
+    result.cost_usd = 0
+
+    message = format_messages(
+        "groq",
+        result,
+        [{"model": result.model}],
+        task="Otestuj odpověď providera.",
+    )[0]
+
+    assert "stav: `limited`" in message
+    assert "důvod: Groq odmítl požadavek: TPM limit byl překročen." in message
+    assert "retry za: 42 s" in message
+
+def test_provider_wait_message_reports_broker_level_wait_and_resume_state():
+    message = format_provider_wait_message(
+        project="Station Agent",
+        task="Audit GUI změny",
+        reason="Žádný provider není pro tento task použitelný.",
+        retry_after_seconds=None,
+        auto_resume_active=False,
+        now=datetime.fromisoformat("2026-09-11T10:25:08+02:00"),
+    )
+
+    assert "[2026-09-11T10:25:08+02:00]" in message
+    assert "provider-broker" in message
+    assert "projekt: Station Agent" in message
+    assert "úkol: Audit GUI změny" in message
+    assert "stav: `waiting_for_provider`" in message
+    assert "důvod: Žádný provider není pro tento task použitelný." in message
+    assert "retry za: neuvedeno" in message
+    assert "auto-resume: `neaktivní`" in message

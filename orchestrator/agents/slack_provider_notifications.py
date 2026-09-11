@@ -136,10 +136,78 @@ def _task_text(task: Any) -> str:
     return compact
 
 
+def _reason_text(result: Any) -> str:
+    """Return the provider's failure reason without exposing raw metadata."""
+    error = getattr(result, "error", None)
+    if isinstance(error, str) and error.strip():
+        return _task_text(error)
+    status = getattr(result, "provider_status", None)
+    if isinstance(status, Mapping):
+        reason = status.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            return _task_text(reason)
+    return "neuvedený důvod"
+
+
+def _retry_text(result: Any) -> str:
+    retry_after = getattr(result, "retry_after_seconds", None)
+    if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool):
+        return _format_cost(max(0, retry_after))
+    return "neuvedeno"
+
+
 def _format_cost(value: int | float) -> str:
     if value == 0:
         return "0"
     return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def format_provider_wait_message(
+    *,
+    project: str,
+    task: str | None,
+    reason: str | None,
+    retry_after_seconds: int | float | None,
+    auto_resume_active: bool,
+    now: datetime | None = None,
+) -> str:
+    """Format an AO-owned notification when broker dispatch cannot start."""
+    timestamp = (now or datetime.now().astimezone()).isoformat(timespec="seconds")
+    retry = (
+        f"{_format_cost(max(0, retry_after_seconds))} s"
+        if isinstance(retry_after_seconds, (int, float))
+        and not isinstance(retry_after_seconds, bool)
+        else "neuvedeno"
+    )
+    resume = "aktivní" if auto_resume_active else "neaktivní"
+    return (
+        f"[{timestamp}] provider-broker | projekt: {_task_text(project)} | "
+        f"úkol: {_task_text(task)} | stav: `waiting_for_provider` | "
+        f"důvod: {_task_text(reason)} | retry za: {retry} | "
+        f"auto-resume: `{resume}`"
+    )
+
+
+def notify_provider_wait(
+    *,
+    project: str,
+    task: str | None,
+    reason: str | None,
+    retry_after_seconds: int | float | None,
+    auto_resume_active: bool,
+    token_path: Path | None = None,
+) -> bool:
+    """Send one broker-level wait notification without changing workflow state."""
+    return _post(
+        format_provider_wait_message(
+            project=project,
+            task=task,
+            reason=reason,
+            retry_after_seconds=retry_after_seconds,
+            auto_resume_active=auto_resume_active,
+        ),
+        token_path=token_path,
+    )
 
 
 def format_messages(
@@ -168,10 +236,16 @@ def format_messages(
     for row in rows:
         model = row.get("model")
         model_part = f" | LLM: `{model}`" if isinstance(model, str) and model else ""
+        status = _status(result)
+        reason_part = ""
+        if status in {"failed", "limited", "unavailable"}:
+            reason_part = f" | důvod: {_reason_text(result)}"
+            if status in {"limited", "unavailable"}:
+                reason_part += f" | retry za: {_retry_text(result)} s"
         messages.append(
             f"[{timestamp}] provider: `{provider}`{model_part} | "
             f"úkol: {_task_text(task)} | "
-            f"stav: `{_status(result)}` | "
+            f"stav: `{status}`{reason_part} | "
             f"tokeny: input {_number(row.get('input_tokens'))}, "
             f"output {_number(row.get('output_tokens'))}, "
             f"thinking {_number(row.get('thinking_tokens'))}, "

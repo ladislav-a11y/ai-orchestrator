@@ -15,7 +15,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
-from orchestrator.agents.registry import build_agent, build_provider_broker
+from orchestrator.agents.registry import build_agent, build_broker_backed_agent
+from orchestrator.agents.slack_provider_notifications import notify_provider_wait
 from orchestrator.autonomous import (
     AutonomousResult,
     AutonomousStatus,
@@ -258,7 +259,7 @@ class OrchestratorService:
     # -- execution ---------------------------------------------------------
 
     def _execute(self, task: Task) -> Task:
-        agent = build_provider_broker(
+        agent = build_broker_backed_agent(
             self.config,
             logger=self.logger,
             agent_builder=build_agent,
@@ -345,6 +346,8 @@ class OrchestratorService:
 
         if provider_order is not None:
             raise ValueError("Výběr providerů řídí výhradně provider-broker v AO.")
+        if provider_models is not None:
+            raise ValueError("Modely providerů vybírá výhradně provider-broker v AO.")
         if agent_name and agent_name != "provider-broker":
             raise ValueError("Přímé volání providera je zakázané; použijte provider-broker.")
         if model_override:
@@ -353,7 +356,7 @@ class OrchestratorService:
         # Provider-broker is the only provider entry point. It owns all
         # provider checks, model selection, and the single provider call.
         dispatch_config = with_provider_model_overrides(self.config, provider_models)
-        agent = build_provider_broker(
+        agent = build_broker_backed_agent(
             dispatch_config,
             logger=self.logger,
             agent_builder=build_agent,
@@ -482,6 +485,20 @@ class OrchestratorService:
                 self.queue.add(waiting_task)
             else:
                 self.queue.update(waiting_task)
+
+            try:
+                notify_provider_wait(
+                    project=entry.name,
+                    task=goal_text,
+                    reason=result.error or "all configured providers are limited",
+                    retry_after_seconds=result.retry_after_seconds,
+                    auto_resume_active=self.auto_resume_active,
+                )
+            except Exception as exc:  # Slack is observability only.
+                self.logger.warning(
+                    "Slack WAITING_FOR_PROVIDER notifikace selhala: %s",
+                    exc,
+                )
 
             self.logger.info(
                 "Autonomní běh %s čeká na provider limit, uložen do fronty jako %s",
@@ -628,10 +645,10 @@ class OrchestratorService:
         Expected file shape: {"project": "...", "prompt": "...", "agent": "...",
         "test_command": "...", "auto_commit": true, "requested_model": "...",
         "selection_reason": "..."}. Only "project" and "prompt" are required.
-        "requested_model"/"selection_reason" are passed through unvalidated
-        to AgentRunRequest (see orchestrator/agents/base.py) - this
-        orchestrator never checks them against a model catalog. Files are
-        moved, never deleted.
+        "requested_model" is rejected for the broker-backed v2 path;
+        provider/model selection belongs to AO dispatch and the broker.
+        "selection_reason" is retained only as provenance. Files are moved,
+        never deleted.
         """
         inbox_dir = self.config.inbox_dir
         processed_dir = inbox_dir / "processed"

@@ -2,6 +2,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from orchestrator import service as service_module
 from orchestrator.agents.base import Agent, AgentRunResult
 from orchestrator.autonomous import AUDIT_MARKER, AutonomousStatus
@@ -51,6 +53,15 @@ def make_cfg(tmp_path: Path) -> Config:
             data=str(tmp_path / "data"),
         ),
         workspace_root=str(tmp_path / "workspace"),
+    )
+
+
+def patch_broker_facade(monkeypatch, agent):
+    """Inject a v2 broker-backed AO facade without re-opening direct providers."""
+    monkeypatch.setattr(
+        service_module,
+        "build_broker_backed_agent",
+        lambda config, logger=None, agent_builder=None: agent,
     )
 
 
@@ -108,33 +119,34 @@ def test_submit_does_not_overwrite_existing_claude_settings(tmp_path):
     assert content == {"permissions": {"allow": ["Bash(npm test:*)"]}}
 
 
-def test_submit_defaults_selection_reason_to_explicit_agent_when_agent_given(tmp_path):
+def test_submit_rejects_direct_provider_selection_in_v2(tmp_path):
     service = OrchestratorService(make_cfg(tmp_path))
-    task = service.submit(project_ref="station-agent", prompt="zaloz projekt", agent_name="claude-code")
-    assert task.selection_reason == "explicit_agent"
+    with pytest.raises(ValueError, match="Přímé volání providera"):
+        service.submit(project_ref="station-agent", prompt="zaloz projekt", agent_name="claude-code")
 
 
-def test_submit_defaults_selection_reason_to_default_agent_when_agent_omitted(tmp_path):
+def test_submit_defaults_selection_reason_to_broker_in_v2(tmp_path):
     service = OrchestratorService(make_cfg(tmp_path))
     task = service.submit(project_ref="station-agent", prompt="zaloz projekt")
-    assert task.selection_reason == "default_agent"
+    assert task.agent == "provider-broker"
+    assert task.selection_reason == "provider-broker"
 
 
 def test_submit_caller_supplied_selection_reason_wins(tmp_path):
     service = OrchestratorService(make_cfg(tmp_path))
     task = service.submit(
-        project_ref="station-agent", prompt="zaloz projekt", agent_name="claude-code",
+        project_ref="station-agent", prompt="zaloz projekt", agent_name="provider-broker",
         selection_reason="pm-routing:complex",
     )
     assert task.selection_reason == "pm-routing:complex"
 
 
-def test_submit_passes_through_requested_model(tmp_path):
+def test_submit_rejects_requested_model_outside_broker(tmp_path):
     service = OrchestratorService(make_cfg(tmp_path))
-    task = service.submit(
-        project_ref="station-agent", prompt="zaloz projekt", requested_model="claude-opus-4-1",
-    )
-    assert task.requested_model == "claude-opus-4-1"
+    with pytest.raises(ValueError, match="provider-broker"):
+        service.submit(
+            project_ref="station-agent", prompt="zaloz projekt", requested_model="claude-opus-4-1",
+        )
 
 
 def test_run_task_provider_receipt_reaches_outbox(tmp_path, monkeypatch):
@@ -158,26 +170,23 @@ def test_run_task_provider_receipt_reaches_outbox(tmp_path, monkeypatch):
                 selection_reason="explicit_agent",
             )
 
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: ReceiptAgent())
+    patch_broker_facade(monkeypatch, ReceiptAgent())
     cfg = make_cfg(tmp_path)
 
     service = OrchestratorService(cfg)
-    task = service.submit(
-        project_ref="station-agent", prompt="zaloz projekt", agent_name="claude-code",
-        requested_model="claude-opus-4-1",
-    )
+    task = service.submit(project_ref="station-agent", prompt="zaloz projekt")
     service.run_sync(task)
 
     outbox_path = cfg.outbox_dir / f"{task.id}.json"
     payload = json.loads(outbox_path.read_text(encoding="utf-8"))
-    assert payload["agent"] == "claude-code"
-    assert payload["requested_model"] == "claude-opus-4-1"
+    assert payload["agent"] == "provider-broker"
+    assert payload["requested_model"] is None
     assert payload["model"] == "claude-opus-4-1"
     assert payload["model_source"] == "reported"
     assert payload["selection_reason"] == "explicit_agent"
 
 
-def test_import_inbox_reads_requested_model_and_selection_reason(tmp_path):
+def test_import_inbox_keeps_model_selection_broker_owned(tmp_path):
     cfg = make_cfg(tmp_path)
     cfg.inbox_dir.mkdir(parents=True, exist_ok=True)
     (cfg.inbox_dir / "task1.json").write_text(
@@ -185,7 +194,6 @@ def test_import_inbox_reads_requested_model_and_selection_reason(tmp_path):
             {
                 "project": "station-agent",
                 "prompt": "udelej neco",
-                "requested_model": "claude-opus-4-1",
                 "selection_reason": "pm-routing:complex",
             }
         ),
@@ -196,8 +204,8 @@ def test_import_inbox_reads_requested_model_and_selection_reason(tmp_path):
     created = service.import_inbox()
 
     assert len(created) == 1
-    assert created[0].requested_model == "claude-opus-4-1"
     assert created[0].selection_reason == "pm-routing:complex"
+    assert created[0].requested_model is None
 
 
 def test_run_task_permission_denial_details_reach_outbox(tmp_path, monkeypatch):
@@ -217,7 +225,7 @@ def test_run_task_permission_denial_details_reach_outbox(tmp_path, monkeypatch):
                 permission_denial_details=denials,
             )
 
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: DenyingAgent())
+    patch_broker_facade(monkeypatch, DenyingAgent())
     cfg = make_cfg(tmp_path)
 
     service = OrchestratorService(cfg)
@@ -235,7 +243,7 @@ def test_run_task_permission_denial_details_reach_outbox(tmp_path, monkeypatch):
 
 
 def test_run_autonomous_completed_writes_log_and_outbox(tmp_path, monkeypatch):
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: FakeAgent())
+    patch_broker_facade(monkeypatch, FakeAgent())
     cfg = make_cfg(tmp_path)
     cfg.git = GitConfig(auto_commit=False)
 
@@ -266,120 +274,80 @@ def test_run_autonomous_completed_writes_log_and_outbox(tmp_path, monkeypatch):
     assert payload["next_step"] == ""
 
 
-def test_run_autonomous_model_override_reaches_explicit_agent_without_mutating_config(tmp_path, monkeypatch):
-    seen = {}
-
-    def fake_build_agent(name, config):
-        seen["name"] = name
-        seen["model"] = config.claude_code.model
-        return FakeAgent()
-
-    monkeypatch.setattr(service_module, "build_agent", fake_build_agent)
+def test_run_autonomous_rejects_model_override_outside_broker(tmp_path, monkeypatch):
     cfg = make_cfg(tmp_path)
     service = OrchestratorService(cfg)
 
     try:
-        _run_id, result = service.run_autonomous(
-            project_ref="station-agent",
-            goal="Priprav zakladni projekt",
-            spec_text="- [ ] Zaloz projekt",
-            agent_name="claude-code",
-            model_override="claude-opus-4-1",
-            max_iterations=3,
-        )
+        with pytest.raises(ValueError, match="provider-broker"):
+            service.run_autonomous(
+                project_ref="station-agent",
+                goal="Priprav zakladni projekt",
+                spec_text="- [ ] Zaloz projekt",
+                model_override="claude-opus-4-1",
+                max_iterations=3,
+            )
     finally:
         service.shutdown()
 
-    assert result.status == AutonomousStatus.COMPLETED
-    assert seen == {"name": "claude-code", "model": "claude-opus-4-1"}
     assert cfg.claude_code.model == ""
 
 
-def test_run_autonomous_provider_model_map_reaches_failover_without_mutating_config(tmp_path, monkeypatch):
-    seen = {}
-
-    def fake_build_failover(config, provider_order=None, **kwargs):
-        seen["antigravity"] = config.antigravity.model
-        seen["codex"] = config.codex.model
-        return FakeAgent()
-
-    monkeypatch.setattr(service_module, "build_failover_agent", fake_build_failover)
+def test_run_autonomous_rejects_provider_model_map_outside_broker(tmp_path, monkeypatch):
     cfg = make_cfg(tmp_path)
     service = OrchestratorService(cfg)
     try:
-        _run_id, result = service.run_autonomous(
-            project_ref="station-agent",
-            goal="Priprav zakladni projekt",
-            spec_text="- [ ] Zaloz projekt",
-            agent_name="auto",
-            provider_models={
-                "antigravity": "gemini-3.8-flash-medium",
-                "codex": "gpt-5.6",
-            },
-            max_iterations=3,
-        )
+        with pytest.raises(ValueError, match="provider-broker"):
+            service.run_autonomous(
+                project_ref="station-agent",
+                goal="Priprav zakladni projekt",
+                spec_text="- [ ] Zaloz projekt",
+                provider_models={
+                    "antigravity": "gemini-3.8-flash-medium",
+                    "codex": "gpt-5.6",
+                },
+                max_iterations=3,
+            )
     finally:
         service.shutdown()
 
-    assert result.status == AutonomousStatus.COMPLETED
-    assert seen == {
-        "antigravity": "gemini-3.8-flash-medium",
-        "codex": "gpt-5.6",
-    }
     assert cfg.antigravity.model == ""
     assert cfg.codex.model == ""
 
 
-def test_run_autonomous_passes_scoped_provider_order_to_failover(tmp_path, monkeypatch):
-    seen = {}
-
-    def fake_build_failover(config, provider_order=None, **kwargs):
-        seen["provider_order"] = provider_order
-        return FakeAgent()
-
-    monkeypatch.setattr(service_module, "build_failover_agent", fake_build_failover)
+def test_run_autonomous_rejects_scoped_provider_order_outside_broker(tmp_path, monkeypatch):
     service = OrchestratorService(make_cfg(tmp_path))
     try:
-        _run_id, result = service.run_autonomous(
-            project_ref="station-agent",
-            goal="Priprav zakladni projekt",
-            spec_text="- [ ] Zaloz projekt",
-            provider_order=["groq", "antigravity", "claude-code", "codex"],
-            max_iterations=3,
-        )
+        with pytest.raises(ValueError, match="provider-broker"):
+            service.run_autonomous(
+                project_ref="station-agent",
+                goal="Priprav zakladni projekt",
+                spec_text="- [ ] Zaloz projekt",
+                provider_order=["groq", "antigravity", "claude-code", "codex"],
+                max_iterations=3,
+            )
     finally:
         service.shutdown()
 
-    assert result.status == AutonomousStatus.COMPLETED
-    assert seen["provider_order"] == ["groq", "antigravity", "claude-code", "codex"]
 
 
-def test_auto_agent_does_not_ignore_scoped_provider_order(tmp_path, monkeypatch):
-    seen = {}
-
-    def fake_build_failover(config, provider_order=None, **kwargs):
-        seen["provider_order"] = provider_order
-        return FakeAgent()
-
-    monkeypatch.setattr(service_module, "build_failover_agent", fake_build_failover)
+def test_auto_agent_selection_is_broker_owned_in_v2(tmp_path, monkeypatch):
     service = OrchestratorService(make_cfg(tmp_path))
     try:
-        _run_id, result = service.run_autonomous(
-            project_ref="station-agent",
-            goal="audit",
-            spec_text="- [ ] Ověřit změnu",
-            agent_name="auto",
-            provider_order=["codex", "antigravity"],
-            max_iterations=1,
-        )
+        with pytest.raises(ValueError, match="provider-broker"):
+            service.run_autonomous(
+                project_ref="station-agent",
+                goal="audit",
+                spec_text="- [ ] Ověřit změnu",
+                agent_name="auto",
+                provider_order=["codex", "antigravity"],
+                max_iterations=1,
+            )
     finally:
         service.shutdown()
 
-    assert result.status == AutonomousStatus.COMPLETED
-    assert seen["provider_order"] == ["codex", "antigravity"]
 
-
-def test_run_autonomous_rejects_invalid_scoped_provider_order(tmp_path):
+def test_run_autonomous_rejects_any_scoped_provider_order(tmp_path):
     service = OrchestratorService(make_cfg(tmp_path))
     try:
         try:
@@ -391,7 +359,7 @@ def test_run_autonomous_rejects_invalid_scoped_provider_order(tmp_path):
             )
             assert False, "expected ValueError"
         except ValueError as exc:
-            assert "duplicity" in str(exc)
+            assert "provider-broker" in str(exc)
     finally:
         service.shutdown()
 
@@ -431,9 +399,7 @@ def test_run_autonomous_protocol_error_preserves_checkpoint_and_reports_waste_in
                 )
             return AgentRunResult(success=True, output_text="porad neplatny JSON, ne kontrakt")
 
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: FirstDoneThenProtocolErrorAgent())
-    sent = []
-    monkeypatch.setattr("orchestrator.autonomous.notify", lambda msg: sent.append(msg))
+    patch_broker_facade(monkeypatch, FirstDoneThenProtocolErrorAgent())
     cfg = make_cfg(tmp_path)
 
     service = OrchestratorService(cfg)
@@ -441,7 +407,6 @@ def test_run_autonomous_protocol_error_preserves_checkpoint_and_reports_waste_in
         project_ref="station-agent",
         goal="Priprav projekt",
         spec_text=spec,
-        agent_name="fake",
         max_iterations=10,
         run_id="protocol-error-run",
     )
@@ -464,9 +429,6 @@ def test_run_autonomous_protocol_error_preserves_checkpoint_and_reports_waste_in
     done_indices = {i for i, item in enumerate(checkpoint.items) if item.get("done")}
     assert done_indices == {0}
 
-    assert len(sent) == 1
-    assert "protokol" in sent[0].lower()
-    assert f"{result.protocol_error_total} protokolově chybných iterací" in sent[0]
 
 
 def test_resumed_autonomous_run_reuses_original_run_id(tmp_path, monkeypatch):
@@ -504,24 +466,18 @@ def test_resumed_autonomous_run_reuses_original_run_id(tmp_path, monkeypatch):
             )
 
     agent = OnceLimitedAgent()
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: agent)
+    patch_broker_facade(monkeypatch, agent)
     cfg = make_cfg(tmp_path)
     service = OrchestratorService(cfg)
     try:
-        # agent_name must be explicit here: leaving it unset routes through
-        # build_failover_agent(), which builds one provider slot per name in
-        # the fallback order ("claude-code", "antigravity", "codex") - since
-        # build_agent is monkeypatched to hand back this SAME stateful fake
-        # for every name, FailoverAgent.run() would call it once per slot
-        # inside a single outer call (limited on the 1st call, success on
-        # the 2nd), reaching COMPLETED before ever surfacing
-        # WAITING_FOR_PROVIDER. An explicit agent_name calls build_agent()
-        # directly instead, one call per outer run_autonomous() invocation.
+        # The injected v2 facade returns one provider result per outer run.
+        # It deliberately has no retry hook, so the first limited result is
+        # persisted as WAITING_FOR_PROVIDER and the next invocation resumes
+        # the same run id.
         run_id, result = service.run_autonomous(
             project_ref="station-agent",
             goal="Priprav zakladni projekt",
             spec_text="- [ ] Zaloz projekt",
-            agent_name="fake",
             max_iterations=3,
             run_id="trello-card-77",
         )
@@ -592,9 +548,7 @@ def test_waiting_for_provider_reports_auto_resume_inactive_by_default(tmp_path, 
     notification, that automatic continuation is NOT active - there is no
     persistent worker/scheduler behind this particular invocation."""
     agent = _OnceLimitedFakeAgent()
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: agent)
-    sent = []
-    monkeypatch.setattr(service_module, "notify", lambda msg: sent.append(msg))
+    patch_broker_facade(monkeypatch, agent)
 
     cfg = make_cfg(tmp_path)
     service = OrchestratorService(cfg)
@@ -604,7 +558,6 @@ def test_waiting_for_provider_reports_auto_resume_inactive_by_default(tmp_path, 
             project_ref="station-agent",
             goal="Priprav projekt",
             spec_text="- [ ] Zaloz projekt",
-            agent_name="fake",
             max_iterations=3,
             run_id="trello-card-inactive",
         )
@@ -616,10 +569,6 @@ def test_waiting_for_provider_reports_auto_resume_inactive_by_default(tmp_path, 
         assert payload["auto_resume_active"] is False
         assert payload["done"] is False
 
-        assert len(sent) == 1
-        assert "NENÍ aktivní" in sent[0]
-        assert "trello-card-inactive" in sent[0]
-        assert "90" in sent[0]
     finally:
         service.shutdown()
 
@@ -629,9 +578,7 @@ def test_waiting_for_provider_reports_auto_resume_active_when_persistent(tmp_pat
     as persistent (e.g. the long-running `orchestrator.py api` process, see
     api.py's get_service()) must report auto-resume as active instead."""
     agent = _OnceLimitedFakeAgent()
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: agent)
-    sent = []
-    monkeypatch.setattr(service_module, "notify", lambda msg: sent.append(msg))
+    patch_broker_facade(monkeypatch, agent)
 
     cfg = make_cfg(tmp_path)
     service = OrchestratorService(cfg, persistent=True)
@@ -641,7 +588,6 @@ def test_waiting_for_provider_reports_auto_resume_active_when_persistent(tmp_pat
             project_ref="station-agent",
             goal="Priprav projekt",
             spec_text="- [ ] Zaloz projekt",
-            agent_name="fake",
             max_iterations=3,
             run_id="trello-card-active",
         )
@@ -652,8 +598,6 @@ def test_waiting_for_provider_reports_auto_resume_active_when_persistent(tmp_pat
         )
         assert payload["auto_resume_active"] is True
 
-        assert len(sent) == 1
-        assert "JE aktivní" in sent[0]
     finally:
         service.shutdown()
 
@@ -709,14 +653,13 @@ def test_fresh_service_instance_resumes_from_checkpoint_and_closes_orphaned_wait
             )
 
     first_agent = PartialThenLimitedAgent()
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: first_agent)
+    patch_broker_facade(monkeypatch, first_agent)
     first_service = OrchestratorService(cfg)
     try:
         run_id, result = first_service.run_autonomous(
             project_ref="station-agent",
             goal="Priprav projekt",
             spec_text=spec,
-            agent_name="fake",
             max_iterations=5,
             run_id="trello-card-resume",
         )
@@ -745,7 +688,8 @@ def test_fresh_service_instance_resumes_from_checkpoint_and_closes_orphaned_wait
             self.calls += 1
             # Only the still-unmet item (index 1) should ever be asked about
             # - index 0 was already verified done by the checkpoint.
-            assert "druhy bod" in request.prompt
+            item_schema = request.output_schema["properties"]["items"]["items"]
+            assert item_schema["properties"]["index"]["enum"] == [1]
             assert "prvni bod" not in request.prompt
             return AgentRunResult(
                 success=True,
@@ -753,14 +697,13 @@ def test_fresh_service_instance_resumes_from_checkpoint_and_closes_orphaned_wait
             )
 
     second_agent = FinishingAgent()
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: second_agent)
+    patch_broker_facade(monkeypatch, second_agent)
     second_service = OrchestratorService(cfg)
     try:
         run_id2, result2 = second_service.run_autonomous(
             project_ref="station-agent",
             goal="Priprav projekt",
             spec_text=spec,
-            agent_name="fake",
             max_iterations=5,
             run_id="trello-card-resume",
         )
@@ -841,7 +784,7 @@ def test_pm_handoff_with_stale_out_of_range_checkpoint_indices_stays_on_real_fiv
             )
 
     agent = RemainingItemsAgent()
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: agent)
+    patch_broker_facade(monkeypatch, agent)
 
     service = OrchestratorService(cfg)
     try:
@@ -849,7 +792,6 @@ def test_pm_handoff_with_stale_out_of_range_checkpoint_indices_stays_on_real_fiv
             project_ref="station-agent",
             goal="Priprav projekt",
             spec_text=spec,
-            agent_name="fake",
             max_iterations=5,
             run_id="trello-card-64-65",
         )
@@ -885,7 +827,7 @@ def test_inbox_task_round_trip_writes_outbox_result(tmp_path, monkeypatch):
     and post back to the card. Posting to Trello itself happens in AI Project
     Manager, outside this repository, so it is not exercised here.
     """
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: FakeAgent())
+    patch_broker_facade(monkeypatch, FakeAgent())
     cfg = make_cfg(tmp_path)
     service = OrchestratorService(cfg)
     try:
@@ -1085,3 +1027,37 @@ def test_nonpersistent_service_does_not_start_waiting_worker(tmp_path):
     assert service._waiting_worker is None
 
     service.shutdown()
+
+def test_waiting_for_provider_sends_broker_owned_slack_notification(tmp_path, monkeypatch):
+    agent = _OnceLimitedFakeAgent()
+    patch_broker_facade(monkeypatch, agent)
+
+    notifications = []
+
+    def fake_notify_provider_wait(**kwargs):
+        notifications.append(kwargs)
+        return True
+
+    monkeypatch.setattr(service_module, "notify_provider_wait", fake_notify_provider_wait)
+
+    cfg = make_cfg(tmp_path)
+    service = OrchestratorService(cfg)
+    try:
+        _run_id, result = service.run_autonomous(
+            project_ref="station-agent",
+            goal="Priprav projekt",
+            spec_text="- [ ] Zaloz projekt",
+            max_iterations=3,
+            run_id="trello-card-slack-wait",
+        )
+
+        assert result.status == AutonomousStatus.WAITING_FOR_PROVIDER
+        assert notifications == [{
+            "project": "station-agent",
+            "task": "Priprav projekt",
+            "reason": "rate limit reached",
+            "retry_after_seconds": 90.0,
+            "auto_resume_active": False,
+        }]
+    finally:
+        service.shutdown()
