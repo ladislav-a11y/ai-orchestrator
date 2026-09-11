@@ -271,3 +271,125 @@ def test_v2_provider_status_is_stored_and_limited_provider_is_not_offered(tmp_pa
     assert note["retry_at"] == "2099-09-09T10:00:00+00:00"
     assert note["status_details"] == {"limited_dimensions": ["tpm"]}
     assert broker.ask("select_provider")["offer"]["provider"] == "antigravity"
+
+
+def test_multi_model_observation_is_not_forwarded_as_executable_model(tmp_path):
+    providers = [FakeProvider(name, [{"id": f"{name}-one"}]) for name in (
+        "groq", "antigravity", "claude-code", "codex"
+    )]
+
+    class MultiModelClaude(FakeProvider):
+        def probe_identity(self):
+            return {
+                "available": True,
+                "response": "claude ready",
+                "model": "claude-haiku-4-5-20251001, claude-sonnet-5",
+                "model_source": "reported",
+                "probe_kind": "test",
+                "full_response": {"modelUsage": {
+                    "claude-haiku-4-5-20251001": {},
+                    "claude-sonnet-5": {},
+                }},
+            }
+
+    providers[2] = MultiModelClaude("claude-code", [{"id": "claude-sonnet-5"}])
+    broker = ProviderBroker(
+        providers,
+        info_dir=tmp_path / "info",
+        lang_dir=_lang_dir(tmp_path),
+    )
+
+    broker.ask({"command": "report_provider_status", "provider": "groq", "status": {"state": "LIMITED"}})
+    broker.ask({"command": "report_provider_status", "provider": "antigravity", "status": {"state": "LIMITED"}})
+    offer = broker.ask("select_provider")["offer"]
+
+    assert offer["provider"] == "claude-code"
+    assert offer["model"] is None
+    assert offer["model_source"] == "reported_multiple"
+
+def test_complex_task_skips_available_groq_without_changing_provider_health(tmp_path):
+    catalog = {
+        name: [{"id": f"{name}-one"}]
+        for name in ("groq", "antigravity", "claude-code", "codex")
+    }
+    providers = [FakeProvider(name, catalog[name]) for name in catalog]
+    broker = ProviderBroker(
+        providers,
+        info_dir=tmp_path / "info",
+        lang_dir=_lang_dir(tmp_path),
+    )
+    broker.refresh_provider_notes()
+
+    offer = broker.ask(
+        {
+            "command": "select_provider",
+            "task_profile": {
+                "source": "ao_task_content",
+                "work_type": "implementation",
+                "complexity": "complex",
+                "model_tier": "strong",
+                "needs_code_changes": True,
+            },
+        }
+    )["offer"]
+
+    assert offer["provider"] == "antigravity"
+    groq_note = json.loads(
+        (tmp_path / "info" / "groqinfo.json").read_text(encoding="utf-8")
+    )
+    assert groq_note["state"] == "AVAILABLE"
+
+
+def test_simple_task_still_prefers_available_groq(tmp_path):
+    catalog = {
+        name: [{"id": f"{name}-one"}]
+        for name in ("groq", "antigravity", "claude-code", "codex")
+    }
+    providers = [FakeProvider(name, catalog[name]) for name in catalog]
+    broker = ProviderBroker(
+        providers,
+        info_dir=tmp_path / "info",
+        lang_dir=_lang_dir(tmp_path),
+    )
+    broker.refresh_provider_notes()
+
+    offer = broker.ask(
+        {
+            "command": "select_provider",
+            "task_profile": {
+                "source": "ao_task_content",
+                "work_type": "general",
+                "complexity": "simple",
+                "model_tier": "fast",
+            },
+        }
+    )["offer"]
+
+    assert offer["provider"] == "groq"
+
+
+def test_named_groq_selection_is_not_overridden_by_automatic_suitability(tmp_path):
+    catalog = {
+        name: [{"id": f"{name}-one"}]
+        for name in ("groq", "antigravity", "claude-code", "codex")
+    }
+    providers = [FakeProvider(name, catalog[name]) for name in catalog]
+    broker = ProviderBroker(
+        providers,
+        info_dir=tmp_path / "info",
+        lang_dir=_lang_dir(tmp_path),
+    )
+    broker.refresh_provider_notes()
+
+    offer = broker.ask(
+        {
+            "command": "select_provider",
+            "provider": "groq",
+            "task_profile": {
+                "complexity": "complex",
+                "model_tier": "strong",
+            },
+        }
+    )["offer"]
+
+    assert offer["provider"] == "groq"

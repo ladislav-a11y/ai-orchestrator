@@ -33,6 +33,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from orchestrator.model_routing import normalize_task_profile, profile_summary
+
 
 PROVIDER_ORDER = ("groq", "antigravity", "claude-code", "codex")
 LANG_FILES = {
@@ -50,6 +52,7 @@ VALID_STATES = {"AVAILABLE", "LIMITED", "UNAVAILABLE", "UNKNOWN", "ERROR"}
 MODEL_CATALOG_STATES = {"REPORTED", "PARTIAL", "UNKNOWN", "ERROR"}
 BROKER_MODEL_API_PROVIDERS = {"claude-code"}
 BROKER_ONLY_API_KEY = "ANTHROPIC_API_KEY"
+TASK_MODEL_PROVIDERS = {"claude-code", "codex"}
 
 
 def _now() -> str:
@@ -74,6 +77,16 @@ def _json_safe(value: Any) -> Any:
     except (TypeError, ValueError):
         return repr(value)
     return value
+
+
+def _selectable_model(value: Any) -> Optional[str]:
+    """Return one executable model ID, never an aggregate observation."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or "," in normalized or "\n" in normalized or "\r" in normalized:
+        return None
+    return normalized
 
 
 def _catalog_index(models: Any) -> dict[str, dict[str, Any]]:
@@ -189,6 +202,8 @@ class ProviderOffer:
     info_file: Optional[str] = None
     lang_file: Optional[str] = None
     lang: Optional[dict[str, Any]] = None
+    model_selection_reason: Optional[str] = None
+    task_profile: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -210,6 +225,14 @@ class ProviderBroker:
         if missing:
             raise ValueError(f"Chybí provideři brokeru: {', '.join(missing)}")
         self.providers = by_name
+        for provider_name, provider in by_name.items():
+            def publish(result: Any, selected_provider: str = provider_name) -> None:
+                self.report_provider_result(selected_provider, result)
+
+            # Provider-owned status publication. This does not make the
+            # broker execute work; it only gives broker-created providers a
+            # sink for their own post-run status receipt.
+            setattr(provider, "_broker_status_publisher", publish)
         self.models = dict(models or {})
         self.info_dir = Path(info_dir)
         self.logger = logger
@@ -355,15 +378,24 @@ class ProviderBroker:
             return self._remember_probe_error(provider, exc)
 
         info, _ = self._load_info(provider)
-        configured_model = self.models.get(provider)
-        if isinstance(configured_model, str) and configured_model.strip():
-            info.model = configured_model.strip()
+        configured_model = _selectable_model(self.models.get(provider))
+        if configured_model:
+            info.model = configured_model
         elif not isinstance(info.model, str) or not info.model.strip():
             info.model = None
         probe_model = probe.get("model") if isinstance(probe, dict) else None
-        if isinstance(probe_model, str) and probe_model.strip():
-            info.model = probe_model.strip()
-        info.model_source = probe.get("model_source") if isinstance(probe, dict) else None
+        selectable_probe_model = _selectable_model(probe_model)
+        if selectable_probe_model:
+            info.model = selectable_probe_model
+            info.model_source = probe.get("model_source") if isinstance(probe, dict) else None
+        elif isinstance(probe_model, str) and probe_model.strip():
+            # modelUsage may contain several exact models observed during one
+            # run. It is valid evidence for notes, but never a valid --model
+            # value for the next request. Let AUTO use the provider default.
+            info.model = configured_model
+            info.model_source = "reported_multiple"
+        else:
+            info.model_source = probe.get("model_source") if isinstance(probe, dict) else None
         info.probe_kind = probe.get("probe_kind") if isinstance(probe, dict) else None
         info.usage = probe.get("usage") if isinstance(probe, dict) else None
         info.status_details = (
@@ -436,11 +468,17 @@ class ProviderBroker:
         if isinstance(status.get("usage"), dict):
             info.usage = _json_safe(status["usage"])
         model = status.get("model")
-        if isinstance(model, str) and model.strip():
-            info.model = model.strip()
-        model_source = status.get("model_source")
-        if isinstance(model_source, str) and model_source.strip():
-            info.model_source = model_source.strip()
+        selectable_model = _selectable_model(model)
+        if selectable_model:
+            info.model = selectable_model
+            model_source = status.get("model_source")
+            if isinstance(model_source, str) and model_source.strip():
+                info.model_source = model_source.strip()
+        elif isinstance(model, str) and model.strip():
+            # Preserve the complete multi-model observation in full_response,
+            # but never leak it into the executable AUTO offer.
+            info.model = _selectable_model(self.models.get(provider))
+            info.model_source = "reported_multiple"
         if state == "AVAILABLE":
             info.available_at = checked_at
             info.retry_at = None
@@ -664,19 +702,78 @@ class ProviderBroker:
             self._log(f"{provider}: model katalog — {update.get('reason')}")
         return info
 
-    def _offer(self, info: ProviderInfo) -> ProviderOffer:
+    def _catalog_model_for_task(
+        self, info: ProviderInfo, task_profile: Mapping[str, Any]
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Choose an exact visible model using only the broker note catalog.
+
+        Catalog descriptions and IDs are provider evidence.  The broker uses
+        them as routing hints; it never invents an ID and never treats this
+        ephemeral choice as a persistent FORCED setting.
+        """
+        catalog = info.model_catalog if isinstance(info.model_catalog, dict) else {}
+        if catalog.get("state") != "REPORTED":
+            return None, None
+        tier = str(task_profile.get("model_tier") or "balanced").casefold()
+        tier_terms = {
+            "fast": ("fast", "affordable", "haiku", "luna"),
+            "balanced": ("balanced", "everyday", "sonnet", "terra"),
+            "strong": ("reliable", "workhorse", "proven", "opus", "sol"),
+        }
+        terms = tier_terms.get(tier, tier_terms["balanced"])
+        candidates: list[tuple[int, str, str]] = []
+        for model in _catalog_index(catalog.get("models")).values():
+            model_id = model["id"]
+            visibility = str(model.get("visibility") or "list").casefold()
+            if visibility in {"hide", "hidden", "internal"}:
+                continue
+            if "auto-review" in model_id.casefold() or "review" in model_id.casefold():
+                continue
+            haystack = " ".join(
+                str(model.get(key) or "")
+                for key in ("id", "slug", "display_name", "description")
+            ).casefold()
+            score = sum(2 if term in haystack else 0 for term in terms)
+            if task_profile.get("needs_code_changes") and "coding" in haystack:
+                score += 2
+            if task_profile.get("work_type") == "research" and "general" in haystack:
+                score += 1
+            created_at = str(model.get("created_at") or "")
+            candidates.append((score, created_at, model_id))
+        if not candidates:
+            return None, None
+        score, _created_at, model_id = max(candidates, key=lambda item: (item[0], item[1], item[2]))
+        if score <= 0:
+            return None, None
+        return model_id, f"catalog task routing: tier={tier}; {profile_summary(task_profile)}"
+
+    def _offer(
+        self, info: ProviderInfo, task_profile: Optional[Mapping[str, Any]] = None
+    ) -> ProviderOffer:
+        profile = normalize_task_profile(task_profile)
         if info.state == "AVAILABLE":
             forced = info.selection_mode == "FORCED" and info.selected_model
+            task_model = None
+            task_reason = None
+            if not forced and info.provider in TASK_MODEL_PROVIDERS and profile:
+                task_model, task_reason = self._catalog_model_for_task(info, profile)
+            selected_model = info.selected_model if forced else (task_model or info.model)
+            selected_source = "forced" if forced else ("catalog_task" if task_model else info.model_source)
             return ProviderOffer(
                 provider=info.provider,
-                model=info.selected_model if forced else info.model,
-                model_source="forced" if forced else info.model_source,
+                model=selected_model,
+                model_source=selected_source,
                 selection_mode="FORCED" if forced else "AUTO",
                 state=info.state,
                 reason=info.reason or "Provider je dostupný.",
                 info_file=str(self._info_path(info.provider)),
                 lang_file=str(self._lang_path(info.provider)),
                 lang=self._lang_contract(info.provider),
+                model_selection_reason=(
+                    "persistent user FORCED model has precedence"
+                    if forced else task_reason
+                ),
+                task_profile=profile or None,
             )
         return ProviderOffer(
             provider=None,
@@ -686,23 +783,77 @@ class ProviderBroker:
             state=info.state,
             reason=info.reason or f"Provider není dostupný: {info.state}.",
             info_file=str(self._info_path(info.provider)),
+            task_profile=profile or None,
         )
 
-    def _first_available(self, infos: Mapping[str, ProviderInfo]) -> ProviderOffer:
+    @staticmethod
+    def _provider_suitable_for_task(
+        provider: str, task_profile: Optional[Mapping[str, Any]]
+    ) -> tuple[bool, Optional[str]]:
+        """Return whether an AVAILABLE provider should receive this task.
+
+        Suitability is a per-task routing decision, not provider health.
+        Groq Free remains AVAILABLE when AO skips a task that its bounded
+        TPM/tool-loop budget is unlikely to handle reliably.
+        """
+        profile = normalize_task_profile(task_profile)
+        if provider != "groq" or not profile:
+            return True, None
+
+        complexity = str(profile.get("complexity") or "").casefold()
+        model_tier = str(profile.get("model_tier") or "").casefold()
+        if complexity == "complex" or model_tier == "strong":
+            return (
+                False,
+                "Groq Free preflight přeskočil úlohu klasifikovanou jako "
+                f"complex/strong ({profile_summary(profile)}).",
+            )
+        return True, None
+
+    def _first_available(
+        self,
+        infos: Mapping[str, ProviderInfo],
+        excluded: set[str] | None = None,
+        task_profile: Optional[Mapping[str, Any]] = None,
+    ) -> ProviderOffer:
+        excluded = excluded or set()
+        skipped_for_task: list[str] = []
         for provider in PROVIDER_ORDER:
+            if provider in excluded:
+                continue
             info = infos[provider]
             if info.state == "AVAILABLE":
-                return self._offer(info)
+                suitable, reason = self._provider_suitable_for_task(
+                    provider, task_profile
+                )
+                if suitable:
+                    return self._offer(info, task_profile)
+                skipped_for_task.append(reason or provider)
         return ProviderOffer(
             provider=None,
             model=None,
             model_source=None,
             selection_mode="AUTO",
             state="NONE_AVAILABLE",
-            reason="Žádný provider nemá stav AVAILABLE.",
+            reason=(
+                "Žádný provider mimo již neúspěšné pokusy nemá stav AVAILABLE "
+                "a zároveň není vyřazen task-level preflightem."
+                if excluded
+                else (
+                    "Žádný provider není pro tento task použitelný: "
+                    + "; ".join(skipped_for_task)
+                    if skipped_for_task
+                    else "Žádný provider nemá stav AVAILABLE."
+                )
+            ),
         )
 
-    def select_provider(self) -> ProviderOffer:
+    def select_provider(
+        self,
+        excluded: set[str] | None = None,
+        task_profile: Optional[Mapping[str, Any]] = None,
+    ) -> ProviderOffer:
+        excluded = excluded or set()
         infos: dict[str, ProviderInfo] = {}
         for provider in PROVIDER_ORDER:
             info, valid = self._load_info(provider)
@@ -713,11 +864,18 @@ class ProviderBroker:
             ):
                 info = self._probe(provider)
             infos[provider] = info
-            if info.state == "AVAILABLE":
-                return self._offer(info)
-        return self._first_available(infos)
+            if provider not in excluded and info.state == "AVAILABLE":
+                suitable, reason = self._provider_suitable_for_task(
+                    provider, task_profile
+                )
+                if suitable:
+                    return self._offer(info, task_profile)
+                self._log(reason or f"{provider}: task-level preflight skip")
+        return self._first_available(infos, excluded, task_profile)
 
-    def select_named_provider(self, provider: str) -> ProviderOffer:
+    def select_named_provider(
+        self, provider: str, task_profile: Optional[Mapping[str, Any]] = None
+    ) -> ProviderOffer:
         """Return the offer for an explicitly requested provider."""
         if provider not in PROVIDER_ORDER:
             raise ValueError(f"Neznámý provider {provider!r}.")
@@ -728,7 +886,7 @@ class ProviderBroker:
             or (info.state == "LIMITED" and _retry_due(info.retry_at))
         ):
             info = self._probe(provider)
-        return self._offer(info)
+        return self._offer(info, task_profile)
 
     def refresh_provider_notes(self) -> dict[str, Any]:
         infos = {
@@ -816,11 +974,27 @@ class ProviderBroker:
         if isinstance(query, Mapping):
             command = query.get("command")
             if command == SELECT_PROVIDER_QUERY and query.get("provider"):
-                offer = self.select_named_provider(str(query.get("provider")))
+                offer = self.select_named_provider(
+                    str(query.get("provider")), query.get("task_profile")
+                )
                 return {
                     "command": SELECT_PROVIDER_QUERY,
                     "order": list(PROVIDER_ORDER),
                     "offer": offer.to_dict(),
+                }
+            if command == SELECT_PROVIDER_QUERY:
+                raw_excluded = query.get("exclude_providers", [])
+                excluded = {
+                    str(provider).strip()
+                    for provider in raw_excluded
+                    if isinstance(provider, str) and provider.strip()
+                } if isinstance(raw_excluded, list) else set()
+                return {
+                    "command": SELECT_PROVIDER_QUERY,
+                    "order": list(PROVIDER_ORDER),
+                    "offer": self.select_provider(
+                        excluded=excluded, task_profile=query.get("task_profile")
+                    ).to_dict(),
                 }
             if command == SET_PROVIDER_MODEL_QUERY:
                 return self.set_provider_model(
