@@ -273,6 +273,39 @@ def test_v2_provider_status_is_stored_and_limited_provider_is_not_offered(tmp_pa
     assert broker.ask("select_provider")["offer"]["provider"] == "antigravity"
 
 
+def test_select_provider_reprobes_a_provider_cached_unavailable(tmp_path):
+    """A provider cached UNAVAILABLE (a CLI that failed to launch, a broken
+    identity probe, ...) must get a fresh chance on the very next
+    select_provider call - the same call broker_dispatch.py makes
+    immediately after another provider fails/times out mid-task - instead
+    of staying cached UNAVAILABLE forever until an explicit
+    refresh_provider_notes(). See incident: cw dekoder v1, P3.05 - a timed
+    out claude-code call led to "no provider available" even though
+    antigravity's failure (cached UNAVAILABLE from an earlier, unrelated
+    probe) may have already cleared by then."""
+    catalog = {
+        name: [{"id": f"{name}-one"}]
+        for name in ("groq", "antigravity", "claude-code", "codex")
+    }
+    providers = [FakeProvider(name, catalog[name]) for name in catalog]
+    broker = ProviderBroker(providers, info_dir=tmp_path / "info", lang_dir=_lang_dir(tmp_path))
+    broker.refresh_provider_notes()
+
+    broker.ask({
+        "command": "report_provider_status",
+        "provider": "groq",
+        "status": {"state": "UNAVAILABLE", "reason": "launcher failed to start"},
+    })
+    note = json.loads((tmp_path / "info" / "groqinfo.json").read_text(encoding="utf-8"))
+    assert note["state"] == "UNAVAILABLE"
+
+    # FakeProvider.probe_identity always reports available=True - the
+    # underlying cause has cleared. A stale cache must not shadow that.
+    offer = broker.ask("select_provider")["offer"]
+    assert offer["provider"] == "groq"
+    assert offer["state"] == "AVAILABLE"
+
+
 def test_multi_model_observation_is_not_forwarded_as_executable_model(tmp_path):
     providers = [FakeProvider(name, [{"id": f"{name}-one"}]) for name in (
         "groq", "antigravity", "claude-code", "codex"

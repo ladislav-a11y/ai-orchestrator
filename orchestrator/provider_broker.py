@@ -857,9 +857,17 @@ class ProviderBroker:
         infos: dict[str, ProviderInfo] = {}
         for provider in PROVIDER_ORDER:
             info, valid = self._load_info(provider)
+            # UNAVAILABLE (e.g. a CLI that failed to launch, a broken
+            # identity probe) is retried here just like ERROR/UNKNOWN -
+            # without this, a provider that failed once stays cached
+            # UNAVAILABLE forever and every later dispatch attempt (for
+            # example right after another provider times out and this
+            # method is called again to find a replacement) never gives it
+            # another chance, even though the underlying cause (a transient
+            # launcher failure, an app mid-update, ...) may already be gone.
             if (
                 not valid
-                or info.state in {"UNKNOWN", "ERROR"}
+                or info.state in {"UNKNOWN", "ERROR", "UNAVAILABLE"}
                 or (info.state == "LIMITED" and _retry_due(info.retry_at))
             ):
                 info = self._probe(provider)
@@ -882,7 +890,7 @@ class ProviderBroker:
         info, valid = self._load_info(provider)
         if (
             not valid
-            or info.state in {"UNKNOWN", "ERROR"}
+            or info.state in {"UNKNOWN", "ERROR", "UNAVAILABLE"}
             or (info.state == "LIMITED" and _retry_due(info.retry_at))
         ):
             info = self._probe(provider)
