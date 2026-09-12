@@ -1,10 +1,11 @@
-# ai-orchestrator
+# ai-orchestrator v2
 
 Lokální AI orchestrátor pro Windows 11. Řídí AI agenty (Claude Code, Gemini a
 OpenAI Codex), kteří pracují na tvých projektech - spustí agenta na
 zadaný úkol, spustí testy, a pokud vše projde a ty to povolíš, vytvoří Git
-commit. Nic se neděje bez tvého vědomí a nic se nikdy neposílá na internet
-mimo volání samotného AI modelu.
+commit. Nic se neděje bez tvého vědomí. Síťová komunikace je omezena na
+volání zvoleného AI providera, brokerem řízené read-only katalogy modelů a
+providerem odeslaný stručný receipt do Slacku.
 
 Provozní pravidla provider-brokeru, komunikace přes `lang*.json`, volba přesného
 modelu a evidence provider receipt jsou v `PROVIDER_BROKER_GUIDE.md`. Aktuální
@@ -17,14 +18,33 @@ zavolá vybraného providera. Broker pracovní úkol neprovádí ani nekontroluj
 výsledek. Každý provider má také `usage_<provider>.json` pro poslední běh a
 `usage_<provider>_lifetime.json` pro kumulovanou spotřebu podle přesného modelu.
 
+Při automatickém běhu AO odvozuje z konkrétního zadání a DoD karty task profil
+(typ práce a složitost) a předá jej brokeru spolu s `select_provider`. Broker
+pak u placených providerů vybere vhodné přesné ID z aktuálního potvrzeného
+katalogu. Fáze workflow je pouze kontext; persistentní uživatelské nucení
+modelu má vždy přednost a free provideři se tímto routingem nemění.
+
+V2 dispatch tuto hranici zachovává: orchestrátor se brokeru ptá pouze na
+nabídku providera a jeho `lang`, podle návodu zavolá provider přímo a brokeru
+nepředává pracovní úkol ani výsledek. Providerem vytvořený status se do
+brokerovy poznámky publikuje přes brokerem připojený status sink; další výběr
+pak čte aktuální `*info.json` poznámky.
+
 Po každém běhu provider odešle ještě před návratem stručnou notifikaci do
 `#ai-status` s časem, konkrétním úkolem z AO promptu, samostatným stavem,
-providerem, přesným úplným ID LLM, tokeny a cenou.
+providerem, přesným úplným ID LLM, tokeny a cenou. Při `failed`, `limited` nebo
+`unavailable` obsahuje také důvod z odpovědi providera a známý čas dalšího
+pokusu.
 Notifikace používá hodnoty z právě dokončeného providerového výsledku, broker ji
 neřídí a její případné selhání neovlivní úlohu. Úspěch se potvrzuje Slack JSON
 `ok: true`, nikoli samotným HTTP statusem.
 Model ve Slacku se bere pouze z providerem potvrzené identity nebo přesného
 task receiptu; `requested_model` se nikdy nevydává za skutečně použitý model.
+
+Providerový prompt v autonomním běhu obsahuje kanonický text připraveného úkolu
+jen jednou. Při jedné položce DoD se automaticky vytvořený wrapper neopakuje;
+u vícebodové dávky se přidají pouze skutečně odlišné body. Globální runtime,
+ruční protokol ani celý Trello/Card Contract se do pracovního promptu nekopírují.
 
 Tento návod nepředpokládá, že umíš programovat nebo pracovat s Gitem -
 všechny příkazy níže stačí zkopírovat a spustit.
@@ -166,6 +186,16 @@ testy a vypíše, co se stalo (výsledek, výstup testů, zda vznikl commit).
 Detailní log najdeš v `logs/tasks/<id>.log` a strojově čitelný výsledek v
 `outbox/<id>.json`.
 
+Před Inbox intake může PM požádat AO o samostatný refresh brokerových poznámek:
+
+```bash
+.venv\Scripts\python orchestrator.py refresh-provider-notes
+```
+
+Tento příkaz pouze zavolá brokerový `refresh_provider_notes`, obnoví stav a
+katalogy providerů a vrátí JSON výsledek; nespouští pracovní úkol ani žádného
+providera mimo brokerem řízený refresh.
+
 ## 6. Autonomní vývojový režim
 
 Kromě jednorázového `run` umí orchestrátor i autonomní režim: zadáš projekt
@@ -203,6 +233,12 @@ deklarované `expect`. Bez důkazu nebo při neshodě zůstane bod nesplněný, 
 když jej agent označí hotový a všechny lokální testy projdou. Deklarace i
 výsledek se ukládají do checkpointu, logu a outboxu pro zápis zpět do Trella.
 
+U úkolu, jehož rozsah vyžaduje GUI, je skutečné spuštění a pozorování GUI
+tvrdou auditní podmínkou. Statická kontrola HTML/CSS, headless/runtime harness
+ani regresní testy ji nenahrazují. Pokud GUI nelze otevřít nebo v něm není
+požadovaná změna viditelná, nezávislý auditor musí příslušný implementační bod
+odmítnout a vrátit jej k přepracování.
+
 Bez `--spec` stačí i jen `--goal` - použije se jako jediný bod Definition of
 Done. Co se děje v každé iteraci:
 
@@ -223,12 +259,12 @@ Běh skončí jedním z těchto stavů:
   vytvoří se Git commit. Pokud testy neprošly, commit se **nikdy** nevytvoří -
   ani s `--commit`.
 - **waiting_for_provider** - všichni nakonfigurovaní provideři (viz
-  `provider_order`, výchozí gemini → antigravity → claude-code → codex)
+  `provider_order`, výchozí groq → antigravity → claude-code → codex)
   jsou LIMITED
   nebo lokálně nedostupní. Běh se **neukončí jako chyba** - uloží se do fronty
   jako čekající task s `retry_after_seconds` a Definition of Done checkpointem
-  (viz `data/autonomous_checkpoints/`), pošle se Slack notifikace s stavem
-  KAŽDÉHO providera a nejbližším známým resetem, a výstup i
+  (viz `data/autonomous_checkpoints/`), stav každého providera a nejbližší
+  známý reset se uloží do výstupu a logu, a výstup i
   `outbox/autonomous-<run_id>.json` řeknou přes `auto_resume_active`, jestli
   tento proces sám čekání dokončí (jen `orchestrator.py api`, viz kapitola 8),
   nebo je nutné po `retry_after_seconds` spustit **stejný příkaz znovu**

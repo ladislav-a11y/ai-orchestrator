@@ -291,6 +291,46 @@ def cmd_import_inbox(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_refresh_provider_notes(args: argparse.Namespace) -> int:
+    """Refresh broker-owned provider notes without executing a work task.
+
+    PM uses this as the single pre-intake broker handoff.  The AO command is
+    intentionally the only boundary that constructs the broker here; the PM
+    process never imports provider implementations or calls them directly.
+    """
+    try:
+        from orchestrator.provider_broker import (
+            REFRESH_PROVIDER_NOTES_QUERY,
+            build_provider_broker,
+        )
+
+        broker = build_provider_broker(load_config())
+        refresh = broker.ask(REFRESH_PROVIDER_NOTES_QUERY)
+        print(
+            json.dumps(
+                {
+                    "success": True,
+                    "command": REFRESH_PROVIDER_NOTES_QUERY,
+                    "refresh": refresh,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    except Exception as exc:  # noqa: BLE001 - CLI must return a safe JSON error
+        print(
+            json.dumps(
+                {
+                    "success": False,
+                    "command": "refresh_provider_notes",
+                    "error": str(exc),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 1
+
+
 def cmd_projects(args: argparse.Namespace) -> int:
     service = OrchestratorService()
     if not service.config.projects:
@@ -333,6 +373,30 @@ def _planning_usage(result, provider: str | None = None) -> dict:
     return {"by_provider": by_provider, "total": total}
 
 
+def _unwrap_planner_receipt(output_text: str) -> str:
+    """Expose the planner payload while retaining the provider receipt.
+
+    Provider lang contracts return a JSON receipt with ``answer`` and
+    ``model``.  ``plan-inbox`` has its own public envelope, so unwrap only an
+    answer that is itself the expected planner object; ordinary provider
+    output is preserved byte-for-byte.
+    """
+    try:
+        receipt = json.loads(output_text)
+    except (TypeError, json.JSONDecodeError):
+        return output_text
+    if not isinstance(receipt, dict) or not isinstance(receipt.get("answer"), str):
+        return output_text
+    answer = receipt["answer"]
+    try:
+        planner_payload = json.loads(answer)
+    except json.JSONDecodeError:
+        return output_text
+    if isinstance(planner_payload, dict) and isinstance(planner_payload.get("tasks"), list):
+        return answer
+    return output_text
+
+
 def cmd_plan_inbox(args: argparse.Namespace) -> int:
     """Run one read-only provider turn to structure a human Inbox request."""
     try:
@@ -345,6 +409,7 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
         recipe = _load_inbox_planning_recipe()
         config = load_config()
         central_broker = args.agent == "provider-broker"
+        provider_timeout_seconds = getattr(args, "provider_timeout_seconds", None)
         if central_broker and args.model:
             raise ValueError("--model nelze použít s centrálním provider-brokerem")
         # Planning receives an empty disposable workspace. The provider can
@@ -356,8 +421,8 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
             codex=replace(config.codex, sandbox_mode="read-only"),
         )
         if central_broker:
-            if args.provider_timeout_seconds is not None:
-                timeout = args.provider_timeout_seconds
+            if provider_timeout_seconds is not None:
+                timeout = provider_timeout_seconds
                 safe_config = replace(
                     safe_config,
                     claude_code=replace(
@@ -369,7 +434,7 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                     codex=replace(safe_config.codex, timeout_seconds=timeout),
                     groq=replace(safe_config.groq, timeout_seconds=timeout),
                 )
-        elif args.provider_timeout_seconds is not None:
+        elif provider_timeout_seconds is not None:
             raise ValueError("--provider-timeout-seconds vyžaduje provider-broker")
         provider_models = None
         safe_config = with_provider_model_overrides(safe_config, provider_models)
@@ -398,13 +463,23 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
             + recipe
             + "\n--- KONEC RECEPTU ---\n\n--- VSTUP ---\n"
             + json.dumps(payload, ensure_ascii=False)
+            + "\n--- KONEČNÁ APLIKACE PRAVIDEL NA TENTO VSTUP ---\n"
+            + "Zkontroluj znovu pouze tento zdrojový vstup: nevytvářej výsledek, "
+            + "který zdroj výslovně nepožaduje. Sloveso navrhnout, doporučit nebo "
+            + "prověřit znamená návrh či rešerši, ne implementaci. Pokud zdroj "
+            + "obsahuje jediný číslovaný bod, vrať právě jednu kartu s jeho jediným "
+            + "source_refs odkazem. Pokud zdroj uvádí Pracovní adresář odpovídající "
+            + "configured_projects, použij tento přesný project_key. Nyní vrať "
+            + "pouze JSON podle schema."
         )
         with tempfile.TemporaryDirectory(prefix="ai-orchestrator-inbox-plan-") as workspace:
             result = agent.run(
                 AgentRunRequest(
                     project_path=Path(workspace),
                     prompt=prompt,
-                    failover_on_error=False,
+                    caller="orchestrator.cli.cmd_plan_inbox",
+                    source="inbox-intake",
+                    failover_on_error=True,
                     output_schema={
                         "type": "object",
                         "properties": {
@@ -421,21 +496,21 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                                                 {"type": "null"},
                                             ]
                                         },
-                                        "scope": {"type": "string", "minLength": 1},
-                                        "task": {"type": "string", "minLength": 1},
-                                        "next_step": {"type": "string", "minLength": 1},
+                                        "scope": {"type": "string", "minLength": 1, "maxLength": 240},
+                                        "task": {"type": "string", "minLength": 1, "maxLength": 900},
+                                        "next_step": {"type": "string", "minLength": 1, "maxLength": 360},
                                         "priority": {"type": "number", "minimum": 0, "maximum": 5.999999},
-                                        "priority_reason": {"type": "string", "minLength": 1},
+                                        "priority_reason": {"type": "string", "minLength": 1, "maxLength": 320},
                                         "work_type": {
                                             "type": "string",
                                             "enum": ["implementation", "research", "configuration", "integration", "tests"],
                                         },
-                                        "split_reason": {"type": "string", "minLength": 1},
+                                        "split_reason": {"type": "string", "minLength": 1, "maxLength": 320},
                                         "source_refs": {
                                             "type": "array",
                                             "minItems": 1,
                                             "maxItems": 16,
-                                            "items": {"type": "string", "minLength": 1},
+                                            "items": {"type": "string", "minLength": 1, "maxLength": 120},
                                         },
                                         "verification": {
                                             "type": "object",
@@ -463,7 +538,7 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                                                         ],
                                                     },
                                                 },
-                                                "reason": {"type": "string", "minLength": 1},
+                                                "reason": {"type": "string", "minLength": 1, "maxLength": 320},
                                             },
                                             "required": ["required", "acceptable", "reason"],
                                             "additionalProperties": False,
@@ -498,7 +573,11 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
             "codex": "codex",
             "groq": "groq",
         }.get(active_provider)
-        model_config = getattr(safe_config, active_config_attr, None)
+        model_config = (
+            getattr(safe_config, active_config_attr, None)
+            if active_config_attr
+            else None
+        )
         output = {
             "success": result.success,
             "provider": active_provider,
@@ -514,7 +593,7 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
             "provider_statuses": status_snapshot,
             "selection_reason": result.selection_reason,
             "usage": _planning_usage(result, active_provider),
-            "output": result.output_text,
+            "output": _unwrap_planner_receipt(result.output_text),
             "error": result.error,
             "unavailable": result.unavailable,
             "limited": result.limited,
@@ -604,12 +683,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_inbox = sub.add_parser("import-inbox", help="Načte *.json úkoly z inbox/ a zařadí je do fronty")
     p_inbox.set_defaults(func=cmd_import_inbox)
 
+    p_refresh = sub.add_parser(
+        "refresh-provider-notes",
+        help="AO přes broker obnoví poznámky a katalogy všech providerů; nespouští pracovní úkol",
+    )
+    p_refresh.set_defaults(func=cmd_refresh_provider_notes)
+
     p_projects = sub.add_parser("projects", help="Vypíše projekty zaregistrované v config.yaml")
     p_projects.set_defaults(func=cmd_projects)
 
     p_plan = sub.add_parser("plan-inbox", help="AI read-only příprava lidského Inbox požadavku")
     p_plan.add_argument("--agent", required=True, choices=["provider-broker"])
     p_plan.add_argument("--model", help="Přesný model vybraného plánovacího providera")
+    p_plan.add_argument(
+        "--provider-timeout-seconds",
+        type=float,
+        help="v2 časový limit pro jeden providerový plánovací pokus",
+    )
     p_plan.set_defaults(func=cmd_plan_inbox)
 
     return parser

@@ -1,4 +1,4 @@
-# Architektura
+# Architektura v2
 
 ## Cílový pracovní tok
 
@@ -7,11 +7,15 @@ uživatel / AO
     |
 OrchestratorService
     |
-provider broker (výběr a nabídka)
+BrokerBackedAgent (AO dispatch v2)
     |
-AO převezme provider, model a návod z lang*.json
+AO požádá broker pouze o nabídku providera a návod z lang*.json
     |
-vybraný provider provede úkol
+AO podle návodu zavolá vybraný provider přímo
+    |
+provider po běhu sám publikuje provider_status brokeru
+    |
+broker aktualizuje *info.json poznámku
     |
 testy                 (volitelný test_command daného projektu)
     |
@@ -24,7 +28,9 @@ testy
 git commit             (jen pokud auto_commit=true A testy prošly)
 ```
 
-Toto je implementováno v `orchestrator/runner.py` funkcí `run_task`.
+Dispatch je implementován v `orchestrator/broker_dispatch.py` třídou
+`BrokerBackedAgent`; vlastní pipeline zůstává v `orchestrator/runner.py`
+funkcí `run_task`. Broker v tomto toku žádný pracovní `run()` neprovádí.
 
 ## Moduly
 
@@ -138,59 +144,39 @@ Selže-li čtení stdin/stavového souboru, hook vždy "fail-open" (exit 0,
 povolí) - statická allow/deny pravidla zůstávají záložní vrstvou, stejně
 jako u ostatních `permission_mode`/`FORBIDDEN_*` kontrol.
 
-## Volba providera a modelu per požadavek a provider receipt
+## Orchestrátor v2: AO dispatch přes broker
 
-Navazuje na rešerši v `PROVIDER_MODEL_ROUTING_RESEARCH.md` (kap. 6): AI
-Project Manager (nebo jiný volající) předá požadavek brokeru. Broker vlastní
-stav providerů, katalogy modelů, pořadí výběru i případné zafixování modelu.
-Broker pracovní úkol nespouští; AO od něj převezme nabídku providera, přesný
-model a návod z příslušného `lang*.json`, podle kterého vybraného providera
-zavolá přímo. Produkční tok proto neobchází broker přímým výběrem providera.
+`OrchestratorService` ponechává vstupní formát úkolu beze změny. Pro běžný i
+autonomní běh použije `BrokerBackedAgent` (`orchestrator/broker_dispatch.py`),
+který interně provede tento přesný tok:
 
-- `AgentRunRequest.requested_model` (`agents/base.py`) - model předaný AO
-  brokerem podle jeho nabídky. Prázdná/blank hodnota znamená, že AO přijímá
-  model vybraný providerem. Produkční caller model neurčuje mimo broker; adapter
-  pouze použije hodnotu, kterou od AO obdržel.
-- `AgentRunRequest.selection_reason` - opakní, orchestrátorem
-  nevalidovaný důvod volby (např. `"explicit_agent"`, `"default_agent"`,
-  nebo PM vlastní klasifikační štítek úlohy). Prochází beze změny až do
-  `AgentRunResult.selection_reason`, pokud volání neprošlo failoverem (viz
-  níže).
-- `AgentRunResult.model`/`model_source` - `model` nese nejlepší dostupnou
-  evidenci o skutečně použitém modelu; `model_source` rozlišuje `"reported"`
-  (provider to sám potvrdil ve své JSON odpovědi), `"reported_receipt"`
-  (přesný model z platného receipt, pokud metadata chybí), `"requested"` (jen víme,
-  že jsme poslali `requested_model`, provider to nepotvrdil) a
-  `"configured"` (poslali jsme statickou `config.yaml` hodnotu, opět
-  nepotvrzenou). `None`/`None`, když provider nic neposlal ani nic
-  nekonfiguroval - hodnota se nikdy nevymýšlí (viz `claude_code.py`'s
-  `_reported_model()`, který u Claude Code záměrně NIKDY nepoužije
-  `requested`/`configured` fallback, protože provider smí zvolit model
-  sám i když `--model` nedostal).
-- `FailoverAgent._compose_selection_reason()` (`agents/failover.py`) - když
-  výsledné volání proběhlo na prvním zkoušeném provideru, důvod se jen
-  echuje z `request.selection_reason`; jakmile failover přeskočil alespoň
-  jednoho providera (LIMITED/nedostupný/timeout/...), sestaví strojově
-  čitelný řetězec `"failover: <status providera 1>; ... -> <aktivní
-  provider>"` ze stejných dat, která už `provider_status_snapshot()`
-  poskytuje - volající tak nikdy nemusí ručně rekonstruovat důvod z mapy
-  `provider_statuses`.
-- `Task.requested_model`/`selection_reason`/`model`/`model_source`
-  (`models.py`) - `requested_model`/`selection_reason` nastaví volající
-  (CLI/API/Inbox) před spuštěním, `runner.py`'s `run_task()` po běhu (i po
-  každém fix-pokusu) přepíše `model`/`model_source`/`selection_reason`
-  skutečnou hodnotou z `AgentRunResult`. Protože `Task.to_dict()` serializuje
-  `__dict__` beze změny, `outbox/<task_id>.json` (běžný `run`/
-  `import-inbox` úkol) tuto čtveřici automaticky obsahuje - odstraňuje to
-  asymetrii popsanou v rešerši (kap. 5.3), kdy jednorázový outbox neměl
-  žádný ekvivalent autonomního `active_provider`/`active_model`.
-- `OrchestratorService.submit()` - když volající `selection_reason`
-  nezadá, doplní ho sám: `"explicit_agent"`, když byl zadán `agent_name`,
-  jinak `"default_agent"` (padlo se na `Config.default_agent`) - takže tahle
-  distinkce nikdy nechybí ani u nejjednoduššího volání bez explicitního
-  důvodu.
-- `import_inbox()` čte `requested_model`/`selection_reason` z JSON souboru v
-  `inbox/` stejně nevalidovaně jako `submit()`.
+1. AO z konkrétního zadání a DoD karty sestaví malý task profil; fázi workflow
+   přidá pouze jako kontext.
+2. AO požádá `ProviderBroker` o `select_provider` s tímto profilem.
+3. Z nabídky převezme pouze vybraného providera, přesný model, stav a návod
+   z jeho `lang*.json`.
+4. Broker u placeného providera vybere z potvrzeného katalogu vhodný přesný
+   model pro profil; persistentní uživatelské `FORCED` nastavení má přednost.
+5. Podle návodu sestaví `AgentRunRequest` s jediným připraveným JSON taskem,
+   receipt instrukcí, přesným modelem a případným `output_schema`. JSON task
+   obsahuje pouze práci, její DoD/omezení a potřebné ověření; PM protokol,
+   historii a globální runtime dokumenty se providerovi neposílají.
+6. Vybraný provider provede úkol přímo; broker do pracovního běhu nevstupuje.
+7. Provider po dokončení sám publikuje `AgentRunResult.provider_status` přes
+   status sink připojený brokerem při konstrukci providerů. Broker uloží stav
+   do příslušné `*info.json` poznámky.
+8. Orchestrátor převede výsledek přes existující `runner.py` zpět do `Task` a
+   běžného nebo autonomního outboxu.
+
+AO/orchestrátor brokeru nepředává pracovní úkol ani výsledek a nikdy sám
+nevolá `report_provider_result`. `ProviderBroker` zůstává výběrovou a
+stavovou vrstvou bez pracovního `run()`; přímé použití provideru mimo broker
+je možné, ale bez brokerového status sinku se jeho stav do brokerovy poznámky
+nepublikuje.
+
+`AgentRunResult.model`/`model_source` stále nese pouze skutečně doložený model
+nebo model výslovně vrácený providerem; brokerem nabídnutý model není náhradou
+za potvrzení identity. `Task` a outbox zachovávají stávající formát.
 
 ### Providerové Slack notifikace
 
@@ -214,15 +200,11 @@ proměnné ani nepoužívá samotný HTTP status jako potvrzení. Za úspěšné
 se považuje pouze Slack API odpověď s `ok: true`. Token je lokálně uložený v
 `config/slack_bot_token.txt`, mimo Git.
 
-Mimo rozsah (viz rešerše kap. 6 bod 5 a `inbox_planning_recipe.md`):
-klasifikace úlohy podle typu/složitosti zůstává vlastnictvím AI Project Manageru,
-ale vlastní výběr dostupného providera a modelu v produkčním toku provádí broker.
-Samostatný, dřívější mechanismus
-`OrchestratorService.run_autonomous(..., model_override=...)` (per-run
-override modelu pro autonomní smyčku přes dočasně nahrazenou kopii
-`Config`, nikdy ne mutaci originálu) zůstává beze změny vedle tohoto
-kontraktu - řeší jiný vstupní bod (celý autonomní běh, ne jedno
-`AgentRunRequest`) a nesdílí s ním datový tok.
+Klasifikace úlohy podle typu a složitosti je součástí AO dispatch vrstvy a
+pracuje s konkrétním textem úkolu, nikoli s pevnou vazbou fáze na model. Broker
+vlastní dostupnost, katalog a převod profilu na přesné modelové ID. Každý
+autonomní běh používá stejnou broker-backed fasádu; přímé volání providera nebo
+samostatný `model_override` mimo broker není podporovaný vstupní bod.
 
 ## Pracovní prostor (`workspace_root`)
 
@@ -255,6 +237,16 @@ Cílem je opakovat cyklus **implementace -> testy -> vyhodnocení -> oprava**,
 dokud není splněná uživatelem zadaná Definition of Done (DoD), nebo dokud
 není dosažen bezpečný limit iterací:
 
+Pracovní prompt pro providera je záměrně oddělený od globální dokumentace.
+`AI_PROJECT_RUNTIME.md` ani ruční `AI_PROJECT_PROTOCOL.md` se do něj nekopírují
+v plném znění. AO předává pouze jeden kanonický text konkrétního úkolu;
+opakovaný automaticky vytvořený DoD wrapper se při jednom bodu neposílá podruhé.
+Jen u vícebodové dávky se přidají skutečně odlišné body, dále úkolově nutný
+výsledek testů nebo poznámka z minulé iterace a krátká pravidla pro dané
+volání. Běžný `git status` se do implementačního promptu neposílá.
+Bezpečnostní a workflow invariants zůstávají vynucené kódem AO, CLI,
+providerovými adaptéry a auditní cestou.
+
 ```
 projekt + cíl + Definition of Done
     |
@@ -264,9 +256,10 @@ projekt + cíl + Definition of Done
     |          nesplněných bodů DoD - ne celý seznam, viz "Dávkování a
     |          úsporný kontext" níže. Pokud je dávka prázdná (executor už
     |          tvrdí, že je hotovo), přeskoč rovnou na krok 3.
-    |       2. sestav kompaktní prompt (cíl, jen tato dávka bodů, `git
-    |          status`, OVĚŘENÝ výsledek testů z minulé iterace, poznámka
-    |          agenta z minulé iterace) a spusť agenta (stejné `Agent.run()`
+    |       2. sestav úkolový prompt (kanonický cíl právě jednou; u vícebodové
+    |          dávky jen odlišné body; podle potřeby pouze OVĚŘENÝ výsledek testů
+    |          nebo poznámka agenta z minulé
+    |          iterace) a spusť agenta (stejné `Agent.run()`
     |          rozhraní jako `runner.py`, session se navazuje přes
     |          `--resume`). Pokud odpověď neodpovídá JSON kontraktu, zkus
     |          přesně jeden levný "repair" reprompt (viz níže) - ne novou
@@ -322,11 +315,8 @@ iterací): `ClaudeCodeAgentConfig`/`AntigravityAgentConfig`/
   - ne proti nákladu jediného volání. Chybějící/nereportovaný `cost_usd`
   (usage tracking je best-effort) tento limit nikdy nespustí - kontrola
   reaguje jen na pozitivně potvrzenou útratu.
-- Když je limit překročen: pokud agent podporuje failover
-  (`FailoverAgent.force_failover_on_budget_exceeded()`, stejný mechanismus
-  jako u `force_failover_on_protocol_error()`), běh přepne na dalšího
-  nakonfigurovaného providera a pokračuje. Pokud žádný další provider
-  nezbývá (nebo je agent jednoduchý, bez failoveru), běh se zastaví se
+- Když je limit překročen a broker-backed fasáda nemá pro tento typ limitu
+  dalšího providera připraveného k okamžitému převzetí, běh se zastaví se
   stavem `AutonomousStatus.BUDGET_EXCEEDED` a pošle se Slack notifikace -
   nikdy nepokračuje "naslepo" za nakonfigurovaný strop.
 - Odlišeno od `WAITING_FOR_PROVIDER` (`ProviderStatus.limited` - kvóta/rate
@@ -360,8 +350,8 @@ najednou (u specifikace se 66 body to dělalo obří prompty i obří
 požadované odpovědi - a čím větší odpověď, tím větší riziko, že se něco
 upytlíkuje/zkrátí), `_select_batch` vybere vždy jen prvních
 `DOD_BATCH_SIZE` (8) aktuálně nesplněných bodů. `_build_iteration_prompt`
-pak vypíše jen tuto dávku (zbytek jen jako souhrnné číslo "X/Y splněno") a
-kontrakt vyžaduje JSON záznam jen pro indexy z této dávky - `_apply_dod_updates`
+pak vypíše jen tuto dávku a kontrakt vyžaduje JSON záznam jen pro indexy z této
+dávky - `_apply_dod_updates`
 kontroluje pokrytí právě vůči `requested_indices`, ne vůči celkovému počtu
 položek DoD. Pokud jsou už všechny body podle dosavadního stavu splněné,
 dávka je prázdná a iterace rovnou přeskočí volání implementačního agenta
@@ -459,8 +449,8 @@ dokud Codex nevyčerpal usage limit - bez jediného zaznamenaného přínosu.
 nebo `audit_protocol_error=True`. Jakmile dosáhne `PROTOCOL_ERROR_STREAK_LIMIT`
 (2, záměrně nižší než `NO_PROGRESS_LIMIT`):
 
-- pokud `agent` (typicky `FailoverAgent`, viz `orchestrator/agents/failover.py`)
-  poskytuje metodu `force_failover_on_protocol_error(reason)`, zavolá se -
+- pokud `agent` (v2 `BrokerBackedAgent`) poskytuje metodu
+  `force_failover_on_protocol_error(reason)`, broker se okamžitě znovu požádá -
   opakovaná protokolová nekompatibilita dostává stejné právo na failover na
   dalšího nakonfigurovaného providera jako vyčerpaná kvóta/limit. Pokud
   failover uspěje (existuje další provider), čítač se vynuluje a běh
@@ -469,11 +459,13 @@ nebo `audit_protocol_error=True`. Jakmile dosáhne `PROTOCOL_ERROR_STREAK_LIMIT`
   rovnou zastaví se stavem `AutonomousStatus.PROTOCOL_ERROR` - NEPOKRAČUJE
   se do další plné iterace se stejným nezměněným DoD.
 
-Zastavení/failover pošle jasný důvod přes `slack_notify.notify()` a
+Zastavení/failover uloží jasný důvod do `AutonomousResult`, outboxu a logu.
+Provider-owned Slack receipt se posílá pouze během skutečného běhu konkrétního
+providera; žádná orchestrátorová `slack_notify` cesta se nepoužívá.
 `AutonomousResult` nese `protocol_error_total`/`protocol_error_wasted_prompt_chars`
 (hrubý odhad promarněných tokenů - `znaky // 4`, stejné jednotky jako jinde v
 logování), takže `outbox/autonomous-<run_id>.json` (a tedy i AI Project
-Manager/Trello/Slack handoff) vidí, kolik iterací/tokenů protokolová chyba
+Manager/Trello handoff) vidí, kolik iterací/tokenů protokolová chyba
 stála, i na běhu, který nakonec neskončil jako `PROTOCOL_ERROR`. Checkpoint
 (`autonomous_checkpoint.py`) i dosud ověřené DoD položky a výsledky testů
 zůstávají zachované beze změny - stop/failover nikdy neoznačí nic za
@@ -497,7 +489,7 @@ běžných úkolů.
 
 ### Vyčerpání všech providerů (`WAITING_FOR_PROVIDER`, incident cb501524e47e, 26.8.2026)
 
-Když `FailoverAgent` (viz `agents/failover.py`) vyčerpá celé nakonfigurované
+Když `BrokerBackedAgent` vyčerpá celé nakonfigurované
 pořadí providerů - každý je buď lokálně nedostupný, nebo vrátil
 `limited=True` - `run_autonomous_loop` běh **neukončí jako chybu**, ale jako
 `AutonomousStatus.WAITING_FOR_PROVIDER` s `retry_after_seconds` převzatým z
@@ -508,22 +500,22 @@ znají). `OrchestratorService.run_autonomous` z toho uloží do fronty
 uložil, které body Definition of Done jsou ověřené hotové, takže žádný
 následný běh nezačíná od bodu 0.
 
-Produkční incident 26.8.2026 (task `cb501524e47e`): Claude LIMITED (reset
+Historický produkční incident 26.8.2026 (task `cb501524e47e`): Claude LIMITED (reset
 22:10 Europe/Prague), Antigravity LIMITED (reset cca +70h36m), Codex LIMITED
 (reset 22:05) - orchestrátor čekající task uložil správně, ale AI Project
-Manager viděl jen `status=in_progress` a nedostal žádnou Slack notifikaci,
-protože (a) Slack zpráva při vyčerpání providerů hlásila jen jejich jména,
-ne stav/reset každého zvlášť, (b) neexistovala žádná run-úrovňová
-notifikace o tom, že běh čeká, a (c) nic neřeklo, jestli se běh sám obnoví.
-Oprava:
+Manager tehdy viděl jen `status=in_progress`. V2 tuto situaci řeší
+strukturovaným outboxem a Trello synchronizací; stav každého providera,
+důvod a `retry_after` jsou součástí datového výsledku. Run-level Slack
+notifikace se nezavádí, protože Slack není zdrojem workflow pravdy.
 
-- `FailoverAgent.run()` při vyčerpání pošle přes `slack_notify.notify()`
-  zprávu se stavem KAŽDÉHO providera zvlášť (LIMITED s časem resetu /
-  nedostupný s důvodem) a nejbližším známým reset/retry
-  (`_describe_status_for_notify`/`_format_duration`).
-- `OrchestratorService.run_autonomous` navíc pošle run-úrovňovou Slack
-  notifikaci (projekt, `run_id`, `retry_after_seconds`) při přechodu do
-  `WAITING_FOR_PROVIDER`.
+Provider-owned receipt zůstává pouze pro provider, který skutečně dostal a
+dokončil (nebo odmítl) úkol:
+
+- provider uvede svůj přesný model, stav, tokeny, cenu a případný důvod;
+- orchestrátor ani broker tento receipt nepřepisují ani nevydávají za vlastní
+  stav;
+- při `WAITING_FOR_PROVIDER` bez skutečného providerového běhu je autoritativní
+  evidence v outboxu a logu.
 - `OrchestratorService.auto_resume_active` (nastaveno konstruktorovým
   parametrem `persistent`) rozlišuje, jestli TENTO proces sám čekající běh
   obnoví - `True` jen pro dlouhoběžící proces (`orchestrator.py api`, viz

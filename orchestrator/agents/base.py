@@ -41,6 +41,11 @@ def model_from_paths(sources: list[dict[str, Any]], paths: list[str]) -> Optiona
 class AgentRunRequest:
     project_path: Path
     prompt: str
+    # v2 dispatch provenance: the AO entry point that initiated the request
+    # and its external source. BrokerBackedAgent logs these values so every
+    # broker -> provider call is attributable without changing provider logic.
+    caller: str = "unknown"
+    source: str = "unknown"
     # Extra instructions appended for a fix-attempt (e.g. failing test output).
     # None on the first attempt.
     context: Optional[str] = None
@@ -52,25 +57,24 @@ class AgentRunRequest:
     # the work prompt so a tool-enabled provider can apply it only during its
     # tool-free finalization phase.
     receipt_prompt: Optional[str] = None
-    # Explicit per-call model override (e.g. AI Project Manager routing by
-    # task type/complexity). When set and non-empty, a provider that supports
-    # passing a model to its CLI uses this instead of its configured default
-    # for THIS call only - config.yaml is never mutated. A provider adapter
-    # never validates this string against a model catalog (none exists in
-    # this orchestrator, see PROVIDER_MODEL_ROUTING_RESEARCH.md); an invalid
-    # value is rejected by the underlying CLI like any other bad --model
-    # value, surfacing as an ordinary AgentRunResult(success=False, ...).
+    # Exact per-call model selected by BrokerBackedAgent from the broker offer.
+    # The provider adapter consumes it only for THIS call; config.yaml and
+    # persistent broker notes are never mutated by this field. Direct callers
+    # must not use it to bypass broker selection.
     requested_model: Optional[str] = None
+    # v2 AO task profile derived from the concrete task/card content.  This is
+    # a hint for the broker's catalog-based model choice; it is not a provider
+    # or model selection and never overrides a persistent user FORCED model.
+    task_profile: Optional[dict[str, Any]] = None
     # Capabilities the caller requires from the provider for this request.
     # A provider with a declared capability set must be rejected before its
     # API is called when it cannot satisfy these requirements.
     required_capabilities: frozenset[str] = field(default_factory=frozenset)
     # Opaque, caller-supplied reason for this provider/model request (e.g.
-    # "explicit_agent", "default_agent", or a PM-owned task-classification
-    # tag). The orchestrator never interprets or validates this string - it
+    # "explicit_agent", "default_agent", or an AO task-classification tag).
+    # The orchestrator never interprets or validates this string - it
     # is carried through so the receipt on AgentRunResult.selection_reason
-    # can echo it (or be overridden with the actual failover reason, see
-    # FailoverAgent).
+    # can echo it (or be overridden with the actual broker failover reason).
     selection_reason: Optional[str] = None
     # Central failover may retry a provider-specific execution error for
     # structured, read-only operations such as Inbox planning. Ordinary
@@ -78,7 +82,7 @@ class AgentRunRequest:
     # unless the caller explicitly opts in.
     failover_on_error: bool = False
     # Remaining hard token budget for this provider in the current
-    # orchestrated job. FailoverAgent fills this from its provider policy;
+    # orchestrated job. The broker-backed facade fills this from provider policy;
     # adapters that support token-aware limits must stop before the next
     # physical request when the budget cannot safely fit it.
     max_total_tokens: Optional[int] = None
@@ -117,7 +121,7 @@ class AgentRunResult:
     thinking_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
     # Provider-attributed usage for every physical CLI call represented by
-    # this result. FailoverAgent preserves limited attempts here as well as
+    # this result. The broker-backed facade preserves limited attempts here as well as
     # the final provider call, so callers never lose spent tokens on fallback.
     # ``source`` is ``reported`` for provider metadata; estimates must use a
     # different explicit value and are never mixed into reported totals.
@@ -142,7 +146,7 @@ class AgentRunResult:
     # call. This is distinct from a provider-reported quota/rate limit.
     token_budget_exceeded: bool = False
     # True when the provider process exceeded its configured wall-clock
-    # timeout. This is distinct from a quota limit so FailoverAgent can move
+    # timeout. This is distinct from a quota limit so the broker can move
     # to the next provider without misreporting the cause as LIMITED.
     timed_out: bool = False
     # True when this provider cannot serve the request in the current local
@@ -183,7 +187,8 @@ class AgentRunResult:
     model_verification: Optional[dict[str, Any]] = None
     # Machine-passable reason for the ACTUAL provider selection this result
     # represents. Single-provider adapters echo AgentRunRequest.selection_reason
-    # unchanged (they have no extra insight of their own). FailoverAgent
+    # unchanged (they have no extra insight of their own). The broker-backed
+    # facade
     # overrides this with the real mechanism (e.g. "failover: groq LIMITED
     # -> antigravity") whenever it advanced past another provider first, so a
     # caller never has to reconstruct the reason from provider_statuses.
@@ -239,6 +244,19 @@ def with_provider_status(provider: str):
                 },
                 "source": "provider_result",
             }
+            # When this provider was constructed by the v2 broker, the
+            # broker installs a status sink on the provider instance. The
+            # provider publishes its own status; AO never forwards the result
+            # to the broker. Direct provider use remains valid because the
+            # sink is optional and absent outside the broker.
+            publisher = getattr(args[0], "_broker_status_publisher", None) if args else None
+            if callable(publisher):
+                try:
+                    publisher(result)
+                except Exception:
+                    # Status publication is observability only and must never
+                    # alter the provider result returned to AO.
+                    pass
             return result
 
         return wrapped

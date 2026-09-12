@@ -6,7 +6,7 @@
   "purpose": "Převod společného vstupu AO na Groq API a převod odpovědi zpět do AO.",
   "v2_status_contract": {
     "owner": "groq_provider",
-    "ao_action": "Po přímém běhu providera předá AgentRunResult.provider_status brokeru k uložení.",
+    "ao_action": "Provider po vlastním běhu publikuje AgentRunResult.provider_status přes brokerem připojený status sink; AO výsledek brokeru nepředává.",
     "states": ["AVAILABLE", "LIMITED", "UNAVAILABLE", "ERROR"],
     "broker_rule": "Broker stav pouze uloží a podle něj filtruje nabídky; výsledek úkolu neposuzuje.",
     "refresh_command": "refresh_provider_notes znovu provede probe a obnoví potvrzené poznámky providerů."

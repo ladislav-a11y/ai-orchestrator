@@ -2,32 +2,32 @@
   "provider": "claude-code",
   "models": {
     "claude-sonnet-4-1": {
-      "input_tokens": 240,
-      "output_tokens": 60,
-      "thinking_tokens": 25,
-      "total_tokens": 300,
-      "cost_usd": 0.05
+      "input_tokens": 384,
+      "output_tokens": 96,
+      "thinking_tokens": 40,
+      "total_tokens": 480,
+      "cost_usd": 0.08
     },
     "claude-haiku-4-5": {
-      "input_tokens": 50,
-      "output_tokens": 100,
+      "input_tokens": 80,
+      "output_tokens": 160,
       "thinking_tokens": 0,
-      "total_tokens": 150,
+      "total_tokens": 240,
       "cost_usd": 0
     },
     "claude-sonnet-5": {
-      "input_tokens": 44,
-      "output_tokens": 1181,
-      "thinking_tokens": 161,
-      "total_tokens": 1225,
-      "cost_usd": 0.061616599999999994
+      "input_tokens": 942,
+      "output_tokens": 226058,
+      "thinking_tokens": 116266,
+      "total_tokens": 227000,
+      "cost_usd": 11.866493600000004
     },
     "claude-haiku-4-5-20251001, claude-sonnet-5": {
-      "input_tokens": 2,
-      "output_tokens": 64,
-      "thinking_tokens": 22,
-      "total_tokens": 66,
-      "cost_usd": 0.0257818
+      "input_tokens": 634,
+      "output_tokens": 186334,
+      "thinking_tokens": 97665,
+      "total_tokens": 186968,
+      "cost_usd": 9.663422599999997
     },
     "claude-haiku-4-5-20251001": {
       "input_tokens": 30,
@@ -37,11 +37,11 @@
       "cost_usd": 0.0789694
     },
     "claude-opus-5": {
-      "input_tokens": 4,
-      "output_tokens": 1363,
-      "thinking_tokens": 0,
-      "total_tokens": 1367,
-      "cost_usd": 0.28138450000000004
+      "input_tokens": 584,
+      "output_tokens": 197868,
+      "thinking_tokens": 67382,
+      "total_tokens": 198452,
+      "cost_usd": 22.827013999999995
     },
     "claude-opus-4-8": {
       "input_tokens": 4,
@@ -63,6 +63,13 @@
       "thinking_tokens": 0,
       "total_tokens": 34,
       "cost_usd": 0.13570100000000002
+    },
+    "claude-haiku-4-5-20251001, claude-opus-5": {
+      "input_tokens": 232,
+      "output_tokens": 63154,
+      "thinking_tokens": 21019,
+      "total_tokens": 63386,
+      "cost_usd": 7.539909500000001
     }
   }
 }

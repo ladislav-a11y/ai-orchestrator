@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Entry point: python orchestrator.py <doctor|run|status|api|import-inbox|projects>"""
+"""Entry point: python orchestrator.py <doctor|run|status|api|import-inbox|projects|refresh-provider-notes>"""
 
 import sys
 from pathlib import Path

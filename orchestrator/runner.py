@@ -7,7 +7,9 @@ it has no knowledge of the CLI, the API, or how the task was submitted.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult
@@ -33,11 +35,26 @@ def run_test_command(project_path: Path, test_command: str, logger: logging.Logg
     instead of having to treat "no result" as a silently-skipped state.
     """
     logger.info("Spouštím testy: %s", test_command)
+    env = os.environ.copy()
+    project_scripts = project_path / ".venv" / "Scripts"
+    interpreter_scripts = Path(sys.executable).resolve().parent
+    # Test commands are part of the target project's contract.  On Windows
+    # the project interpreter must win over the system Python or WindowsApps
+    # alias, otherwise a valid command can look like a test failure before the
+    # project test suite even starts.  Temporary/test projects without their
+    # own venv use the interpreter that launched this orchestrator.
+    preferred_scripts = (
+        [str(project_scripts)] if project_scripts.is_dir() else []
+    ) + [str(interpreter_scripts)]
+    env["PATH"] = os.pathsep.join(
+        [*preferred_scripts, env.get("PATH", "")]
+    )
     try:
         proc = subprocess.run(
             test_command,
             shell=True,
             cwd=str(project_path),
+            env=env,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -113,6 +130,8 @@ def run_task(task: Task, config: Config, agent: Agent, queue: TaskQueue, logger:
         AgentRunRequest(
             project_path=project_path,
             prompt=task.prompt,
+            caller="orchestrator.runner.run_task",
+            source=task.source,
             requested_model=task.requested_model,
             selection_reason=task.selection_reason,
         )
@@ -160,6 +179,8 @@ def run_task(task: Task, config: Config, agent: Agent, queue: TaskQueue, logger:
                 AgentRunRequest(
                     project_path=project_path,
                     prompt=_fix_prompt(task.prompt, task.test_command, output),
+                    caller="orchestrator.runner.run_task.fix",
+                    source=task.source,
                     session_id=task.claude_session_id,
                     requested_model=task.requested_model,
                     selection_reason=task.selection_reason,

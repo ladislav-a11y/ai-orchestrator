@@ -78,7 +78,7 @@ class ClaudeCodeAgentConfig:
     disallowed_tools: list[str] = field(default_factory=list)
     max_budget_usd: Optional[float] = None
     # Ten-minute wall-clock cap prevents a stalled provider from consuming
-    # the whole autonomous tick; FailoverAgent can then try the next one.
+    # the whole autonomous tick; the broker-backed facade can then try the next one.
     timeout_seconds: int = 600
 
 

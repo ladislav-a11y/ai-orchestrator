@@ -1,4 +1,7 @@
 ﻿- [ ] Adapter musí používat lokálně dostupný OpenAI Codex CLI / Codex nástroj bez obcházení bezpečnostních kontrol.
+<!-- Historický checklist z počáteční implementace Codex adaptéru. Není to aktuální
+zdroj pravdy o v2; skutečné chování ověřují kód, testy a brokerový guide. -->
+
 - [ ] Zachovat společný Agent/provider kontrakt používaný ai-orchestratorem.
 - [ ] Umožnit výběr agenta přes `--agent codex`.
 - [ ] Spouštět Codex v pracovním adresáři konkrétního projektu a nepovolit přístup mimo povolený workspace.

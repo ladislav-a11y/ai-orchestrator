@@ -1,11 +1,11 @@
 {
   "provider": "codex",
   "models": {
-    "gpt-5.6-sol": {
-      "input_tokens": 23768,
-      "output_tokens": 540,
-      "thinking_tokens": 88,
-      "total_tokens": 24308,
+    "gpt-5.6-codex": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "thinking_tokens": 0,
+      "total_tokens": 0,
       "cost_usd": 0
     }
   }

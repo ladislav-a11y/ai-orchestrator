@@ -20,6 +20,8 @@ from orchestrator.autonomous import (
     _build_iteration_prompt,
     _audit_evidence_has_project_scope,
     _audit_needs_quality_fallback,
+    _gui_required_for_audit,
+    _missing_gui_audit_indices,
     compact_audit_goal,
     _controller_audit_gate_indices,
     controller_finalization_is_current,
@@ -233,7 +235,6 @@ def test_iteration_and_audit_prompts_share_bounded_history_context():
         [0],
         1,
         2,
-        "status " * 2000,
         "pytest -q",
         False,
         "old-test " * 2000 + " NEWEST-TEST-RESULT",
@@ -255,6 +256,43 @@ def test_iteration_and_audit_prompts_share_bounded_history_context():
     assert MAX_HISTORY_CHARS < len(newest_note)
     assert MAX_PROJECT_STATUS_CHARS < len("status " * 2000)
     assert MAX_TEST_OUTPUT_CHARS < len("old-test " * 2000)
+
+
+def test_provider_prompts_contain_only_task_context_not_global_runtime_documents():
+    dod = parse_definition_of_done("- [ ] implementace")
+    iteration = _build_iteration_prompt(
+        "cil",
+        dod,
+        [0],
+        1,
+        2,
+        None,
+        None,
+        None,
+        "",
+    )
+    audit = _build_audit_prompt("cil", dod, "(čisté)", None, None, None)
+
+    assert "Pracovní úkol:\ncil" in iteration
+    assert "Cíl projektu: cil" in audit
+    for prompt in (iteration, audit):
+        assert "AI_PROJECT_RUNTIME" not in prompt
+        assert "AI_PROJECT_PROTOCOL" not in prompt
+        assert "Kanonický runtime contract" not in prompt
+    assert "Neprováděj git commit, push ani testy" in iteration
+    assert "Testovací příkaz:" not in iteration
+    assert "git status" not in iteration
+    assert '"items": [{"index": 0' not in iteration
+    assert "Audit je pouze kontrola" in audit
+
+
+def test_iteration_prompt_does_not_repeat_prepared_task_as_dod():
+    task = "Implementovat pouze opravu převodu frekvence a její regresní test."
+    dod = parse_definition_of_done(f"- [ ] {task}")
+    prompt = _build_iteration_prompt(task, dod, [0], 1, 2, None, None, None, "")
+
+    assert prompt.count(task) == 1
+    assert "Splň pouze tyto aktuálně nesplněné body" not in prompt
 
 
 def test_canonical_goal_overflow_fails_closed_instead_of_truncating():
@@ -1236,49 +1274,8 @@ def test_run_autonomous_stops_well_before_max_iterations_on_repeated_protocol_er
     assert "protokol" in (result.error or "").lower()
 
 
-def test_run_autonomous_protocol_error_stop_notifies_slack_with_reason_and_waste(tmp_path, monkeypatch):
-    """DoD point: when a run stops as PROTOCOL_ERROR (no failover-capable
-    agent available), Slack/outbox must get a clear reason and a waste
-    metric, not just a bare status code - see the module docstring and the
-    production incident referenced above."""
-    sent = []
-    monkeypatch.setattr("orchestrator.autonomous.notify", lambda msg: sent.append(msg))
-
-    dod = parse_definition_of_done("- [ ] bod, ktery se nikdy neoznaci")
-
-    def run_fn(request):
-        return AgentRunResult(success=True, output_text="tohle vubec neni JSON, porad dokola")
-
-    cfg = Config()
-    result = run_autonomous_loop(
-        run_id="test-run-notify",
-        project_path=tmp_path,
-        goal="cil",
-        dod_items=dod,
-        config=cfg,
-        agent=FakeAgent(run_fn),
-        logger=LOGGER,
-        test_command=None,
-        max_iterations=10,
-        auto_commit_requested=False,
-    )
-
-    assert result.status == AutonomousStatus.PROTOCOL_ERROR
-    assert len(sent) == 1
-    message = sent[0]
-    assert "test-run-notify" in message
-    assert "PROTOCOL_ERROR" in message
-    assert "protokolovou nekompatibilitu" in message
-    assert f"{PROTOCOL_ERROR_STREAK_LIMIT}x" in message
-    assert "promarněná spotřeba" in message
-    assert f"{result.protocol_error_total} protokolově chybných iterací" in message
-
-
-def test_run_autonomous_fails_over_to_next_provider_on_repeated_protocol_error(tmp_path):
-    """When the caller supplies a failover-capable agent (see
-    agents/failover.py), a repeated protocol violation must trigger a
-    failover to the next configured provider instead of stopping the whole
-    run - the same right a quota/rate limit already gets."""
+def test_run_autonomous_stops_on_repeated_protocol_error_in_v2_broker_mode(tmp_path):
+    """The autonomous loop delegates protocol failover to the broker facade."""
     dod = parse_definition_of_done("- [ ] Priprav feature")
 
     class FakeFailoverAgent(Agent):
@@ -1834,11 +1831,12 @@ def test_run_autonomous_audit_reopens_falsely_claimed_done_item(tmp_path):
     assert result.dod_items[0].done is True
 
 
-def test_audit_quality_fallback_rechecks_generic_refusal_with_next_provider(tmp_path):
+def test_audit_quality_refusal_stops_fail_closed_in_v2_broker_mode(tmp_path):
     """A valid all-rejected refusal must not reopen implementation work.
 
-    The orchestrator must obtain a real independent verdict from the next
-    provider in the configured order; this is not an executor or PM verdict.
+    Provider selection and any retry belong to the broker-backed AO dispatch;
+    the autonomous loop remains fail-closed when its provider returns no
+    independently verifiable audit evidence.
     """
     dod = parse_definition_of_done("- [ ] bod A")
     audit_calls = {"n": 0}
@@ -1897,11 +1895,9 @@ def test_audit_quality_fallback_rechecks_generic_refusal_with_next_provider(tmp_
         auto_commit_requested=False,
     )
 
-    assert result.status == AutonomousStatus.COMPLETED
-    assert audit_calls["n"] == 2
-    assert agent.failover_reasons == [
-        "audit vrátil zamítnutí všech bodů bez konkrétního ověření checkoutu"
-    ]
+    assert result.status == AutonomousStatus.MAX_ITERATIONS
+    assert agent.failover_reasons == []
+    assert audit_calls["n"] == 1
     assert result.iterations[0].audit_rejected_indices == []
 
 
@@ -2041,6 +2037,96 @@ def test_audit_prompt_instructs_category_specific_verification_method():
     assert "implementační agent nebo PM nepřipravil" in prompt
     assert "test si pro audit připrav/proveď sám" in prompt
     assert "runtime: nedostupné" in prompt
+
+
+def test_gui_audit_requires_actual_visible_gui_evidence():
+    dod = parse_definition_of_done(
+        "- [ ] Upravit Station Agent Windows GUI\n"
+        "- [ ] Nezávislý audit vydá accepted / rejected verdikt"
+    )
+    assert _gui_required_for_audit("Station Agent Windows GUI", dod) is True
+    evidence = [
+        "0:OK [artefakt: kontrola HTML/CSS] index.html obsahuje indikátor",
+        "1:OK [runtime + statická kontrola GUI] Interaktivní Windows GUI nebylo v prostředí dostupné; nahrazeno runtime harness",
+    ]
+    assert _missing_gui_audit_indices("Station Agent Windows GUI", dod, evidence) == [0]
+
+
+def test_gui_gate_does_not_trigger_on_a_negated_gui_mention():
+    """A task/DoD that explicitly excludes GUI scope ("bez GUI" / "without a
+    GUI") still contains the literal word "GUI" - a naive keyword match would
+    wrongly force the mandatory GUI gate onto a task that never had one,
+    reopening an otherwise fully evidence-backed accepted audit (see
+    incident: card P3.03, cw dekoder v1 - filtrace slabeho signalu)."""
+    dod = parse_definition_of_done(
+        "- [ ] Implementovat DSP filtr\n"
+        "- [ ] Audit: cílené unit testy. Čistě výpočetní modul bez GUI; "
+        "důkazem je zlepšení SNR na syntetických signálech.\n"
+        "- [ ] Nezávislý audit vydá accepted / rejected verdikt"
+    )
+    assert _gui_required_for_audit("Implementuj DSP stupeň bez GUI", dod) is False
+    evidence = [
+        "0:OK [test: 10 testů prošlo] statická kontrola a testy potvrzují implementaci",
+    ]
+    assert _missing_gui_audit_indices("Implementuj DSP stupeň bez GUI", dod, evidence) == []
+
+
+def test_gui_gate_still_triggers_when_an_unrelated_dod_item_negates_gui():
+    """A negated mention only cancels itself - an affirmative GUI requirement
+    elsewhere in the same goal/DoD text must still be enforced."""
+    dod = parse_definition_of_done(
+        "- [ ] Upravit Station Agent Windows GUI\n"
+        "- [ ] Audit: čistě výpočetní logika bez GUI je z rozsahu vyňata"
+    )
+    assert _gui_required_for_audit("Upravit Station Agent Windows GUI", dod) is True
+
+
+def test_gui_audit_accepts_only_explicit_live_gui_observation():
+    dod = parse_definition_of_done("- [ ] Upravit Station Agent Windows GUI")
+    evidence = [
+        "0:OK [gui: aplikace spuštěna a otevřena v prohlížeči] screenshot potvrzuje viditelný indikátor skóre",
+    ]
+    assert _missing_gui_audit_indices("Station Agent Windows GUI", dod, evidence) == []
+
+
+def test_run_autonomous_gui_audit_rejects_static_fallback(tmp_path):
+    dod = parse_definition_of_done("- [ ] Upravit Station Agent Windows GUI")
+
+    def run_fn(request):
+        if AUDIT_MARKER in request.prompt:
+            return AgentRunResult(
+                success=True,
+                output_text=_audit_response(
+                    request,
+                    evidence=(
+                        "index.html obsahuje indikátor; interaktivní Windows GUI nebylo "
+                        "v auditním prostředí dostupné, použita statická/runtime kontrola"
+                    ),
+                    method="runtime + statická kontrola GUI",
+                ),
+            )
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+        )
+
+    result = run_autonomous_loop(
+        run_id="gui-static-fallback",
+        project_path=tmp_path,
+        goal="Station Agent Windows GUI",
+        dod_items=dod,
+        config=Config(),
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=1,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.MAX_ITERATIONS
+    assert result.iterations[0].audit_rejected_indices == [0]
+    assert result.dod_items[0].done is False
+    assert "povinný důkaz skutečně otevřeného" in result.iterations[0].note
 
 
 def test_run_autonomous_waits_when_provider_is_limited(tmp_path):

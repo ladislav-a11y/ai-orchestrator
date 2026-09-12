@@ -1,4 +1,12 @@
 {
   "provider": "claude-code",
-  "models": {}
+  "models": {
+    "claude-sonnet-5": {
+      "input_tokens": 10,
+      "output_tokens": 3719,
+      "thinking_tokens": 2073,
+      "total_tokens": 3729,
+      "cost_usd": 0.11537900000000001
+    }
+  }
 }

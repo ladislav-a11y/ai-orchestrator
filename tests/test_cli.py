@@ -33,6 +33,11 @@ def test_planner_input_preserves_canonical_source_or_fails_closed():
         require_planner_input(payload)
 
 
+def test_refresh_provider_notes_is_an_explicit_ao_cli_command():
+    args = cli.build_parser().parse_args(["refresh-provider-notes"])
+    assert args.func is cli.cmd_refresh_provider_notes
+
+
 def _audit_response(request):
     indices = [int(value) for value in re.findall(r"(?m)^(\d+)\. ", request.prompt)]
     return json.dumps({
@@ -56,6 +61,13 @@ class FakeAgent(Agent):
         )
 
 
+def named_agent(agent_class, name):
+    """Give broker test doubles the canonical provider name they represent."""
+    agent = agent_class()
+    agent.name = name
+    return agent
+
+
 def make_cfg(tmp_path: Path) -> Config:
     return Config(
         projects={
@@ -75,7 +87,7 @@ def make_cfg(tmp_path: Path) -> Config:
 
 
 def test_autonomous_cli_passes_run_id_and_writes_outbox(tmp_path, monkeypatch):
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: FakeAgent())
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: named_agent(FakeAgent, name))
 
     cfg = make_cfg(tmp_path)
     service = OrchestratorService(cfg)
@@ -163,7 +175,7 @@ def test_plan_inbox_schema_uses_codex_compatible_json_schema(monkeypatch, capsys
         io.StringIO(json.dumps({"card": {"name": "oprava station agent"}})),
     )
 
-    assert cli.main(["plan-inbox", "--agent", "codex"]) == 0
+    assert cli.main(["plan-inbox", "--agent", "provider-broker"]) == 0
     assert "uniqueItems" not in seen["schema"]["properties"]["tasks"]["items"]["properties"]["depends_on"]
     assert "project_key" in seen["schema"]["properties"]["tasks"]["items"]["required"]
     assert seen["schema"]["properties"]["tasks"]["items"]["properties"]["project_key"]["anyOf"][-1] == {
@@ -174,6 +186,7 @@ def test_plan_inbox_schema_uses_codex_compatible_json_schema(monkeypatch, capsys
     assert "AI Orchestrator vlastní adaptéry providerů" in seen["prompt"]
     assert "AI Project Manager vlastní Trello workflow" in seen["prompt"]
     assert "jsou hranice čtyři" in seen["prompt"]
+    assert "Groq Free" in seen["prompt"]
     json.loads(capsys.readouterr().out)
 
 
@@ -214,13 +227,64 @@ def test_plan_inbox_accepts_groq_and_returns_json_envelope(monkeypatch, capsys):
         io.StringIO(json.dumps({"card": {"name": "oprava Groq Inbox planneru"}})),
     )
 
-    assert cli.main(["plan-inbox", "--agent", "groq"]) == 0
+    assert cli.main(["plan-inbox", "--agent", "provider-broker"]) == 0
     envelope = json.loads(capsys.readouterr().out)
     assert envelope["success"] is True
-    assert envelope["provider"] == "groq"
+    assert envelope["provider"] == "provider-broker"
     assert envelope["model"] == "openai/gpt-oss-120b"
     assert json.loads(envelope["output"])["tasks"][0]["scope"] == "Inbox planner"
     assert seen["project_path"].name.startswith("ai-orchestrator-inbox-plan-")
+
+
+def test_plan_inbox_unwraps_provider_receipt_answer(monkeypatch, capsys):
+    planner_payload = {
+        "tasks": [{
+            "project_key": "Station Agent",
+            "scope": "Inbox intake",
+            "task": "Prověřit intake.",
+            "next_step": "Spustit regresní test.",
+            "priority": 5.1,
+            "priority_reason": "Blokuje zpracování Inboxu.",
+            "work_type": "implementation",
+            "split_reason": "Jeden koherentní úkol.",
+            "source_refs": ["card:6aa1692fac657514c1592546"],
+            "verification": {
+                "required": ["unit"],
+                "acceptable": ["regression"],
+                "reason": "Ověřit validaci planneru.",
+            },
+            "depends_on": [],
+        }],
+    }
+
+    class ReceiptAgent(Agent):
+        name = "claude-code"
+
+        def is_available(self):
+            return True, "planner receipt test"
+
+        def run(self, request):
+            return AgentRunResult(
+                success=True,
+                output_text=json.dumps({
+                    "answer": json.dumps(planner_payload, ensure_ascii=False),
+                    "model": "claude-sonnet-5",
+                }, ensure_ascii=False),
+                model="claude-sonnet-5",
+            )
+
+    monkeypatch.setattr(cli, "build_agent", lambda name, config: ReceiptAgent())
+    monkeypatch.setattr(cli, "load_config", lambda: Config())
+    monkeypatch.setattr(
+        cli.sys,
+        "stdin",
+        io.StringIO(json.dumps({"card": {"name": "intake receipt"}})),
+    )
+
+    assert cli.main(["plan-inbox", "--agent", "provider-broker"]) == 0
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["model"] == "claude-sonnet-5"
+    assert json.loads(envelope["output"]) == planner_payload
 
 
 def test_plan_inbox_auto_uses_central_failover_and_returns_receipt(monkeypatch, capsys):
@@ -262,22 +326,30 @@ def test_plan_inbox_auto_uses_central_failover_and_returns_receipt(monkeypatch, 
 
     assert cli.main([
         "plan-inbox",
-        "--agent", "auto",
-        "--provider-order", "groq,codex",
-        "--provider-timeout-seconds", "42.5",
+        "--agent", "provider-broker",
     ]) == 0
 
     envelope = json.loads(capsys.readouterr().out)
-    assert seen["request"].failover_on_error is True
-    assert all(
-        getattr(seen["config"], name).timeout_seconds == 42.5
-        for name in ("claude_code", "antigravity", "codex", "groq")
-    )
     assert envelope["provider"] == "codex"
-    assert envelope["selected_provider"] == "auto"
+    assert envelope["selected_provider"] == "provider-broker"
     assert envelope["provider_sequence"] == ["groq", "codex"]
     assert envelope["provider_statuses"]["groq"]["state"] == "UNAVAILABLE"
     assert envelope["selection_reason"] == "failover: groq -> codex"
+    assert seen["request"].failover_on_error is True
+
+
+def test_plan_inbox_accepts_provider_timeout_argument():
+    args = cli.build_parser().parse_args(
+        [
+            "plan-inbox",
+            "--agent",
+            "provider-broker",
+            "--provider-timeout-seconds",
+            "96",
+        ]
+    )
+
+    assert args.provider_timeout_seconds == 96.0
 
 
 def test_plan_inbox_fails_closed_when_recipe_is_missing(tmp_path, monkeypatch, capsys):
@@ -288,22 +360,10 @@ def test_plan_inbox_fails_closed_when_recipe_is_missing(tmp_path, monkeypatch, c
         io.StringIO(json.dumps({"card": {"name": "nová aplikace"}})),
     )
 
-    assert cli.main(["plan-inbox", "--agent", "codex"]) == 1
+    assert cli.main(["plan-inbox", "--agent", "provider-broker"]) == 1
     output = json.loads(capsys.readouterr().out)
     assert output["success"] is False
     assert "missing.md" in output["error"]
-
-
-def test_autonomous_cli_accepts_scoped_provider_order():
-    args = cli.build_parser().parse_args([
-        "autonomous",
-        "--project", "station-agent",
-        "--goal", "cil",
-        "--agent", "auto",
-        "--provider-order", "groq,antigravity,claude-code,codex",
-    ])
-
-    assert args.provider_order == "groq,antigravity,claude-code,codex"
 
 
 def test_autonomous_cli_reports_missing_live_evidence(tmp_path, monkeypatch, capsys):
@@ -313,7 +373,7 @@ def test_autonomous_cli_reports_missing_live_evidence(tmp_path, monkeypatch, cap
     as an ordinary unmet item - so an operator/AI Project Manager reading
     the run output knows a real integration check is still owed, not more
     local implementation work."""
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: FakeAgent())
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: named_agent(FakeAgent, name))
 
     cfg = make_cfg(tmp_path)
     service = OrchestratorService(cfg)
@@ -368,7 +428,7 @@ def test_autonomous_cli_commit_flag_commits_even_when_config_default_is_off(tmp_
                 output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
             )
 
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: WritingAgent())
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: named_agent(WritingAgent, name))
 
     cfg = Config(
         projects={"station-agent": ProjectEntry(name="station-agent", path=str(git_repo))},
@@ -438,7 +498,7 @@ def test_autonomous_cli_nonzero_exit_when_not_completed(tmp_path, monkeypatch):
             # Never marks the DoD item done - loop exhausts max_iterations.
             return AgentRunResult(success=True, output_text='{"items": [], "notes": "pracuji"}')
 
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: StuckAgent())
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: named_agent(StuckAgent, name))
 
     cfg = make_cfg(tmp_path)
     service = OrchestratorService(cfg)
@@ -489,7 +549,7 @@ def test_autonomous_cli_waiting_for_provider_prints_auto_resume_inactive(tmp_pat
                 limited=True, retry_after_seconds=120.0,
             )
 
-    monkeypatch.setattr(service_module, "build_agent", lambda name, config: AlwaysLimitedAgent())
+    monkeypatch.setattr(service_module, "build_agent", lambda name, config: named_agent(AlwaysLimitedAgent, name))
 
     cfg = make_cfg(tmp_path)
     service = OrchestratorService(cfg)

@@ -1,17 +1,32 @@
 # Rešerše: schopnosti providerů a modelů pro směrování podle typu/složitosti úlohy
 
-> Historický návrhový podklad před implementací per-request volby modelu a receipt.
+> Historický návrhový podklad a snapshot stavu k 2026-09-05.
 > Aktuální provozní kontrakt, skutečné zdroje nabídky a fail-closed postup pro AI
-> Project Manager jsou v `PROVIDER_MODEL_CAPABILITIES.md`; tvrzení o chybějícím
-> rozhraní níže už nepopisují současný stav kódu.
+> Project Manager jsou v `PROVIDER_MODEL_CAPABILITIES.md` a
+> `PROVIDER_BROKER_GUIDE.md`. Následující historická tvrzení o chybějícím
+> rozhraní se nesmějí používat jako popis současného v2 chování.
 
 Datum: 2026-09-05
-Rozsah: čistě rešeršní karta AI Orchestratoru (viz `orchestrator/inbox_planning_recipe.md`,
-hranice 1-2: "rešerše schopností v AI Orchestratoru" a "providerové rozhraní a receipt v
-AI Orchestratoru"). Neimplementuje směrování podle typu/složitosti úlohy ani jeho
-zobrazení v notifikacích - to jsou hranice 3-4, vlastněné AI Project Managerem, a závisí
-na výstupu této rešerše. Tento dokument nemění žádné běhové chování; žádné dočasné
-ověřovací artefakty nebyly při psaní vytvořeny.
+Rozsah: čistě historická rešeršní karta AI Orchestratoru (viz
+`orchestrator/inbox_planning_recipe.md`, hranice 1-2). Při jejím vzniku
+neimplementovala směrování podle typu/složitosti úlohy ani jeho zobrazení v
+notifikacích. Tento dokument sám nemění běhové chování a jeho původní závěry
+nejsou aktuálním v2 kontraktem.
+
+## Aktuální v2 stav
+
+V2 nyní používá deterministický profil konkrétního úkolu, nikoli pevné mapování
+workflow fáze na model. `orchestrator/model_routing.py` odvozuje z textu úkolu
+a DoD zejména `work_type`, `complexity` a `model_tier`. AO dispatch tento profil
+předává brokeru jako součást `select_provider`. Broker potom u placených
+providerů (`claude-code`, `codex`) vybere z potvrzeného katalogu přesné ID
+modelu. Free provideři (`groq`, `antigravity`) se tímto dynamickým výběrem
+nemění. Persistentní uživatelský výběr modelu má přednost před profilem.
+
+Podrobný aktuální kontrakt je v `PROVIDER_BROKER_GUIDE.md`, zejména v části
+`Task-driven model routing v2`. Implementaci tvoří také
+`orchestrator/broker_dispatch.py` a výběr katalogového modelu v
+`orchestrator/provider_broker.py`.
 
 ## 1. Co "provider" v tomto projektu znamená
 
@@ -88,19 +103,17 @@ výhradně kvůli:
 - `force_failover_on_budget_exceeded()` (překročen `max_budget_usd` pro tento běh),
 - `force_failover_on_audit_quality()` (věcně nedostatečný audit - jen pro audit roli).
 
-**Toto pořadí a přepínání nemá žádný vztah k typu nebo složitosti zadané úlohy.**
+Historický snapshot k 2026-09-05: toto pořadí a přepínání tehdy nemělo žádný
+vztah k typu nebo složitosti zadané úlohy.
 `FailoverAgent.run()` (`failover.py:323`) nepřijímá a nikde nevyhodnocuje žádnou
 charakteristiku úlohy (délku, doménu, odhad obtížnosti) - jediný vstup je
 `AgentRunRequest` (prompt, cesta k projektu, `session_id`, `context`, `output_schema`).
 Volba modelu uvnitř aktivního providera je pořád jen jeho statická config hodnota z
 bodu 2 - `FailoverAgent` model nijak neovlivňuje ani nepředává.
 
-Shrnutí: **dnešní "routing" je čistě failover kvůli dostupnosti/kvótě, ne směrování
-podle typu/složitosti úlohy.** Žádná klasifikace úlohy (jednoduchá/složitá,
-kód/rešerše/review, ...) v AI Orchestratoru neexistuje - to je v souladu s hranicí
-popsanou v `inbox_planning_recipe.md:34-39`: klasifikace a rozhodovací politika patří
-do AI Project Manageru, který smí tuto volbu udělat, ale zatím nemá odpovídající
-rozhraní na straně orchestrátoru, kterým by ji vynutil (viz bod 5 níže).
+Historické shrnutí: tehdejší routing byl čistě failover kvůli
+dostupnosti/kvótě. Toto už není popis současného v2 stavu; aktuální profilový
+routing je popsán v části `Aktuální v2 stav` výše.
 
 ## 4. Relevantní rozhraní
 
@@ -229,14 +242,11 @@ použito, a proč** - jak pro jednorázový `run`, tak pro `autonomous`.
    `"failover: <předchozí_provider> LIMITED"` - poskládat ze stejných dat, která
    `provider_status_snapshot()`/`ProviderStatus` už mají, jen je promítnout do jednoho
    pole namísto nutnosti rekonstruovat z `provider_statuses` mapy.
-5. **Nepřidávat žádný katalog modelů do AI Orchestratoru.** Protože žádný adaptér dnes
-   nevaliduje/nezná seznam modelů providera (bod 2) a klasifikace úlohy podle
-   typu/složitosti patří do AI Project Manageru (`inbox_planning_recipe.md:34-39`),
-   AI Orchestrator by měl zůstat "dumb pipe" pro `requested_model` (bod 1) - přijme,
-   co dostane, předá CLI, reportuje zpět skutečnost. Rozhodovací politiku (který
-   model/provider je vhodný pro jaký typ/složitost úlohy) by měl vlastnit a verzovat
-   výhradně AI Project Manager, aby AI Orchestrator nemusel měnit kód při každé změně
-   této politiky.
+5. **Historický návrh před v2:** nepřidávat katalog modelů do AI Orchestratoru a
+   ponechat jej jako "dumb pipe" pro `requested_model`. Tento návrh byl překonán
+   současným v2 kontraktem. Nyní AO odvozuje malý profil konkrétního úkolu,
+   broker vlastní katalog a převod profilu na přesné modelové ID; PM workflow
+   ani fáze `intake`/`implementation`/`audit` samy model neurčují.
 
 Tyto body 1-4 jsou zpětně kompatibilní (nová volitelná pole, `None`/chybějící hodnota
 zachovává dnešní chování) a nemění nic na existujícím failover/audit/finalizace

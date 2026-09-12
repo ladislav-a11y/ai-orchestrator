@@ -194,7 +194,14 @@ def record_provider_run(provider: str):
         def wrapped(self, request, *args, **kwargs):
             reset_provider_current(provider)
             result = run(self, request, *args, **kwargs)
-            if getattr(result, "model_source", None) in {"reported", "reported_receipt"}:
+            # A provider can be rejected before inference (for example by
+            # Groq's local TPM/RPM limiter), but the attempted model and any
+            # available counters still belong to this AO run.  Persist those
+            # values as well; otherwise the provider's current usage JSON
+            # falsely remains empty while Slack and the broker already have
+            # a limit result.  The adapter's exact model value is used when
+            # present; no model is invented for a result that has none.
+            if getattr(result, "model", None):
                 try:
                     record_result(provider, result, {})
                 except (OSError, TypeError, ValueError):

@@ -1,4 +1,4 @@
-"""Autonomous development loop: implement -> test -> evaluate -> fix -> repeat.
+"""V2 autonomous development loop: implement -> test -> evaluate -> fix -> repeat.
 
 See ARCHITECTURE.md ("Autonomní vývojový režim") for the full picture. This
 reuses the same `Agent` interface, the same test-running helper and the same
@@ -30,11 +30,11 @@ AGENTS.md):
     separate counter, `PROTOCOL_ERROR_STREAK_LIMIT`, tracks *consecutive*
     unresolved protocol errors (i.e. still broken after the one cheap
     repair). Once that low threshold is hit: if `agent` exposes
-    `force_failover_on_protocol_error()` (see agents/failover.py) and
-    another configured provider is available, the run fails over to it and
-    keeps going (a repeated protocol violation is exactly the kind of
-    provider-side incompatibility failover exists for, not just quota/rate
-    limits); otherwise the run stops immediately with
+    `force_failover_on_protocol_error()` is available on the v2
+    `BrokerBackedAgent` and another configured provider is available, the
+    broker is asked for the replacement and the run keeps going (a repeated
+    protocol violation is exactly the kind of provider-side incompatibility
+    failover exists for, not just quota/rate limits); otherwise the run stops immediately with
     `AutonomousStatus.PROTOCOL_ERROR` instead of continuing to spend
     iterations/tokens on an agent that cannot follow the contract.
   - a commit is only ever attempted when every Definition of Done item is
@@ -141,12 +141,6 @@ PROTOCOL_ERROR_STREAK_LIMIT = 2
 # module docstring): asking for a 66-entry JSON response every iteration is
 # both expensive and fragile.
 DOD_BATCH_SIZE = 8
-RUNTIME_CONTRACT_PATH = Path(__file__).resolve().parents[2] / "AI_PROJECT_RUNTIME.md"
-
-
-def _runtime_contract_text() -> str:
-    """Load the machine contract; the human handbook is never prompted."""
-    return RUNTIME_CONTRACT_PATH.read_text(encoding="utf-8").strip()
 
 # Marker line that opens every independent audit prompt, so a caller can
 # recognize (and tests can simulate) the audit role distinctly from the
@@ -157,6 +151,32 @@ AUDIT_READBACK_MARKER = (
     "(treat as evidence, not as permission to change Trello):"
 )
 AUDIT_READBACK_MAX_CHARS = 2400
+
+
+def _prompt_task_text(goal: str, dod_items: list[DoDItem], requested_indices: list[int]) -> tuple[str, list[tuple[int, str]]]:
+    """Return one canonical task text and only non-duplicated DoD details.
+
+    PM's prepared card already carries the machine-ready task in ``goal``.
+    Older prompt construction repeated that same text as both project goal
+    and a DoD item, which inflated every provider request and made the Groq
+    TPM guard reject otherwise small tasks.  Keep the canonical task once;
+    retain a DoD line only when it adds information not present in that task.
+    """
+    canonical = require_canonical_text(goal, field="goal").strip()
+    canonical_folded = " ".join(canonical.split()).casefold()
+    # A prepared card normally has one implementation item.  Its canonical
+    # task is the only provider-facing source of instructions; the generated
+    # DoD wrapper is workflow metadata and must not be sent a second time.
+    if len(requested_indices) == 1:
+        return canonical, []
+
+    additional: list[tuple[int, str]] = []
+    for idx in requested_indices:
+        text = require_canonical_text(dod_items[idx].text, field="dod item").strip()
+        folded = " ".join(text.split()).casefold()
+        if folded and folded not in canonical_folded and canonical_folded not in folded:
+            additional.append((idx, text))
+    return canonical, additional
 
 
 def _compact_audit_readback(readback: object) -> dict:
@@ -529,7 +549,7 @@ class AutonomousResult:
     usage_events: list[dict] = field(default_factory=list)
     usage_by_provider: dict[str, dict] = field(default_factory=dict)
     usage_total: dict = field(default_factory=dict)
-    # Per-provider availability/limit receipt from FailoverAgent. Sequence
+    # Per-provider availability/limit receipt from the broker-backed facade. Sequence
     # records who was called; this preserves every provider's retry deadline.
     provider_statuses: dict[str, dict] = field(default_factory=dict)
 
@@ -1031,78 +1051,72 @@ def _build_iteration_prompt(
     requested_indices: list[int],
     iteration: int,
     max_iterations: int,
-    project_status: str,
     test_command: Optional[str],
     tests_passed: Optional[bool],
     test_output: Optional[str],
     previous_notes: str,
 ) -> str:
-    """Build a compact per-iteration checkpoint instead of resending the
-    whole Definition of Done (and everything else) every time: only the
-    current batch of unmet items (`requested_indices`, see DOD_BATCH_SIZE)
-    is listed in full, the rest of the DoD is summarized as a count, and the
-    previous *verified* test result (from the orchestrator's own run, not
-    the agent's claim - see `run_autonomous_loop`) plus the agent's own
-    previous-iteration notes carry whatever continuity is needed. The Claude
-    Code session itself is resumed (`--resume`) so conversational context
-    from earlier iterations is not lost either."""
-    goal = require_canonical_text(goal, field="goal")
-    project_status = compact_history(project_status, MAX_PROJECT_STATUS_CHARS)
+    """Build the bounded implementation prompt for one DoD batch.
+
+    Only the concrete goal, requested unmet items, an actually verified
+    previous test result, and the agent's previous notes are carried into the
+    provider prompt. Global runtime/manual documents and routine checkout
+    status are deliberately kept out; workflow and safety invariants remain
+    enforced by the orchestrator and provider adapters. The Claude Code
+    session itself is resumed (`--resume`) so conversational context from
+    earlier iterations is not lost either.
+    """
+    canonical_task, additional_dod = _prompt_task_text(goal, dod_items, requested_indices)
     test_output = compact_history(test_output, MAX_TEST_OUTPUT_CHARS) if test_output else test_output
     previous_notes = compact_history(previous_notes, MAX_HISTORY_CHARS)
-    done_count = sum(1 for item in dod_items if item.done)
-    total = len(dod_items)
     lines = [
         f"Autonomní vývojová iterace {iteration}/{max_iterations}.",
         "",
-        "Kanonický runtime contract (machine rules):",
-        _runtime_contract_text(),
-        "",
-        f"Cíl projektu: {goal}",
-        "",
-        f"Definition of Done: {done_count}/{total} bodů celkem už ověřeno jako splněno "
-        "(nesplněné body se hlásí kumulativně, jednou splněný bod se sem už nevrací). "
-        f"Níže je dávka {len(requested_indices)} aktuálně NESPLNĚNÝCH bodů, na kterou se máš "
-        "zaměřit v této iteraci:",
+        "Pracovní úkol:",
+        canonical_task,
     ]
-    for idx in requested_indices:
+    if additional_dod:
+        lines += ["", "Další požadované výstupy této iterace:"]
+    for idx, text in additional_dod:
         item = dod_items[idx]
-        lines.append(f"{idx}. [NESPLNĚNO] {item.text}")
+        lines.append(f"{idx}. [NESPLNĚNO] {text}")
         if item.live_command is not None:
             lines.append(
                 f"   LIVE DŮKAZ VYŽADOVÁN: krok={item.live_command!r}; očekávaný výstup="
                 f"{item.live_expected!r}. Bez LIVE-RESULT od externí integrace tento bod neoznačuj hotový."
             )
 
-    lines += ["", "Aktuální stav projektu (git status --porcelain):", project_status]
-
-    if test_command:
-        if tests_passed is None:
-            lines += ["", f"Testovací příkaz: {test_command} (výsledek z minulé iterace není k dispozici)"]
-        else:
+    for idx in requested_indices:
+        item = dod_items[idx]
+        if item.live_command is not None and all(existing_idx != idx for existing_idx, _ in additional_dod):
             lines += [
                 "",
-                f"Výsledek testů z minulé iterace, ověřeno orchestrátorem ({test_command}): "
-                f"{'PROŠLY' if tests_passed else 'SELHALY'}",
+                f"LIVE důkaz pro bod {idx}: krok={item.live_command!r}; očekávaný výstup="
+                f"{item.live_expected!r}. Bez LIVE-RESULT od externí integrace tento bod neoznačuj hotový.",
             ]
-            if not tests_passed and test_output:
-                lines += ["Výstup testů (může být zkrácený):", tail_text(test_output, 2000)]
+
+    # A configured test command is orchestrator metadata, not work for the
+    # provider.  Pass it only when an actual prior result can help repair a
+    # failure; do not send a bare command that the provider must not execute.
+    if test_command and tests_passed is not None:
+        lines += [
+            "",
+            f"Výsledek testů z minulé iterace, ověřeno orchestrátorem ({test_command}): "
+            f"{'PROŠLY' if tests_passed else 'SELHALY'}",
+        ]
+        if not tests_passed and test_output:
+            lines += ["Výstup testů (může být zkrácený):", tail_text(test_output, 2000)]
 
     if previous_notes:
         lines += ["", "Poznámka z předchozí iterace:", previous_notes]
 
     lines += [
         "",
-        "Uprav projekt tak, aby splnil NESPLNĚNÉ body Definition of Done vypsané výše. Pokud "
-        "testy z minulé iterace selhaly, nejdřív oprav příčinu selhání. Neměň nic, co s cílem a "
-        "Definition of Done nesouvisí.",
+        "Uprav pouze soubory nutné pro tento úkol; neměň nic nesouvisejícího. "
+        "Neprováděj git commit, push ani testy; tyto kroky provádí ai-orchestrator.",
         "",
-        "Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný "
-        "markdown blok, žádný text před ani za ním) přesně v tomto tvaru:",
-        '{"items": [{"index": 0, "done": true}, {"index": 1, "done": false}], '
-        '"notes": "strucne shrnuti pro pristi iteraci"}',
-        f'Pole "items" musí obsahovat přesně jeden záznam pro každý z těchto indexů, s upřímným '
-        f"vyhodnocením podle reálného stavu souborů a testů - ne podle úmyslu: {requested_indices}.",
+        "Na konci vrať pouze jeden JSON objekt podle předaného output_schema se stavem každého "
+        "vyžádaného indexu a stručnou poznámkou.",
     ]
     return "\n".join(lines)
 
@@ -1130,9 +1144,7 @@ def _build_audit_prompt(
         f"{AUDIT_MARKER} (nezávislá kontrola před dokončením běhu - NEDĚLEJ žádné změny v kódu "
         "ani v souborech, pouze ověřuj).",
         "",
-        "Kanonický runtime contract (machine rules):",
-        _runtime_contract_text(),
-        "",
+        "Pracovní úkol auditu:",
         f"Cíl projektu: {goal}",
         "",
         "Implementační agent tvrdí, že jsou splněny všechny následující body Definition of Done:",
@@ -1194,7 +1206,20 @@ def _build_audit_prompt(
         "konkrétní a dohledatelná (soubor+symbol, test, nebo live výstup); samotné tvrzení "
         "implementačního agenta ani obecné 'testy prošly' není důkaz splnění daného bodu. Pokud "
         "důkaz chybí nebo bod nelze ověřit, nastav accepted=false.",
+        "Audit je pouze kontrola: neměň soubory, nevytvářej commit ani push. Pracuj pouze v "
+        "přiděleném checkoutu.",
     ]
+    if _gui_required_for_audit(goal, dod_items):
+        lines += [
+            "",
+            "Povinná GUI brána:",
+            "Tento úkol obsahuje požadavek GUI. Skutečné spuštění a pozorování GUI "
+            "je zde povinné; statická kontrola HTML/CSS, headless/runtime harness ani "
+            "regresní testy jej nenahrazují.",
+            "Pokud GUI nelze otevřít nebo požadovaná změna není v GUI viditelná, musíš "
+            "příslušný implementační bod vrátit s accepted=false a uvést konkrétní důvod. "
+            "Nesmíš accepted=true odůvodnit pouze náhradním důkazem.",
+        ]
     if isinstance(finalization, dict) and isinstance(finalization.get("preexisting_paths"), list):
         baseline = [
             path for path in finalization["preexisting_paths"]
@@ -1377,6 +1402,79 @@ _AUDIT_SCOPE_STOPWORDS = {
     "without", "changes", "current", "project", "implementation", "preserve",
 }
 
+# GUI is a hard integration requirement when the task itself is about a
+# graphical interface.  A static DOM/CSS check or a headless runtime harness
+# cannot prove that the requested control is actually visible to an operator.
+_GUI_REQUIRED_RE = re.compile(
+    r"\b(?:windows?\s+gui|webov(?:é|e)\s+gui|gui|grafick(?:é|e|ou)\s+rozhran[ií])\b",
+    re.IGNORECASE,
+)
+_GUI_POSITIVE_EVIDENCE_RE = re.compile(
+    r"\b(?:gui|grafick(?:é|e|ou)\s+rozhran[ií]|browser|prohl[ií]žeč|screenshot|dom)\b"
+    r".{0,180}\b(?:spuštěn|spustil|otevřen|otevřel|zobrazen|viditeln|klik|launch|opened|visible|clicked|screenshot)\b"
+    r"|\b(?:spuštěn|spustil|otevřen|otevřel|zobrazen|viditeln|klik|launch|opened|visible|clicked|screenshot)\b"
+    r".{0,180}\b(?:gui|grafick(?:é|e|ou)\s+rozhran[ií]|browser|prohl[ií]žeč|dom)\b",
+    re.IGNORECASE,
+)
+_GUI_NEGATIVE_EVIDENCE_RE = re.compile(
+    r"(?:gui|grafick(?:é|e|ou)\s+rozhran[ií]|browser|prohl[ií]žeč|display|obrazov(?:ka|ce))"
+    r".{0,180}\b(?:nebyl|nebylo|nelze|nedostup|neproved|chyb[ií]|not available|not performed|not run|without)\b"
+    r"|\b(?:nebyl|nebylo|nelze|nedostup|neproved|chyb[ií]|not available|not performed|not run|without)\b"
+    r".{0,180}(?:gui|grafick(?:é|e|ou)\s+rozhran[ií]|browser|prohl[ií]žeč|display|screen)",
+    re.IGNORECASE,
+)
+
+
+_GUI_NEGATION_PREFIX_RE = re.compile(r"\b(?:bez|without|no|not\s+a)\s*$", re.IGNORECASE)
+
+
+def _gui_required_for_audit(goal: str, dod_items: list[DoDItem]) -> bool:
+    """Return whether the substantive task requires actual GUI evidence.
+
+    A bare keyword match is not enough: a task/DoD that explicitly excludes
+    GUI scope ("Čistě výpočetní modul bez GUI" / "without a GUI") still
+    contains the literal word "GUI", and a naive match would wrongly force
+    the mandatory GUI gate onto a task that has no GUI at all - reopening an
+    otherwise fully evidence-backed accepted audit for a proof the task
+    never required (see incident: card P3.03, cw dekoder v1 - filtrace
+    slabeho signalu). Each match is required to not be immediately preceded
+    by a negation marker; only a genuinely affirmative GUI mention counts.
+    """
+    text = " ".join([goal or "", *(item.text for item in dod_items)])
+    for match in _GUI_REQUIRED_RE.finditer(text):
+        prefix = text[max(0, match.start() - 20):match.start()]
+        if _GUI_NEGATION_PREFIX_RE.search(prefix):
+            continue
+        return True
+    return False
+
+
+def _missing_gui_audit_indices(
+    goal: str, dod_items: list[DoDItem], evidence_lines: list[str]
+) -> list[int]:
+    """Return implementation indices when a GUI task lacks live GUI proof.
+
+    The audit provider's prose is not accepted as proof merely because it
+    mentions a GUI.  Explicitly unavailable/not-performed GUI evidence, or a
+    fallback consisting only of static/runtime/regression checks, reopens the
+    implementation item(s).  This keeps a GUI task out of ``Hotovo`` until an
+    actual GUI observation is reported.
+    """
+    if not _gui_required_for_audit(goal, dod_items):
+        return []
+    evidence = " ".join(evidence_lines)
+    has_positive = bool(_GUI_POSITIVE_EVIDENCE_RE.search(evidence))
+    has_negative = bool(_GUI_NEGATIVE_EVIDENCE_RE.search(evidence))
+    if has_positive and not has_negative:
+        return []
+    # The AO DoD representation intentionally does not carry PM's phase
+    # metadata.  Return every substantive index; PM maps its own audit-phase
+    # items separately and will reopen the implementation item(s) only.
+    return [
+        index for index in range(len(dod_items))
+        if index not in _controller_audit_gate_indices(dod_items)
+    ]
+
 
 def _audit_evidence_has_project_scope(
     goal: str, project_path: Path, evidence_lines: list[str]
@@ -1455,6 +1553,8 @@ def _run_audit(
         AgentRunRequest(
             project_path=project_path,
             prompt=prompt,
+            caller="orchestrator.autonomous.run_autonomous_audit",
+            source="autonomous",
             session_id=session_id,
             output_schema=audit_schema,
             required_capabilities=AUTONOMOUS_AUDIT_CAPABILITIES,
@@ -1525,6 +1625,14 @@ def _run_audit(
             "evidence-backed acceptance of all substantive audit items"
         ).strip(" |")
         rejected = [index for index in rejected if index not in controller_gate_indices]
+
+    missing_gui = _missing_gui_audit_indices(goal, dod_items, evidence_lines)
+    if missing_gui:
+        rejected = sorted(set(rejected) | set(missing_gui))
+        notes = (
+            f"{notes} | povinný důkaz skutečně otevřeného a viditelného GUI chybí; "
+            f"reopenuji implementační bod(y) {missing_gui}"
+        ).strip(" |")
 
     missing_scope = not _audit_evidence_has_project_scope(goal, project_path, evidence_lines)
     if _audit_needs_quality_fallback(rejected, evidence_lines, len(dod_items)) or missing_scope:
@@ -1620,6 +1728,8 @@ def _audit_with_repair(
         AgentRunRequest(
             project_path=project_path,
             prompt=repair_prompt,
+            caller="orchestrator.autonomous.run_autonomous_audit.repair",
+            source="autonomous",
             session_id=new_session_id,
             output_schema=_audit_response_schema(len(dod_items)),
             required_capabilities=AUTONOMOUS_AUDIT_CAPABILITIES,
@@ -1968,7 +2078,7 @@ def run_autonomous_loop(
 
         if requested_indices:
             prompt = _build_iteration_prompt(
-                goal, dod_items, requested_indices, i, max_iterations, project_status,
+                goal, dod_items, requested_indices, i, max_iterations,
                 test_command, prev_tests_passed, prev_test_output, previous_notes,
             )
             prompt_chars = len(prompt)
@@ -1983,6 +2093,8 @@ def run_autonomous_loop(
                 AgentRunRequest(
                     project_path=project_path,
                     prompt=prompt,
+                    caller="orchestrator.autonomous.run_autonomous_loop",
+                    source="autonomous",
                     session_id=session_id,
                     output_schema=_dod_response_schema(requested_indices),
                     required_capabilities=AUTONOMOUS_IMPLEMENTATION_CAPABILITIES,
@@ -2034,6 +2146,8 @@ def run_autonomous_loop(
                     AgentRunRequest(
                         project_path=project_path,
                         prompt=repair_prompt,
+                        caller="orchestrator.autonomous.run_autonomous_loop.repair",
+                        source="autonomous",
                         session_id=session_id,
                         output_schema=_dod_response_schema(repair_targets),
                         required_capabilities=AUTONOMOUS_IMPLEMENTATION_CAPABILITIES,
@@ -2348,6 +2462,15 @@ def run_autonomous_loop(
                 "(i po repair pokusu) - jde o protokolovou nekompatibilitu, ne o chybějící "
                 "pokrok v úkolu."
             )
+            force_failover = getattr(agent, "force_failover_on_protocol_error", None)
+            if callable(force_failover) and force_failover(reason):
+                logger.warning(
+                    "Autonomní běh %s: iterace %s/%s - %s Broker připravil dalšího "
+                    "providera; pokračuji v rámci stejného běhu.",
+                    run_id, i, max_iterations, reason,
+                )
+                protocol_error_streak = 0
+                continue
             logger.error(
                 "Autonomní běh %s: iterace %s/%s - %s Provider broker vybírá právě jednoho "
                 "providera; při porušení protokolu se běh zastavuje.",

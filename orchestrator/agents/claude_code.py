@@ -30,6 +30,7 @@ import re
 from datetime import datetime, timedelta
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -103,6 +104,58 @@ NO_COMMIT_INSTRUCTION = (
     "po skončení tvého běhu vytváří výhradně orchestrátor, až ověří testy. `git status` a "
     "`git diff` používat smíš a můžeš k ověření stavu, jen sám nic necommituj."
 )
+
+
+def _read_temp_output(handle) -> str:
+    """Read a temporary CLI output handle without inheriting a pipe."""
+    handle.flush()
+    handle.seek(0)
+    value = handle.read()
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
+def _run_claude_command(command: list[str], *, cwd: str, timeout: float, env: dict) -> subprocess.CompletedProcess:
+    """Run Claude without a Windows pipe that a child process can keep open.
+
+    Claude Desktop occasionally leaves a helper process attached to stdout or
+    stderr.  ``subprocess.run(capture_output=True)`` then waits for EOF even
+    after the provider's wall-clock timeout.  Temporary files preserve the
+    same captured result while allowing the timeout to return deterministically.
+    """
+    with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(mode="w+b") as stderr_file:
+        options = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": stdout_file,
+            "stderr": stderr_file,
+        }
+        if os.name == "nt":
+            options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=cwd,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                env=env,
+                **options,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or _read_temp_output(stdout_file)
+            stderr = exc.stderr or _read_temp_output(stderr_file)
+            raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from exc
+
+        stdout = completed.stdout if completed.stdout is not None else _read_temp_output(stdout_file)
+        stderr = completed.stderr if completed.stderr is not None else _read_temp_output(stderr_file)
+        return subprocess.CompletedProcess(
+            completed.args,
+            completed.returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
 # Testy vždy spouští a vyhodnocuje orchestrátor sám (viz runner.py/
 # run_test_command a autonomous.py) - agentovo vlastní spuštění testů nikdy
@@ -242,12 +295,40 @@ def _reported_model(raw: dict, usage: dict) -> Optional[str]:
             if isinstance(receipt_model, str) and receipt_model.strip():
                 return receipt_model.strip()
 
-    model_usage_paths = [
-        path for path in response_paths
-        if path.rsplit(".", 1)[-1] in {"modelUsage", "model_usage"}
-    ]
-    model_from_usage = model_from_paths([raw, usage], model_usage_paths)
-    return model_from_usage if model_from_usage and ", " not in model_from_usage else None
+    # Claude Code may report internal model activity together with the model
+    # that produced the task response.  Returning all modelUsage keys as one
+    # comma-separated value is not a model identity and corrupts both usage
+    # buckets and Slack.  The aggregate usage counters identify the primary
+    # response model when one modelUsage entry matches them exactly.
+    model_usage: dict[str, Any] = {}
+    for source in (raw, usage):
+        candidate = source.get("modelUsage") if isinstance(source, dict) else None
+        if isinstance(candidate, dict):
+            model_usage.update(candidate)
+    if not model_usage:
+        return None
+    if len(model_usage) == 1:
+        only_model = next(iter(model_usage))
+        return only_model.strip() if isinstance(only_model, str) and only_model.strip() else None
+
+    aggregate_input = usage.get("input_tokens") if isinstance(usage, dict) else None
+    aggregate_output = usage.get("output_tokens") if isinstance(usage, dict) else None
+    matches: list[str] = []
+    for model_id, details in model_usage.items():
+        if not isinstance(model_id, str) or not model_id.strip() or not isinstance(details, dict):
+            continue
+        model_input = details.get("inputTokens", details.get("input_tokens"))
+        model_output = details.get("outputTokens", details.get("output_tokens"))
+        if (
+            isinstance(aggregate_input, int)
+            and not isinstance(aggregate_input, bool)
+            and isinstance(aggregate_output, int)
+            and not isinstance(aggregate_output, bool)
+            and model_input == aggregate_input
+            and model_output == aggregate_output
+        ):
+            matches.append(model_id.strip())
+    return matches[0] if len(matches) == 1 else None
 
 
 def _exact_models_from_provider_response(raw: Any) -> list[dict[str, Any]]:
@@ -673,13 +754,9 @@ class ClaudeCodeAgent(Agent):
         cmd = self._build_command(effective_request)
 
         try:
-            proc = subprocess.run(
+            proc = _run_claude_command(
                 cmd,
                 cwd=str(request.project_path),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 timeout=self.config.timeout_seconds,
                 env=_cli_environment(),
             )

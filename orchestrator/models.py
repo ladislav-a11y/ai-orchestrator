@@ -59,8 +59,9 @@ class Task:
     # Explicit per-task model/provider selection contract (see
     # orchestrator/agents/base.py's AgentRunRequest.requested_model/
     # selection_reason and PROVIDER_MODEL_ROUTING_RESEARCH.md ch.6). Caller
-    # (API/CLI/Inbox) may set requested_model/selection_reason before the
-    # task runs; run_task() fills model/model_source/selection_reason from
+    # The AO broker dispatch derives task routing from the concrete prompt;
+    # callers may retain selection_reason as provenance. run_task() fills
+    # model/model_source/selection_reason from
     # the agent's actual AgentRunResult afterwards, so the outbox receipt for
     # a plain run/import-inbox task carries the same active_provider(agent)/
     # active_model(model)/selection_reason triple the autonomous outbox

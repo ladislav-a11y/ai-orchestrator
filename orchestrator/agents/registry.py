@@ -26,8 +26,8 @@ def build_agent(name: str, config: Config) -> Agent:
     if name == "groq":
         return GroqAgent(config.groq)
     if name == "provider-broker":
-        from orchestrator.provider_broker import build_provider_broker
-        return build_provider_broker(config)
+        from orchestrator.broker_dispatch import build_broker_backed_agent
+        return build_broker_backed_agent(config)
     raise ValueError(
         f"Neznámý agent '{name}'. Podporované jsou: {', '.join(AVAILABLE_AGENTS)}."
     )
@@ -39,6 +39,21 @@ def build_provider_broker(
     agent_builder=None,
 ) -> Agent:
     from orchestrator.provider_broker import build_provider_broker as _build
+    return _build(
+        config,
+        logger=logger,
+        agent_builder=agent_builder,
+    )
+
+
+def build_broker_backed_agent(
+    config: Config,
+    logger=None,
+    agent_builder=None,
+) -> Agent:
+    """Build the v2 AO dispatch facade over the offer-only broker."""
+    from orchestrator.broker_dispatch import build_broker_backed_agent as _build
+
     return _build(
         config,
         logger=logger,

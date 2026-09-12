@@ -1,13 +1,62 @@
-# Provider Broker a jazyky providerů
+# Provider Broker a jazyky providerů v2
 
-Tento soubor popisuje aktuální čistý základ vrstvy providerů. Je určený pro
-lidské čtení při údržbě a dalším budování. Strojová data zůstávají v brokerově
-poznámkách `data/provider-info/*info.json` a v návodech `orchestrator/agents/lang*.json`.
+Tento soubor je V2 guide pro broker a providery. Je určený pro lidské čtení
+při údržbě a dalším budování. Strojová data zůstávají v brokerových poznámkách
+`data/provider-info/*info.json` a v návodech `orchestrator/agents/lang*.json`.
+
+## V2 hranice zdrojů pravdy
+
+- Trello je jediný zdroj pravdy pro projektový stav, workflow, priority a
+  rozhodnutí PM.
+- Git je jediný zdroj pravdy pro obsah souborů v checkoutu. Brokerovy JSON
+  poznámky, usage soubory, outbox, logy ani Slack nesmějí přepsat souborovou
+  skutečnost v Gitu.
+- Brokerovy `*info.json` jsou provozní zdroj pro výběr providera, katalogy,
+  limity a poslední receipt; nejsou druhým zdrojem pravdy pro Trello workflow.
+- Slack je pouze observabilita. Původní PM incoming webhook ani jeho
+  environment/probe větev nejsou součástí V2. Provider může po svém běhu
+  poslat vlastní stručný receipt do `#ai-status`, ale Slack nikdy nemění stav.
+- V2 používá pouze kanonické názvy příkazů, providerů a modelů; skryté V1
+  aliasy se nesmějí vracet.
 
 ## Broker
 
 Broker pouze vybere providera pro AO. Nepřijímá pracovní úkol a nespouští
 pracovní `run()` žádného providera.
+
+### Jediné V2 vstupy do broker-provider dispatchu
+
+V2 má pouze dvě pracovní cesty, které smějí po nabídce brokeru zavolat
+vybraného providera:
+
+1. Inbox Intake: `orchestrator.cli.cmd_plan_inbox` pro read-only plánování Inboxu.
+2. Orchestrátorový běh: `orchestrator.runner.run_task` a jeho autonomní
+   implementační/auditní cesta v `orchestrator.autonomous`.
+
+Obě cesty používají `BrokerBackedAgent`: nejprve požádají broker o nabídku,
+převezmou `provider`, přesný `model` a `lang` a teprve potom zavolají
+`provider.run()`. `orchestrator.service` tuto fasádu pouze sestavuje. AI
+Project Manager broker ani providery nevolá; pouze spouští AI Orchestrator.
+Diagnostické přímé volání jednotlivého agenta není V2 pracovní dispatch.
+
+Pracovní volání předává providerovi jeden připravený JSON task. Ten smí
+obsahovat pouze konkrétní práci, její DoD, omezení, potřebné ověření a
+závislosti. PM protokol, historii karty a globální runtime dokumenty nejsou
+součástí providerového tasku. `BrokerBackedAgent` tento JSON jako pracovní
+prompt zachová a z návodu `lang*.json` přidá jen předepsaná transportní pole
+(`output_schema`, `receipt_prompt` a brokerem nabídnutý model).
+
+### Trasování volání v2
+
+Každý AO request nese auditní kontext `caller` a `source`. `caller` je přesné
+místo vstupu v AO, které dispatch zahájilo, například
+`orchestrator.runner.run_task`, `orchestrator.autonomous.run_autonomous_loop`
+nebo `orchestrator.cli.cmd_plan_inbox`. `source` označuje původ úlohy, například
+`cli`, `api`, `inbox`, `inbox-intake` nebo `autonomous`. Fasáda
+`BrokerBackedAgent` tyto hodnoty zapisuje při začátku, výběru nabídky a konci
+volání jako `caller`, `source`, `reason`, provider, model a výsledek. Výpis tak
+ukazuje, kdo, proč a odkud kontrakt broker-provider skutečně vyvolal; údaje
+neřídí výběr ani výsledek a broker ani provider podle nich nemění chování.
 
 ### Pevné pořadí výběru
 
@@ -63,6 +112,28 @@ Požadavek na konkrétního providera bez modelu se zadává pouze jeho ID, nap�
 model z jeho poznámky a vrátí AO stejný návod z příslušného `lang*.json`. AO
 model ani komunikační postup nedoplňuje podle vlastního odhadu.
 
+#### Task-driven model routing v2
+
+AO může k dotazu `select_provider` přidat `task_profile`, který odvozuje z
+konkrétního zadání karty a jejích DoD bodů. Povolený profil obsahuje zejména
+`work_type`, `complexity` (`simple`, `medium`, `complex`), `model_tier`
+(`fast`, `balanced`, `strong`), `needs_code_changes` a pouze informativní
+`workflow_phase`. Fáze workflow sama model neurčuje.
+
+Broker při profilu a dostupném placeném provideru (`claude-code`, `codex`)
+vybere z posledního katalogu `state: REPORTED` přesné viditelné modelové ID;
+skryté a interní modely se nenabízejí. Volba je pouze pro daný běh, do
+`*info.json` se nezapisuje jako `FORCED`. U free providerů se tento profil na
+model nepoužije. Pokud katalog není potvrzený nebo neobsahuje vhodného
+kandidáta, broker použije běžný model z poznámky a nic si nevymýšlí.
+
+`selection_mode: FORCED` má vždy přednost před task routingem. Tím zůstává
+explicitní uživatelské zafixování modelu závazné, zatímco automatické úlohy
+si mohou vybrat vhodnou úroveň podle konkrétního obsahu. Nabídka vrací také
+`model_selection_reason` a normalizovaný `task_profile`, aby bylo zřejmé,
+proč byl model nabídnut. Skutečně použitý model se i nadále potvrzuje až
+providerovým výsledkem; nabídnuté ID není důkazem skutečné identity.
+
 #### `refresh_provider_notes`
 
 Řízený příkaz pro obnovení poznámek všech čtyř providerů. Broker:
@@ -79,6 +150,13 @@ starý katalog se nepovažuje za odstraněný. Stejné pravidlo platí pro práz
 nebo strukturálně neplatný výsledek označený jako `REPORTED`: poslední známé
 modely zůstanou v poznámce a výsledek se uloží jako neporovnatelný. Refresh,
 běžný AO dotaz i další zápis poznámky tak katalog modelů nemaže.
+
+AO tento brokerový dotaz vystavuje jako CLI příkaz
+`orchestrator.py refresh-provider-notes`. PM jej smí použít pouze jednou na
+začátku Inbox intake, když je řízené workflow prázdné a v `INBOX / Nápady` je
+uživatelská karta. PM refresh provádí nepřímo přes AO; providerové objekty ani
+broker z PM importovat nesmí. Neúspěšný refresh je fail-closed: planner se
+nespustí a zdrojová karta zůstane v Inboxu.
 
 #### `set_provider_model`
 
@@ -140,6 +218,11 @@ Každý provider má vlastní soubor v `data/provider-info/`:
 | `selection_source` | Kdo volbu nastavil, například `ao` nebo `manual`. |
 | `selection_updated_at` | Čas poslední změny volby modelu. |
 
+Task-driven volba je epizodická vlastnost nabídky, nikoli další trvalé pole
+poznámky. Její důkaz je v nabídce AO a ve výsledku běhu (`model`,
+`model_source`, `selection_reason`); katalog, ze kterého broker vybíral, je
+nadále v `model_catalog` stejného `*info.json`.
+
 `LIMITED` není samostatná hodnota pole `state`. Limit se v poznámce zachytí
 jako `UNAVAILABLE` spolu s důvodem v `reason`, celou zdrojovou odpovědí v
 `full_response` a případným absolutním časem v `retry_at`. Pokud provider čas
@@ -196,7 +279,8 @@ providerového adaptéru, broker se ho neúčastní. Zpráva obsahuje datum a č
 název providera, konkrétní `úkol` převzatý z původního AO promptu, samostatný
 `stav` (`completed`, `failed`, `limited` nebo `unavailable`), přesné úplné ID
 použitého LLM, `input_tokens`, `output_tokens`, `thinking_tokens`,
-`total_tokens` a `cost_usd`.
+`total_tokens` a `cost_usd`. U neúspěšného běhu navíc obsahuje důvod z výsledku
+providera a u `limited` nebo `unavailable` také známý čas dalšího pokusu.
 
 Notifikace používá stejné hodnoty, které provider předal usage ledgeru, a usage
 JSON znovu nečte. `null` nebo chybějící hodnota se zobrazí jako `0`. Slack je
@@ -205,6 +289,21 @@ se potvrzuje pouze JSON odpovědí Slack API s `ok: true`, nikoli samotným HTTP
 status kódem. Přístupový token se načítá z lokálního neveřejného souboru
 `config/slack_bot_token.txt`; do repozitáře ani do environment proměnných se
 neukládá.
+
+### Orchestrátor v2 jako AO dispatch
+
+Orchestrátor ponechává vstupní formát úkolu beze změny. Pro pracovní běh
+nevstupuje přímo do providera: vytvoří `BrokerBackedAgent`, který požádá
+broker dotazem `select_provider` o dostupného providera a jeho `lang` návod.
+Podle tohoto návodu sestaví `AgentRunRequest` a zavolá vybraný provider přímo.
+Broker zůstává offer-only a nikdy neprovádí pracovní `run()`.
+
+AO/orchestrátor brokeru nepředává pracovní úkol ani výsledek. Broker při
+konstrukci svých providerů připojí nepovinný status sink; provider po vlastním
+běhu publikuje svůj `AgentRunResult.provider_status` přímo do brokeru. Broker
+uloží stav do příslušné `*info.json` poznámky a při dalším `select_provider`
+čte tuto aktualizovanou poznámku. Přímé použití providera mimo broker zůstává
+možné, pouze bez tohoto brokerového status sinku.
 
 Identita LLM se pro Slack bere výhradně z providerem potvrzeného výsledku:
 nejdříve z `result.model`, potom z přesného `receipt_model` nebo z odpovědi

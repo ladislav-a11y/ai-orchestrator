@@ -76,8 +76,71 @@ Samostatnou kartu vytvoř, když platí alespoň jedna z podmínek:
 
 Každá karta musí ve `scope` a `task` jednoznačně popsat svůj cílový projekt nebo
 výsledek.
+
+Planner nesmí rozsah lidského zadání rozšiřovat. Sloveso „zjistit“, „prověřit“
+nebo „navrhnout“ znamená rešeršní či návrhový výsledek; samo o sobě neobjednává
+implementaci. Implementační kartu přidej jen tehdy, když ji lidský zdroj
+výslovně požaduje nebo když samostatný implementační výsledek výslovně plyne z
+odděleného zdrojového bodu. Jeden zdrojový bod smí být přiřazen právě jedné
+kartě; pokud by rozdělení vedlo k opakování stejného `source_refs`, plán je
+neplatný a musí zůstat v Inboxu.
+
+Číslovaný bod je na hranici jednoho intake plánu atomický. Pokud zdroj obsahuje
+jen jeden číslovaný bod, vrať právě jednu kartu s jeho jediným `source_refs`
+odkazem; nerozděluj jej na rešerši a implementaci ani na přípravný a ověřovací
+krok. Více karet použij až pro samostatně identifikované zdrojové body nebo
+výslovně oddělené výsledky, které mají vlastní odkaz.
+
+Je-li ve zdroji uveden `Pracovní adresář` a jeho projekt odpovídá položce
+`configured_projects`, použij tuto přesnou hodnotu `project_key`. Nezaměňuj
+vlastnictví podle obecné architektury, providerových rozhraní nebo názvu
+komponenty; explicitní projektové přiřazení zdroje má přednost.
+
+### 2.1 Kompaktní strojový task
+
+Text podúkolu je pracovní vstup dalšího providerového běhu, proto nesmí být
+kopií celé Inbox karty ani projektového protokolu. Dodrž tyto pevné limity:
+
+- `scope`: nejvýše 240 znaků;
+- `task`: nejvýše 900 znaků, ideálně 1–3 věty;
+- `next_step`: nejvýše 360 znaků;
+- `priority_reason`, `split_reason` a `verification.reason`: každý nejvýše 320 znaků;
+- položka `source_refs`: nejvýše 120 znaků.
+
+Do `task` patří pouze konkrétní výsledek podúkolu, jeho nutné vstupy a
+omezení. Neopakuj v něm celé zadání, pravidla PM/AO, obecný Card Contract,
+pokyny k běžnému spuštění testů, commitu, pushi nebo auditu; tyto povinnosti
+řídí PM a ai-orchestrator. Pokud je potřeba zachovat důležitý detail, zkrať
+jej na konkrétní ověřitelnou podmínku. Více samostatných výsledků rozděl na
+více karet a propojuj je pouze přímými `depends_on` závislostmi.
+
+Samotný počet znaků není důkazem malého úkolu. Každou kartu navrhni tak, aby
+její běžné provedení včetně nezbytného pochopení kontextu, práce s nástroji a
+výsledné odpovědi bylo realistické v jednom providerovém běhu. Groq Free pro
+aktuální model sdílí limit 8 000 TPM pro všechny fyzické požadavky v minutě;
+alespoň samostatně proveditelné malé výsledky proto nesmějí být zbytečně
+sloučeny do velké karty, která by tento limit předem vyloučila.
+
+Pokud jeden zamýšlený úkol současně vyžaduje široký průzkum projektu, rozhodnutí
+mezi variantami, změny několika nezávislých částí a live/GUI ověření, rozděl jej
+podle skutečných návazností. Neoznačuj ale úkol za Groq-kompatibilní proti
+skutečnosti: karta vyžadující GUI, shell nebo jinou schopnost, kterou provider
+nemá, smí zůstat náročnější a broker pro ni musí zvolit jiného dostupného
+providera. Cílem je zachovat malé proveditelné kroky pro free provider tam, kde
+to povaha práce dovoluje, nikoli obejít požadavky úkolu.
+
 Pokud zadání zasahuje více projektů, vytvoř pro každý projekt samostatné karty.
 Nespojuj změny ve více repozitářích do jedné karty.
+
+Pokud jeden věcný bod obsahuje několik samostatných důkazních nebo pracovních
+výsledků, nerozplyň je do jedné karty. U diagnostiky typicky odděl: (a)
+reprodukci a zachycení vstupního stavu, (b) lokalizaci konkrétní příčiny nebo
+rozhodnutí mezi variantami a (c) implementaci opravy. Samostatnou kartu pro
+testovací nebo runtime artefakt vytvoř jen tehdy, když je sám trvalým
+implementovaným výsledkem; běžné spuštění testů a audit samostatnou kartou není.
+Karty propojuj v tomto pořadí přímými závislostmi. Neštěp mechanicky věty nebo
+soubory; každý nový task musí přinést vlastní ověřitelný výsledek a jeho
+`next_step` musí říct, co navazující karta převezme.
 Pole `project_key` u existujícího projektu musí obsahovat přesně jednu identitu
 z `configured_projects`. U skutečně nového, dosud nezařazeného nápadu musí být
 `project_key` `null`; PM mu vytvoří izolovanou identitu svázanou se zdrojovou
@@ -104,8 +167,12 @@ Každý task musí obsahovat také `verification` se třemi poli: `required` je
 nejmenší důkaz, který má nezávislý auditor požadovat, `acceptable` jsou
 doplňující nebo náhradní důkazy a `reason` stručně vysvětluje volbu. Povolené
 typy jsou `static`, `unit`, `integration`, `regression`, `runtime`, `gui` a
-`config`. Auditor nesmí požadovat GUI u úlohy bez GUI; pokud požadovaný důkaz
-nelze v prostředí provést, musí uvést důvod a použít vhodný náhradní důkaz.
+`config`. Auditor nesmí požadovat GUI u úlohy bez GUI. Je-li `gui` uvedeno v
+`required`, jde o tvrdou podmínku: skutečné otevření a pozorování GUI nelze
+nahradit typy z `acceptable` (například statickou kontrolou, headless/runtime
+harness nebo regresními testy). Pokud požadované GUI nelze provést, auditor
+musí uvést důvod a úkol odmítnout; náhradní důkaz sám o sobě nesmí vést k
+`accepted`.
 
 ## 3. Sestav skutečnou posloupnost
 
@@ -144,6 +211,8 @@ Před vrácením JSON si beze změny výstupního formátu ověř:
 7. Pokrývají `source_refs` všechny zdrojové body právě jednou?
 8. Odpovídá `verification` skutečné povaze změny a nepožaduje neproveditelný
    nebo nesouvisející typ testu?
+9. Neobsahuje některá karta několik oddělitelných výsledků, jejichž společný
+   providerový běh by zbytečně znemožnil použití Groq Free s 8 000 TPM?
 
 ## 6. Výstup
 

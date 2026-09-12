@@ -210,12 +210,23 @@ def test_run_enforces_and_cleans_up_output_schema(monkeypatch):
         nonlocal captured_schema_path
         assert "--output-schema" in cmd
         captured_schema_path = Path(cmd[cmd.index("--output-schema") + 1])
-        assert json.loads(captured_schema_path.read_text(encoding="utf-8")) == schema
+        sent_schema = json.loads(captured_schema_path.read_text(encoding="utf-8"))
+        assert sent_schema["properties"] == {
+            "ok": {"type": "boolean"},
+            "model": {
+                "type": "string",
+                "description": "Přesné úplné kanonické ID modelu, který skutečně vytvořil odpověď.",
+            },
+        }
+        assert sent_schema["required"] == ["ok", "model"]
         stdout = jsonl(
             {"type": "thread.started", "thread_id": "thread-schema"},
             {
                 "type": "item.completed",
-                "item": {"type": "agent_message", "text": '{"ok":true}'},
+                "item": {
+                    "type": "agent_message",
+                    "text": '{"ok":true,"model":"gpt-5.6-sol"}',
+                },
             },
             {"type": "turn.completed", "usage": {}},
         )
@@ -227,7 +238,8 @@ def test_run_enforces_and_cleans_up_output_schema(monkeypatch):
     )
 
     assert result.success is True
-    assert result.output_text == '{"ok":true}'
+    assert result.output_text == '{"ok":true,"model":"gpt-5.6-sol"}'
+    assert result.model == "gpt-5.6-sol"
     assert captured_schema_path is not None
     assert not captured_schema_path.exists()
 
@@ -328,6 +340,54 @@ def test_run_does_not_claim_configured_model_when_provider_does_not_confirm(monk
     assert result.model_source is None
     assert result.requested_model == "gpt-5.6"
     assert result.model_verification["status"] == "UNVERIFIED"
+
+
+def test_structured_work_response_returns_model_without_breaking_ao_schema(monkeypatch):
+    agent = CodexAgent(make_config(model="gpt-5.6-sol"))
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+    captured = {}
+    response = {
+        "items": [{"index": 0, "done": True}],
+        "notes": "ověřeno",
+        "model": "gpt-5.6-sol",
+    }
+
+    def fake_run(cmd, **kwargs):
+        schema_path = Path(cmd[cmd.index("--output-schema") + 1])
+        captured["schema"] = json.loads(schema_path.read_text(encoding="utf-8"))
+        captured["prompt"] = kwargs["input"]
+        stdout = jsonl(
+            {"type": "thread.started", "thread_id": "structured-model"},
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": json.dumps(response)},
+            },
+            {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}},
+        )
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = agent.run(
+        AgentRunRequest(
+            project_path=Path("."),
+            prompt="proveď úkol",
+            requested_model="gpt-5.6-sol",
+            output_schema={
+                "type": "object",
+                "properties": {"items": {"type": "array"}, "notes": {"type": "string"}},
+                "required": ["items", "notes"],
+                "additionalProperties": False,
+            },
+        )
+    )
+
+    assert result.success is True
+    assert result.model == "gpt-5.6-sol"
+    assert result.model_source == "reported_receipt"
+    assert result.receipt_model == "gpt-5.6-sol"
+    assert "model" in captured["schema"]["properties"]
+    assert "model" in captured["schema"]["required"]
+    assert "structured JSON response must include" in captured["prompt"]
 
 
 def test_run_keeps_receipt_identity_separate_and_records_mismatch(monkeypatch):

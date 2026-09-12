@@ -6,7 +6,7 @@
   "purpose": "Převod společného vstupu AO na neinteraktivní Codex CLI a převod JSONL odpovědi zpět do AO.",
   "v2_status_contract": {
     "owner": "codex_provider",
-    "ao_action": "Po přímém běhu providera předá AgentRunResult.provider_status brokeru k uložení.",
+    "ao_action": "Provider po vlastním běhu publikuje AgentRunResult.provider_status přes brokerem připojený status sink; AO výsledek brokeru nepředává.",
     "states": ["AVAILABLE", "LIMITED", "UNAVAILABLE", "ERROR"],
     "broker_rule": "Broker stav pouze uloží a podle něj filtruje nabídky; výsledek úkolu neposuzuje.",
     "refresh_command": "refresh_provider_notes znovu provede probe a obnoví potvrzené poznámky providerů."
@@ -67,6 +67,9 @@
     },
     "purpose": "Každý odesílatel úkolu musí spolu s pracovní odpovědí vyžádat i úplné kanonické ID uvedené providerem, i když nebyl zafixován konkrétní model. Autoritativní potvrzení identity se odděluje od textového receipt.",
     "prompt_wrapper": "Return exactly one JSON object with exactly two string fields: answer and model. Put the requested task result in answer. In model, report the exact full canonical model identifier that actually generated this response, including the Codex suffix or other specialization. Do not copy or infer the requested --model value. Do not use a generic family label such as GPT-5. Output no JSON outside this object and no explanation.",
+    "structured_output_model_field": "model",
+    "structured_output_model_description": "Přesné úplné kanonické ID modelu, který skutečně vytvořil odpověď.",
+    "structured_output_model_instruction": "The structured JSON response must include a string field named model. In model, report the exact full canonical model identifier that actually generated this response, including the Codex suffix or other specialization. Do not copy or infer the requested --model value. Do not use a generic family label such as GPT-5.",
     "response_format": {
       "type": "JSON object",
       "required_fields": ["answer", "model"],

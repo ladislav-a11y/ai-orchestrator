@@ -95,8 +95,9 @@ this file, stop and ask - do not silently override safety rules.
     call's cost, and never triggered by missing/unreported usage data
     (usage tracking is best-effort). When exceeded, the run fails over to
     the next configured provider if one is available
-    (`FailoverAgent.force_failover_on_budget_exceeded`, same shape as
-    `force_failover_on_protocol_error`) or otherwise stops immediately with
+    (when the broker-backed facade exposes the corresponding failover hook;
+    protocol failover is implemented by `BrokerBackedAgent`) or otherwise
+    stops immediately with
     `AutonomousStatus.BUDGET_EXCEEDED` and a Slack notification - it must
     never keep spending past the configured cap "just this once". Do not
     remove this check and do not make it opt-out via a flag other than
@@ -206,12 +207,12 @@ this file, stop and ask - do not silently override safety rules.
     `run_autonomous_loop` tracks *consecutive* unresolved protocol errors
     separately (`PROTOCOL_ERROR_STREAK_LIMIT`, deliberately lower than
     `NO_PROGRESS_LIMIT`); once that streak is hit, it first tries
-    `agent.force_failover_on_protocol_error()` (see
-    `orchestrator/agents/failover.py`'s `FailoverAgent` - a repeated
-    protocol violation gets the same right to fail over to another
-    configured provider as a quota/rate limit does), and only stops the run
-    (status `AutonomousStatus.PROTOCOL_ERROR`) if no other provider is
-    configured/available. Do not raise `PROTOCOL_ERROR_STREAK_LIMIT` to
+    `agent.force_failover_on_protocol_error()` (implemented by the v2
+    `BrokerBackedAgent`; the broker, not the autonomous loop, chooses the
+    replacement provider - a repeated protocol violation gets the same right
+    to fail over to another configured provider as a quota/rate limit does),
+    and only stops the run (status `AutonomousStatus.PROTOCOL_ERROR`) if no
+    other provider is configured/available. Do not raise `PROTOCOL_ERROR_STREAK_LIMIT` to
     match `NO_PROGRESS_LIMIT`, and do not remove the failover attempt.
 13. **`WAITING_FOR_PROVIDER` must never look or be reported like ordinary
     silent progress, and never leave a stale queue row behind.** Incident
@@ -233,20 +234,17 @@ this file, stop and ask - do not silently override safety rules.
       flag) must stay `False` for the CLI's plain `OrchestratorService()`
       (`autonomous`/`run`) and `True` only for the long-running
       `orchestrator.py api` process (see `api.py`'s `get_service()`) - it is
-      what the CLI output, the Slack notification, and
+       what the CLI output and
       `outbox/autonomous-<run_id>.json`'s `auto_resume_active` field use to
       tell the caller whether anything will resume this run on its own.
       Never hardcode it to `True`: the CLI process exits right after
       printing the result, so its own waiting-worker thread never gets a
       chance to fire.
-    - Both `FailoverAgent.run()`'s per-provider exhaustion notification and
-      `OrchestratorService.run_autonomous`'s run-level notification must go
-      through `slack_notify.notify()` on every WAITING_FOR_PROVIDER outcome
-      - the former naming each provider's individual status and nearest
-      known reset (`_describe_status_for_notify`/`_format_duration`), the
-      latter naming the run/project/retry time and the auto-resume state
-      above. Do not collapse these into a single generic "providers
-      exhausted" line with no per-provider detail again.
+     - `WAITING_FOR_PROVIDER` is reported in the structured result, outbox
+       and log with each provider's status and nearest known reset. The old
+       orchestrator-level `slack_notify` path is retired. Slack is reserved
+       for the provider-owned receipt emitted during an actual provider run;
+       it must not be used as a second source of workflow state.
 14. **Verifying the real Codex CLI contract against the live binary is a
     manual step - never something an autonomous iteration or the default
     test suite does on its own.** Two equivalent, read-only, file-change-free

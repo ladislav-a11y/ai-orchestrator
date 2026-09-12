@@ -83,6 +83,7 @@ import hashlib
 import inspect
 import json
 import re
+from copy import deepcopy
 from datetime import datetime, timedelta
 import shutil
 import subprocess
@@ -126,6 +127,59 @@ def _identity_contract() -> dict[str, Any]:
     if not isinstance(paths, list) or not all(isinstance(path, str) and path.strip() for path in paths):
         raise ValueError("langcodex.json neobsahuje model_discovery.response_paths")
     return probe
+
+
+def _task_execution_receipt_contract() -> dict[str, Any]:
+    """Return the Codex work-receipt contract from ``langcodex.json``."""
+    contract = json.loads(
+        Path(__file__).with_name("langcodex.json").read_text(encoding="utf-8")
+    )
+    receipt = contract.get("task_execution_receipt")
+    if not isinstance(receipt, dict):
+        raise ValueError("langcodex.json neobsahuje task_execution_receipt objekt")
+    return receipt
+
+
+def _structured_output_with_model(schema: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Add the provider identity to a caller's structured response contract.
+
+    AO response schemas describe the work result (for example the DoD
+    ``items`` object), while Codex must also return its full actual model.
+    Adding the required provider-owned field keeps both contracts in one JSON
+    response; AO's existing parsers ignore that out-of-band field.
+    """
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return schema
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return schema
+    field = _task_execution_receipt_contract().get("structured_output_model_field", "model")
+    if not isinstance(field, str) or not field.strip() or field in properties:
+        return schema
+    result = deepcopy(schema)
+    result.setdefault("properties", {})[field] = {
+        "type": "string",
+        "description": _task_execution_receipt_contract().get(
+            "structured_output_model_description",
+            "Přesné úplné kanonické ID modelu, který skutečně vytvořil odpověď.",
+        ),
+    }
+    required = result.get("required")
+    if isinstance(required, list) and field not in required:
+        result["required"] = [*required, field]
+    return result
+
+
+def _structured_model_from_response(text: str) -> Optional[str]:
+    """Read the exact model field from Codex's schema-constrained response."""
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    model = value.get(_task_execution_receipt_contract().get("structured_output_model_field", "model"))
+    return model.strip() if isinstance(model, str) and model.strip() else None
 
 # Substrings that, seen anywhere in an "error" event's message text,
 # indicate a quota/rate/session limit rather than an ordinary failure.
@@ -761,12 +815,18 @@ class CodexAgent(Agent):
             prompt = f"{request.prompt}\n\n---\n{request.context}"
         if isinstance(request.receipt_prompt, str) and request.receipt_prompt.strip():
             prompt = f"{prompt}\n\n---\n{request.receipt_prompt.strip()}"
+        output_schema = _structured_output_with_model(request.output_schema)
+        if output_schema is not request.output_schema:
+            receipt = _task_execution_receipt_contract()
+            instruction = receipt.get("structured_output_model_instruction")
+            if isinstance(instruction, str) and instruction.strip():
+                prompt = f"{prompt}\n\n---\n{instruction.strip()}"
         prompt = f"{prompt}\n\n---\n{NO_COMMIT_INSTRUCTION}\n\n---\n{TEST_EXECUTION_INSTRUCTION}"
         effective_request = AgentRunRequest(
             project_path=request.project_path,
             prompt=prompt,
             session_id=request.session_id,
-            output_schema=request.output_schema,
+            output_schema=output_schema,
             requested_model=request.requested_model,
             receipt_prompt=request.receipt_prompt,
         )
@@ -892,6 +952,8 @@ class CodexAgent(Agent):
         metadata_model, metadata_model_source = _reported_model(events)
         receipt = _task_receipt(last_agent_message) if request.receipt_prompt else None
         receipt_model = receipt.get("model") if receipt else None
+        if receipt_model is None and request.output_schema is not None:
+            receipt_model = _structured_model_from_response(last_agent_message)
         model_verification = _work_model_verification(
             effective_model,
             metadata_model,
