@@ -427,6 +427,9 @@ class OrchestratorService:
             preexisting_dirty=preexisting_dirty,
             controller_finalization=controller_finalization,
             implementation_only=implementation_only,
+            runtime_command=entry.runtime_command,
+            runtime_expected=entry.runtime_expected,
+            runtime_timeout_seconds=entry.runtime_timeout_seconds,
         )
         # Looked up once and reused by BOTH branches below: the internal
         # waiting worker always passes `_waiting_task` explicitly, but a

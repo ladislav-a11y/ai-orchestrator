@@ -118,6 +118,7 @@ from orchestrator.git_utils import (
     status_porcelain,
 )
 from orchestrator.runner import run_test_command, tail_text
+from orchestrator.runtime_verification import RuntimeCheckResult, run_runtime_check
 
 DEFAULT_MAX_ITERATIONS = 10
 # Sanity ceiling - independent of what a caller/CLI flag requests, so a typo
@@ -1129,6 +1130,7 @@ def _build_audit_prompt(
     tests_passed: Optional[bool],
     test_output: Optional[str],
     finalization: Optional[dict] = None,
+    runtime_evidence: Optional[str] = None,
 ) -> str:
     """Independent verification prompt, only ever sent once the executor
     claims every DoD item is done and the orchestrator's own test run
@@ -1173,6 +1175,13 @@ def _build_audit_prompt(
         lines += ["", f"Výsledek testů ({test_command}) ověřený orchestrátorem (ne agentem): {result_label}"]
         if test_output:
             lines += ["Výstup testů:", tail_text(test_output, 1500)]
+
+    if runtime_evidence:
+        lines += [
+            "",
+            "Výsledek orchestrátorem provedeného runtime ověření (důkaz, ne tvrzení agenta):",
+            tail_text(runtime_evidence, 2500),
+        ]
 
     lines += [
         "",
@@ -1517,6 +1526,7 @@ def _run_audit(
     logger,
     max_iterations: int,
     finalization: Optional[dict] = None,
+    runtime_evidence: Optional[str] = None,
 ) -> AuditOutcome:
     """One independent, read-only verification call, made only when the
     executor claims completion and the orchestrator's own tests agree (see
@@ -1541,7 +1551,8 @@ def _run_audit(
             len(goal),
         )
     prompt = _build_audit_prompt(
-        goal, dod_items, project_status, test_command, tests_passed, test_output, finalization
+        goal, dod_items, project_status, test_command, tests_passed, test_output,
+        finalization, runtime_evidence,
     )
     logger.info(
         "Autonomní běh %s: iterace %s - všechny body tvrzeny jako splněné, spouštím nezávislý "
@@ -1612,6 +1623,8 @@ def _run_audit(
     notes = notes if isinstance(notes, str) else ""
     if evidence_lines:
         notes = (notes + " | " + " ; ".join(evidence_lines)).strip(" |")
+    if runtime_evidence:
+        notes = (notes + " | " + runtime_evidence).strip(" |")
 
     # The final accepted/rejected gate is issued by ai-orchestrator itself,
     # not audited as a separate implementation fact. If the provider has
@@ -1952,6 +1965,9 @@ def run_autonomous_loop(
     preexisting_dirty: Optional[bool] = None,
     controller_finalization: Optional[dict] = None,
     implementation_only: bool = False,
+    runtime_command: Optional[list[str]] = None,
+    runtime_expected: str = "",
+    runtime_timeout_seconds: float = 60.0,
 ) -> AutonomousResult:
     max_iterations = max(1, min(max_iterations, ABSOLUTE_MAX_ITERATIONS))
     # preexisting_dirty, when passed by OrchestratorService.run_autonomous(),
@@ -2304,6 +2320,27 @@ def run_autonomous_loop(
             ).strip()
         elif implementation_done and tests_ok and not protocol_error:
             audit_performed = True
+            runtime_evidence = None
+            if runtime_command:
+                try:
+                    runtime_result: RuntimeCheckResult = run_runtime_check(
+                        project_path,
+                        runtime_command,
+                        runtime_expected,
+                        timeout_seconds=runtime_timeout_seconds,
+                    )
+                    runtime_evidence = runtime_result.evidence(runtime_expected)
+                    if not runtime_result.passed:
+                        logger.warning(
+                            "Autonomní běh %s: runtime check selhal; audit zůstává fail-closed: %s",
+                            run_id, runtime_evidence,
+                        )
+                except Exception as exc:  # noqa: BLE001 - runtime is an audit gate
+                    runtime_evidence = f"runtime:ERROR command={runtime_command!r} error={exc}"
+                    logger.warning(
+                        "Autonomní běh %s: runtime check nelze provést; audit zůstává fail-closed: %s",
+                        run_id, runtime_evidence,
+                    )
             controller_only_audit = (
                 bool(dod_items)
                 and controller_gate_indices == set(range(len(dod_items)))
@@ -2317,8 +2354,19 @@ def run_autonomous_loop(
                 audit = _run_audit(
                     agent, project_path, goal, dod_items, project_status, test_command,
                     tests_passed, test_output, session_id, run_id, i, logger, max_iterations,
-                    controller_finalization,
+                    controller_finalization, runtime_evidence,
                 )
+                if runtime_evidence and not runtime_evidence.startswith("runtime:OK"):
+                    substantive = [
+                        index for index in range(len(dod_items))
+                        if index not in controller_gate_indices
+                    ]
+                    audit.rejected_indices = sorted(
+                        set(audit.rejected_indices) | set(substantive)
+                    )
+                    audit.notes = (
+                        f"{audit.notes} | {runtime_evidence} | runtime důkaz neprošel"
+                    ).strip(" |")
             session_id = audit.session_id or session_id
             note_breaker_savings(audit.breaker_saved_attempts)
             usage_events.extend(audit.usage_events)

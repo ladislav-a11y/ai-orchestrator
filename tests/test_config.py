@@ -67,13 +67,39 @@ def test_project_registry_parsing(tmp_path):
     project_dir.mkdir()
     cfg_path.write_text(
         f"workspace_root: \"{tmp_path.as_posix()}\"\n"
-        f"projects:\n  myproj:\n    path: \"{project_dir.as_posix()}\"\n    test_command: pytest\n",
+        f"projects:\n  myproj:\n    path: \"{project_dir.as_posix()}\"\n    test_command: pytest\n"
+        "    runtime_command: [python, -m, myproj, --smoke-test]\n"
+        "    runtime_expected: RUNTIME_OK\n"
+        "    runtime_timeout_seconds: 12\n",
         encoding="utf-8",
     )
     cfg = load_config(cfg_path, create_if_missing=False)
     entry = cfg.resolve_project("myproj")
     assert entry.test_command == "pytest"
+    assert entry.runtime_command == ["python", "-m", "myproj", "--smoke-test"]
+    assert entry.runtime_expected == "RUNTIME_OK"
+    assert entry.runtime_timeout_seconds == 12
     assert Path(entry.path) == project_dir
+
+
+def test_resolve_project_by_registered_path_preserves_runtime_metadata(tmp_path):
+    cfg_path = tmp_path / "config.yaml"
+    project_dir = tmp_path / "myproj"
+    project_dir.mkdir()
+    cfg_path.write_text(
+        f"workspace_root: \"{tmp_path.as_posix()}\"\n"
+        f"projects:\n  myproj:\n    path: \"{project_dir.as_posix()}\"\n"
+        "    runtime_command: [python, -m, myproj, --smoke-test]\n"
+        "    runtime_expected: RUNTIME_OK\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_path, create_if_missing=False)
+
+    entry = cfg.resolve_project(str(project_dir))
+
+    assert entry.name == "myproj"
+    assert entry.runtime_command == ["python", "-m", "myproj", "--smoke-test"]
+    assert entry.runtime_expected == "RUNTIME_OK"
 
 
 def test_resolve_project_by_raw_path(tmp_path):

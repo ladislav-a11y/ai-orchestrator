@@ -25,7 +25,10 @@ provider_order:
 workspace_root: ""
 
 # Registr projektů: krátké jméno -> cesta na disku (+ volitelný testovací
-# příkaz specifický pro daný projekt). Do "run" pak stačí zadat jméno
+# příkaz a bezpečný shell-free runtime smoke příkaz specifický pro daný
+# projekt). Runtime příkaz spouští AO v checkoutu před nezávislým auditem;
+# desktopová aplikace musí mít krátký smoke režim, který sám skončí.
+# Do "run" pak stačí zadat jméno
 # projektu, ne celou cestu. Cesty na Windows piš buď s dvojitým zpětným
 # lomítkem ("D:\\claudemail"), nebo s obyčejným lomítkem ("D:/claudemail").
 # Cesta nemusí existovat předem - pokud neexistuje, orchestrátor adresář
@@ -37,6 +40,9 @@ projects:
   # station-agent:
   #   path: "D:/orchestrator/station-agent"   # zatím nemusí existovat
   #   test_command: "pytest"
+  #   runtime_command: [".venv/Scripts/python.exe", "-m", "station_agent", "--smoke-test"]
+  #   runtime_expected: "STATION_AGENT_RUNTIME_OK"
+  #   runtime_timeout_seconds: 60
   # claudemail:
   #   path: "D:/claudemail"
   #   test_command: "pytest"

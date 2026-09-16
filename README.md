@@ -158,6 +158,11 @@ projects:
   station-agent:
     path: "D:/orchestrator/station-agent"   # nemusí ještě existovat
     test_command: "pytest"
+    # Volitelné runtime ověření desktopu/služby před nezávislým auditem.
+    # Seznam argv je shell-free; smoke režim se musí sám ukončit.
+    runtime_command: [".venv/Scripts/python.exe", "-m", "station_agent", "--smoke-test"]
+    runtime_expected: "STATION_AGENT_RUNTIME_OK"
+    runtime_timeout_seconds: 60
 ```
 
 Cesta projektu nemusí předem existovat - pokud adresář chybí, orchestrátor
@@ -218,17 +223,24 @@ jeden bod na řádek, klidně jako checklist:
 - [ ] README popisuje, jak endpoint spustit a otestovat
 ```
 
-Produkční nebo integrační bod lze označit jako vyžadující živý důkaz. Deklarace
-je Markdown komentář na konci bodu; AI Project Manager po provedení bezpečné
-read-only kontroly přidá `LIVE-RESULT` (index je nulový index bodu v DoD):
+Produkční nebo integrační bod lze označit jako vyžadující živý důkaz. Pro
+desktop/služby je vhodnější nastavit u projektu `runtime_command`,
+`runtime_expected` a případně `runtime_timeout_seconds`. AO potom příkaz
+spustí v checkoutu bez shellu, s omezeným timeoutem, výsledek zapíše do
+auditního evidence a předá ho nezávislému auditorovi. Při selhání runtime
+zůstává věcný DoD bod zamítnutý.
+
+Pro externí read-only kontroly lze stále použít Markdown komentář na konci
+bodu; AI Project Manager po provedení kontroly přidá `LIVE-RESULT` (index je
+nulový index bodu v DoD):
 
 ```markdown
 - [ ] Trello obsahuje projektový label <!-- LIVE-EVIDENCE: {"command":"načti labely karty","expect":"project_key"} -->
 <!-- LIVE-RESULT: {"index":0,"exit_code":0,"output":"label project_key nalezen"} -->
 ```
 
-Orchestrátor příkaz z textu specifikace z bezpečnostních důvodů nespouští.
-Výsledek vyhodnotí sám: musí mít `exit_code` 0 a `output` musí obsahovat
+Příkaz z textu specifikace se z bezpečnostních důvodů nespouští. Výsledek
+externího důkazu vyhodnotí AO: musí mít `exit_code` 0 a `output` musí obsahovat
 deklarované `expect`. Bez důkazu nebo při neshodě zůstane bod nesplněný, i
 když jej agent označí hotový a všechny lokální testy projdou. Deklarace i
 výsledek se ukládají do checkpointu, logu a outboxu pro zápis zpět do Trella.

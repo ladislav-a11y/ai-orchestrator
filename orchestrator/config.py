@@ -67,6 +67,12 @@ class ProjectEntry:
     name: str
     path: str
     test_command: Optional[str] = None
+    # Optional operator-owned, shell-free runtime smoke command used by the
+    # independent audit.  It is deliberately separate from test_command:
+    # desktop/GUI behavior needs a live process check, not only unit tests.
+    runtime_command: Optional[list[str]] = None
+    runtime_expected: str = ""
+    runtime_timeout_seconds: float = 60.0
 
 
 @dataclass
@@ -251,6 +257,13 @@ class Config:
         p = Path(project_ref)
         if p.exists():
             resolved = self._ensure_within_workspace(p)
+            # PM passes a concrete checkout path to AO.  Preserve the
+            # registry metadata (notably the runtime check) when that path
+            # is the same registered project, instead of downgrading it to a
+            # bare ProjectEntry with no live verification command.
+            for entry in self.projects.values():
+                if Path(entry.path).resolve() == resolved:
+                    return entry
             return ProjectEntry(name=project_ref, path=str(resolved))
         raise ValueError(
             f"Neznámý projekt '{project_ref}'. Není ani v config.yaml (projects), "
@@ -318,10 +331,32 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
         if isinstance(entry, str):
             projects[name] = ProjectEntry(name=name, path=entry)
         else:
+            runtime_command = entry.get("runtime_command")
+            if runtime_command is not None:
+                if not isinstance(runtime_command, list) or not runtime_command or not all(
+                    isinstance(part, str) and part.strip() for part in runtime_command
+                ):
+                    raise ValueError(
+                        f"projekt '{name}' má neplatný runtime_command; očekáván neprázdný seznam řetězců"
+                    )
+                runtime_command = [part.strip() for part in runtime_command]
+            runtime_expected = entry.get("runtime_expected", "")
+            if not isinstance(runtime_expected, str):
+                raise ValueError(f"projekt '{name}' má neplatný runtime_expected")
+            if runtime_command is not None and not runtime_expected.strip():
+                raise ValueError(
+                    f"projekt '{name}' musí mít neprázdný runtime_expected, pokud má runtime_command"
+                )
+            runtime_timeout = float(entry.get("runtime_timeout_seconds", 60.0))
+            if runtime_timeout <= 0:
+                raise ValueError(f"projekt '{name}' má runtime_timeout_seconds <= 0")
             projects[name] = ProjectEntry(
                 name=name,
                 path=entry["path"],
                 test_command=entry.get("test_command"),
+                runtime_command=runtime_command,
+                runtime_expected=runtime_expected,
+                runtime_timeout_seconds=runtime_timeout,
             )
 
     cc_raw = raw.get("claude_code") or {}

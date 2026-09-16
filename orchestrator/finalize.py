@@ -16,10 +16,15 @@ from orchestrator.config import Config
 logger = logging.getLogger("orchestrator.finalize")
 
 
-def _git(project_path: Path, args: Sequence[str], timeout: int = 120) -> subprocess.CompletedProcess:
+def _git(
+    project_path: Path,
+    args: Sequence[str],
+    timeout: int = 120,
+    input_text: Optional[str] = None,
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", *args], cwd=str(project_path), capture_output=True,
-        text=True, encoding="utf-8", errors="replace", timeout=timeout,
+        input=input_text, text=True, encoding="utf-8", errors="replace", timeout=timeout,
     )
 
 
@@ -53,7 +58,11 @@ def _safe_paths(paths: Sequence[str]) -> list[str]:
 
 def _status_paths(status_output: str) -> list[str]:
     paths = []
-    for line in status_output.splitlines():
+    # ``--porcelain=v1 -z`` preserves arbitrary Windows filenames without
+    # C-style quoting and also avoids newline ambiguity.  Keep accepting the
+    # line-oriented form for callers/tests that provide legacy output.
+    records = status_output.split("\0") if "\0" in status_output else status_output.splitlines()
+    for line in records:
         if len(line) < 4:
             continue
         path = line[3:].strip()
@@ -64,10 +73,33 @@ def _status_paths(status_output: str) -> list[str]:
     return paths
 
 
+def _git_add_paths(project_path: Path, paths: Sequence[str]) -> subprocess.CompletedProcess:
+    """Stage explicit paths without putting the whole path list in argv.
+
+    A live GUI verification can create hundreds of browser-profile files.
+    Passing those paths as individual Windows command-line arguments hits the
+    OS command-length limit before Git can apply the finalizer's scope rules.
+    Git's NUL-delimited pathspec input keeps the operation explicit while
+    making its size independent of argv limits.
+    """
+    payload = "".join(f"{path}\0" for path in paths)
+    return _git(
+        project_path,
+        ["add", "--pathspec-from-file=-", "--pathspec-file-nul"],
+        input_text=payload,
+    )
+
+
 _TRANSIENT_PATH_COMPONENTS = frozenset({
     "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox",
 })
 _TRANSIENT_FILE_SUFFIXES = (".pyc", ".pyo", ".tmp", ".temp", ".bak", ".swp")
+_TRANSIENT_ROOT_PREFIXES = (
+    "_iter_layout",
+    "_iter1_",
+    "_debug_hang",
+    "_gui_verify",
+)
 
 
 def _transient_paths(paths: Sequence[str]) -> list[str]:
@@ -83,12 +115,14 @@ def _transient_paths(paths: Sequence[str]) -> list[str]:
         lowered = normalized.casefold()
         components = {part.casefold() for part in normalized.split("/")}
         name = normalized.rsplit("/", 1)[-1]
+        root_name = normalized.split("/", 1)[0].casefold()
         if (
             components.intersection(_TRANSIENT_PATH_COMPONENTS)
             or lowered.endswith(_TRANSIENT_FILE_SUFFIXES)
             or name.endswith("~")
             or name == ".coverage"
             or name.startswith(".coverage.")
+            or any(root_name.startswith(prefix) for prefix in _TRANSIENT_ROOT_PREFIXES)
         ):
             transient.append(normalized)
     return transient
@@ -162,7 +196,10 @@ def finalize_repository(
     if check.returncode != 0:
         return _blocked("git diff --check failed", diff_check=check.stderr or check.stdout, branch=branch)
 
-    before = _git(project_path, ["status", "--porcelain"])
+    before = _git(
+        project_path,
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )
     if before.returncode != 0:
         return _blocked("could not read Git status", branch=branch)
     dirty = bool(before.stdout.strip())
@@ -218,7 +255,7 @@ def finalize_repository(
                 dirty_paths=dirty_paths, preexisting_paths=baseline_paths, branch=branch,
             )
         task_paths_for_proof = list(stage_paths)
-        staged = _git(project_path, ["add", "--", *stage_paths])
+        staged = _git_add_paths(project_path, stage_paths)
         if staged.returncode != 0:
             return _blocked(f"git add of explicit finalize paths failed: {staged.stderr}", branch=branch)
         staged_check = _git(project_path, ["diff", "--cached", "--check"])
@@ -235,7 +272,10 @@ def finalize_repository(
         committed = True
         head = _git(project_path, ["rev-parse", "HEAD"]).stdout.strip()
 
-    after = _git(project_path, ["status", "--porcelain"])
+    after = _git(
+        project_path,
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )
     if after.returncode != 0:
         return _blocked(
             "post-commit Git status is not clean", committed=committed,

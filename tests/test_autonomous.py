@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -223,6 +224,67 @@ def test_audit_prompt_includes_successful_test_output():
     )
 
     assert "324 passed, 4 skipped in 30.77s" in prompt
+
+
+def test_runtime_check_is_included_in_independent_audit_evidence(tmp_path):
+    requests = []
+
+    def run_fn(request):
+        requests.append(request)
+        if AUDIT_MARKER in request.prompt:
+            assert "RUNTIME_OK" in request.prompt
+            return AgentRunResult(success=True, output_text=_audit_response(request))
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+        )
+
+    result = run_autonomous_loop(
+        run_id="runtime-evidence",
+        project_path=tmp_path,
+        goal="runtime projekt",
+        dod_items=parse_definition_of_done("- [ ] implementace"),
+        config=Config(),
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=1,
+        auto_commit_requested=False,
+        runtime_command=[sys.executable, "-c", "print('RUNTIME_OK')"],
+        runtime_expected="RUNTIME_OK",
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    assert "runtime:OK" in result.iterations[0].note
+
+
+def test_failed_runtime_check_reopens_substantive_audit_items(tmp_path):
+    def run_fn(request):
+        if AUDIT_MARKER in request.prompt:
+            return AgentRunResult(success=True, output_text=_audit_response(request))
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+        )
+
+    result = run_autonomous_loop(
+        run_id="runtime-failure",
+        project_path=tmp_path,
+        goal="runtime projekt",
+        dod_items=parse_definition_of_done("- [ ] implementace"),
+        config=Config(),
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=1,
+        auto_commit_requested=False,
+        runtime_command=[sys.executable, "-c", "print('OTHER')"],
+        runtime_expected="RUNTIME_OK",
+    )
+
+    assert result.status == AutonomousStatus.MAX_ITERATIONS
+    assert result.iterations[0].audit_rejected_indices == [0]
+    assert "runtime důkaz neprošel" in result.iterations[0].note
 
 
 def test_iteration_and_audit_prompts_share_bounded_history_context():

@@ -118,6 +118,38 @@ def test_dynamic_scope_blocks_transient_artifacts_without_filename_allowlists():
         assert _git(path, "log", "-1", "--pretty=%s").stdout.strip() == "initial"
 
 
+def test_dynamic_scope_blocks_browser_profile_artifacts_before_path_length_failure():
+    with _temporary_repo() as path:
+        (path / "tracked.txt").write_text("after", encoding="utf-8")
+        profile = path / "_iter_layout_edge_profile" / "Default" / "Cache"
+        profile.mkdir(parents=True)
+        (profile / "data_0").write_bytes(b"browser cache")
+
+        result = finalize_repository(path, Config(), "run-browser-profile", goal="auto scope")
+
+        assert result["status"] == "blocked"
+        assert result["committed"] is False
+        assert result["transient_paths"] == [
+            "_iter_layout_edge_profile/Default/Cache/data_0"
+        ]
+        assert _git(path, "log", "-1", "--pretty=%s").stdout.strip() == "initial"
+
+
+def test_dynamic_scope_stages_many_paths_via_pathspec_stream():
+    with _temporary_repo() as path:
+        for index in range(300):
+            target = path / "src" / f"file-{index:04d}.txt"
+            target.parent.mkdir(exist_ok=True)
+            target.write_text(f"{index}\n", encoding="utf-8", newline="\n")
+
+        result = finalize_repository(path, Config(), "run-many-paths", goal="auto scope")
+
+        assert result["status"] == "completed", result.get("error")
+        assert result["committed"] is True
+        assert len(result["task_paths"]) == 300
+        assert _git(path, "status", "--porcelain").stdout == ""
+
+
 def test_transient_detection_is_project_agnostic_and_keeps_real_new_files():
     paths = [
         "README.md",
