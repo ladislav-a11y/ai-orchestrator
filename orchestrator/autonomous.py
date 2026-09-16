@@ -1220,8 +1220,9 @@ def _build_audit_prompt(
         "důkaz chybí nebo bod nelze ověřit, nastav accepted=false.",
         "Audit je pouze kontrola: neměň soubory, nevytvářej commit ani push. Pracuj pouze v "
         "přiděleném checkoutu.",
-        "U živé aplikace nebo GUI vždy nejdřív zjisti a použij kanonickou uživatelskou "
-        "runtime konfiguraci cílového checkoutu (např. jeho ignorovaný config.yaml). "
+        "U živé aplikace nebo GUI vždy spusť přesně stejný veřejný entrypoint, který "
+        "spouští koncový uživatel, a použij jeho kanonickou runtime konfiguraci "
+        "cílového checkoutu (např. jeho ignorovaný config.yaml). "
         "Nekopíruj config.example, nevytvářej izolovaný mock config a nepřepínej live "
         "režim na mock, pokud to zadání výslovně nepožaduje. Ověř také skutečnou externí "
         "závislost potřebnou pro live scénář; pokud není dostupná, uveď runtime: "
