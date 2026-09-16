@@ -1487,6 +1487,7 @@ def _audit_needs_quality_fallback(
     rejected_indices: list[int],
     evidence_lines: list[str],
     item_count: int,
+    audit_evidence: Optional[dict[int, dict]] = None,
 ) -> bool:
     """Detect a valid-looking audit that is only a generic refusal.
 
@@ -1496,6 +1497,32 @@ def _audit_needs_quality_fallback(
     """
     if item_count <= 0 or len(rejected_indices) != item_count:
         return False
+    # A provider may legitimately reject every item after inspecting the
+    # checkout (for example when a GUI/runtime gate is unavailable and the
+    # static review also finds concrete source defects). In that case the
+    # structured per-item receipts are authoritative and must reach PM. The
+    # marker-only detector must not turn such a response into a protocol error.
+    if isinstance(audit_evidence, dict) and audit_evidence:
+        concrete_receipt = re.compile(
+            r"(?i)(?:\b[\w./\\-]+\.(?:py|cs|xaml|json|md|toml|csproj|js|ts|html|css)\b"
+            r"|:\d+\b|\b(?:pytest|dotnet|git|head|checkout|exit code)\b)"
+        )
+        for index in rejected_indices:
+            receipt = audit_evidence.get(index)
+            if not isinstance(receipt, dict):
+                continue
+            receipt_text = " ".join(
+                str(receipt.get(field) or "")
+                for field in ("method", "evidence")
+            )
+            verification = receipt.get("verification")
+            if isinstance(verification, dict):
+                receipt_text += " " + " ".join(
+                    str(verification.get(field) or "")
+                    for field in ("summary", "observed", "result", "entrypoint", "config")
+                )
+            if concrete_receipt.search(receipt_text):
+                return False
     evidence = " ".join(evidence_lines).casefold()
     matched = {marker for marker in _AUDIT_INADEQUATE_MARKERS if marker in evidence}
     return len(matched) >= 2
@@ -1796,7 +1823,9 @@ def _run_audit(
         ).strip(" |")
 
     missing_scope = not _audit_evidence_has_project_scope(goal, project_path, evidence_lines)
-    if _audit_needs_quality_fallback(rejected, evidence_lines, len(dod_items)) or missing_scope:
+    if _audit_needs_quality_fallback(
+        rejected, evidence_lines, len(dod_items), audit_evidence
+    ) or missing_scope:
         logger.warning(
             "Autonomní běh %s: iterace %s - auditní odpověď je věcně nedostatečná "
             "nebo bez konkrétní relevance k cíli; běh se zastavuje fail-closed.",

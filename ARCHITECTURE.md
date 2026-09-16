@@ -405,9 +405,9 @@ jakékoliv závislosti na `lh-harness` - jde jen o druhý prompt proti
 stejnému `Agent`). Jakmile v jedné iteraci executor tvrdí, že jsou splněny
 úplně všechny body DoD, orchestrátorovy testy souhlasí, A odpověď byla
 protokolově v pořádku, `_run_audit` pošle samostatný prompt (označený
-`AUDIT_MARKER`), který explicitně zakazuje jakoukoliv úpravu kódu a žádá
-jen nezávislé ověření každého bodu, s odpovědí
-`{"rejected_indices": [...], "notes": "..."}`:
+  `AUDIT_MARKER`), který explicitně zakazuje jakoukoliv úpravu kódu a žádá
+  jen nezávislé ověření každého bodu, s jedním strukturovaným receiptem pro
+  každý bod (`items[index, accepted, method, evidence, verification]`):
 
 - pokud audit vrátí neparsovatelnou odpověď, běh se nepovažuje za
   dokončený, ale ani se to nepočítá jako "no progress" (stejná logika jako
@@ -415,6 +415,10 @@ jen nezávislé ověření každého bodu, s odpovědí
   iteraci;
 - pokud audit něco odmítne, dané body DoD se vrátí na `done=False`
   (jediná výjimka z monotónního merge popsaného výše) a běh pokračuje;
+  konkrétní strukturované záporné receipty jsou platný auditní výsledek i
+  tehdy, když jsou odmítnuty všechny body; pouze obecná odmítavá odpověď bez
+  konkrétního pozorování se označí jako protokolová chyba a nabídne k
+  failoveru;
 - pokud audit nic neodmítne, teprve pak proběhne pokus o commit.
 
 Auditor nikdy nic neimplementuje - je to čistě ověřovací krok, ne druhý

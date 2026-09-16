@@ -2037,6 +2037,40 @@ def test_audit_quality_detector_keeps_concrete_rejection_authoritative():
     ) is False
 
 
+def test_audit_quality_detector_keeps_structured_concrete_rejection_authoritative():
+    receipts = {
+        0: {
+            "method": "artifact: source review",
+            "evidence": "GmailAgent.Desktop/App.xaml.cs:3 uses Application without import",
+            "verification": {
+                "kind": "artifact",
+                "summary": "Reviewed the WPF source",
+                "observed": "App.xaml.cs:3 contains the unresolved symbol",
+                "result": "rejected",
+            },
+        },
+        1: {
+            "method": "gui: live check",
+            "evidence": "runtime unavailable; no window was opened",
+            "verification": {
+                "kind": "gui",
+                "summary": "The required GUI gate was attempted",
+                "observed": "dotnet run was denied by the audit environment",
+                "result": "rejected",
+            },
+        },
+    }
+    assert _audit_needs_quality_fallback(
+        [0, 1],
+        [
+            "0:REJECT App.xaml.cs:3 unresolved symbol; live verification unavailable",
+            "1:REJECT dotnet run denied; no GUI opened",
+        ],
+        2,
+        receipts,
+    ) is False
+
+
 def test_audit_quality_detector_recognizes_agent_cannot_confirm_refusal():
     assert _audit_needs_quality_fallback(
         [0, 1],
