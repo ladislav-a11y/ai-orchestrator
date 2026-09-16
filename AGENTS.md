@@ -208,6 +208,10 @@ this file, stop and ask - do not silently override safety rules.
      from `lang*.json` only after this gate succeeds. The current Antigravity
      `agy --print` adapter is headless and therefore must not be offered for
      GUI audit until a separate live capability probe proves otherwise.
+     If no provider satisfies an audit capability contract, AO must return a
+     structured `BLOCKED` result with the exact missing capability reason; it
+     must never turn this condition into a quota wait, fabricate an audit
+     verdict, or retry indefinitely.
 
 12. **A repeated protocol error must never be allowed to run indefinitely,
     even though it is excluded from the no-progress signature.** Rule 9

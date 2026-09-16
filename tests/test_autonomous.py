@@ -24,6 +24,7 @@ from orchestrator.autonomous import (
     _audit_required_capabilities,
     _gui_required_for_audit,
     _missing_gui_audit_indices,
+    _run_audit,
     compact_audit_goal,
     _controller_audit_gate_indices,
     controller_finalization_is_current,
@@ -2127,6 +2128,34 @@ def test_gui_audit_requires_generic_runtime_and_interactive_gui_capabilities():
     assert "interactive_gui" in required
     assert "git_status" in required
     assert "web_gui" not in required
+
+
+def test_gui_audit_without_capable_provider_is_blocking_not_quota_wait():
+    dod = parse_definition_of_done("- [ ] Ověřit Station Agent v živém Windows GUI")
+
+    class NoGuiAgent:
+        name = "provider-broker"
+        active_provider_name = None
+
+        def run(self, request):
+            assert "interactive_gui" in request.required_capabilities
+            return AgentRunResult(
+                success=False,
+                output_text="",
+                error="Žádný provider nepodporuje požadované capability: interactive_gui, runtime_launch.",
+                capability_incompatible=True,
+            )
+
+    audit = _run_audit(
+        NoGuiAgent(), Path("."), "Ověřit Station Agent v živém Windows GUI", dod,
+        "testing", None, True, "501 passed", None, "capability-test", 1,
+        LOGGER, 1,
+    )
+
+    assert audit.capability_incompatible is True
+    assert audit.limited is False
+    assert audit.protocol_error is False
+    assert "interactive_gui" in audit.error
 
 
 def test_gui_gate_does_not_trigger_on_a_negated_gui_mention():

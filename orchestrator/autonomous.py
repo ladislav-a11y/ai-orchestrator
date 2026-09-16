@@ -496,6 +496,9 @@ class IterationLog:
     audit_performed: bool = False
     audit_rejected_indices: list[int] = field(default_factory=list)
     audit_protocol_error: bool = False
+    # No provider satisfied the audit's explicit capability contract. This is
+    # a workflow block, not a quota wait and not an audit verdict.
+    audit_capability_incompatible: bool = False
     # Whether the one allowed cheap audit repair reprompt was attempted this
     # iteration (mirrors AuditOutcome.audit_repair_attempted).
     audit_repair_attempted: bool = False
@@ -1266,6 +1269,7 @@ class AuditOutcome:
     # to WAITING_FOR_PROVIDER instead of counting this towards
     # PROTOCOL_ERROR_STREAK_LIMIT - see run_autonomous_loop.
     limited: bool = False
+    capability_incompatible: bool = False
     retry_after_seconds: Optional[float] = None
     error: Optional[str] = None
     usage_events: list[dict] = field(default_factory=list)
@@ -1593,6 +1597,12 @@ def _run_audit(
     provider = getattr(agent, "active_provider_name", getattr(agent, "name", None))
     audit_usage = _usage_from_result(result, provider, "audit", iteration)
     if not result.success:
+        if result.capability_incompatible:
+            detail = result.error or "žádný provider nepodporuje požadované auditní capability"
+            return AuditOutcome(
+                [], f"Audit nelze provést: {detail}", False, new_session_id, saved,
+                capability_incompatible=True, error=detail, usage_events=audit_usage,
+            )
         if result.limited:
             # All configured providers are exhausted/unavailable - this is
             # not a protocol violation, it must propagate as
@@ -2420,6 +2430,34 @@ def run_autonomous_loop(
                 )
                 final = snapshot(AutonomousStatus.WAITING_FOR_PROVIDER, error=audit.error)
                 final.retry_after_seconds = audit.retry_after_seconds
+                if on_iteration:
+                    on_iteration(final)
+                return final
+
+            if audit.capability_incompatible:
+                detail = audit.error or audit.notes
+                logger.error(
+                    "Autonomní běh %s: iterace %s/%s - žádný provider nesplňuje auditní "
+                    "capability; běh přechází do BLOCKED: %s",
+                    run_id, i, max_iterations, detail,
+                )
+                iterations.append(
+                    IterationLog(
+                        index=i, prompt=prompt, agent_output=agent_output, agent_error=detail,
+                        tests_passed=tests_passed, test_output=test_output,
+                        dod_snapshot=[_dod_dict(d) for d in dod_items],
+                        note=f"[audit capability] {audit.notes}", protocol_error=protocol_error,
+                        requested_indices=requested_indices, prompt_chars=prompt_chars,
+                        repair_attempted=repair_attempted, repair_succeeded=repair_succeeded,
+                        audit_performed=True, audit_rejected_indices=[],
+                        audit_protocol_error=False,
+                        audit_capability_incompatible=True,
+                        audit_repair_attempted=audit.audit_repair_attempted,
+                        agent_name=getattr(agent, "active_provider_name", getattr(agent, "name", None)),
+                        usage=iteration_usage,
+                    )
+                )
+                final = snapshot(AutonomousStatus.BLOCKED, error=detail)
                 if on_iteration:
                     on_iteration(final)
                 return final
