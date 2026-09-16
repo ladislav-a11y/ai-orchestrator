@@ -37,9 +37,12 @@ this file, stop and ask - do not silently override safety rules.
    `orchestrator/claude_settings.py` enforces the same list a second time, as
    explicit Claude Code `deny` rules written into every project's
    `.claude/settings.local.json` - keep both in sync if this list changes.
-3. **Never push to a remote** in this phase of the project. Pushing is not
-   implemented at all; adding it requires an explicit user decision (see
-   ARCHITECTURE.md).
+3. **Agents never push directly to a remote.** A push is allowed only through
+   the controller-owned finalizer after its verified tests and clean task
+   scope, with an explicit per-project `AI_ORCHESTRATOR_ALLOWED_PUSH_REMOTES`
+   entry and the user's authorization for the production checkpoint. The
+   independent auditor only verifies the resulting remote evidence and never
+   creates a commit or performs the final push.
 4. **Never create a commit when tests failed.** `runner.py`'s
    `_maybe_commit` refuses to commit if `task.tests_passed is False`.
    `autonomous.py`'s `_commit_if_ready` enforces the exact same rule a second
