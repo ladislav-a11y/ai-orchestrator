@@ -178,9 +178,14 @@ this file, stop and ask - do not silently override safety rules.
      replaceable by `verification.acceptable`. Do not infer a GUI/runtime gate
      solely from a platform or framework name: a Windows/.NET bootstrap,
      skeleton, library, API layer, or configuration task gets only the
-     smallest relevant evidence unless its concrete result or source request
-     requires visible/live behavior. The planner must not invent a separate
-     GUI task for such infrastructure work.
+     smallest relevant evidence unless its own concrete result or source
+     request requires visible/live behavior. If a task does deliver a
+     buildable/runnable desktop or other visible application, its task text
+     must say so and its GUI/runtime gate must remain; the independent auditor
+     then verifies that exact live result. The planner must reason about the
+     dependency order between foundation, feature, and integration tasks and
+     must not invent a separate GUI task for infrastructure that does not
+     deliver one.
 11a. **Existing-state verification is not commit work.** A DoD item that
      checks the current HEAD, status, diff, remote, push evidence, or test
      sequence belongs to the independent audit phase and must explicitly say

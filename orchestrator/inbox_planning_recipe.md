@@ -203,6 +203,21 @@ viditelné chování či živý proces, anebo když je takové živé ověření
 požadováno ve zdrojovém zadání. Planner nesmí vyrábět samostatný GUI task ani
 měnit infrastrukturu na GUI práci pouze kvůli použité platformě.
 
+Při plánování aplikace rozlišuj mezi požadovaným konečným produktem a výsledkem
+aktuální karty. Pokud zdroj požaduje například desktopovou, webovou nebo jinak
+spustitelnou aplikaci, AI sama rozhodne, zda první karta musí dodat
+sestavitelný/spustitelný základ s konkrétním vstupním bodem a minimálním
+viditelným rozhraním, zda je vhodnější nejdříve připravit jen backendové
+komponenty, a kdy má navazovat integrační karta. Funkce, které na tomto základu
+závisí, nesmějí předbíhat jeho dokončení. Karta, která pouze připravuje
+kontrakty, knihovnu, API, datový model nebo jiný backendový základ, nemá
+auditní GUI/runtime bránu. Karta, jejímž vlastním výsledkem je sestavitelná a
+spustitelná aplikace s konkrétním GUI nebo živým procesem, naopak tuto bránu
+mít může a auditor ji musí skutečně ověřit. Nejde o pevnou šablonu počtu karet:
+AI může zvolit jinou posloupnost, pokud ji v `split_reason`, závislostech a
+`self_check.notes` porovná s původním zadáním a každá karta má vlastní
+ověřitelný výsledek.
+
 Provozní předpoklady a reprodukční podmínky uvedené ve zdroji nejsou nové
 tasky, ale nesmějí se ztratit při zkrácení zadání. Pokud zdroj popisuje stav,
 ve kterém se má chování ověřit (například žádní pending provideři, zvolený
