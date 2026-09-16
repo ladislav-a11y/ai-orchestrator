@@ -39,6 +39,7 @@ from orchestrator.agents.base import (
     AgentRunRequest,
     AgentRunResult,
     REPOSITORY_CAPABILITIES,
+    RUNTIME_GUI_CAPABILITIES,
     model_from_paths,
     with_provider_status,
 )
@@ -424,10 +425,9 @@ def find_claude_cli(explicit_path: str = "") -> tuple[Optional[str], str]:
 
 class ClaudeCodeAgent(Agent):
     name = "claude-code"
-    # The current adapter exposes repository tools only. A future desktop or
-    # browser adapter must publish those capabilities explicitly instead of
-    # inheriting an optimistic/unknown contract.
-    supported_capabilities = REPOSITORY_CAPABILITIES
+    # Verified Windows CLI runtime/UI path (PowerShell, browser and clicks);
+    # actual live evidence is still mandatory in the independent audit.
+    supported_capabilities = REPOSITORY_CAPABILITIES | RUNTIME_GUI_CAPABILITIES
 
     def __init__(self, config: ClaudeCodeAgentConfig):
         if config.permission_mode == FORBIDDEN_PERMISSION_MODE:

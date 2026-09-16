@@ -30,6 +30,20 @@ REPOSITORY_CAPABILITIES = frozenset(
     }
 )
 
+# Verified Windows CLI audit path: the provider can launch a bounded local
+# runtime through PowerShell, open a browser/desktop UI, and interact with it
+# to produce live evidence. A screenshot is optional, not the capability.
+RUNTIME_GUI_CAPABILITIES = frozenset(
+    {
+        "powershell_runtime",
+        "runtime_launch",
+        "process_observation",
+        "web_gui",
+        "windows_desktop_gui",
+        "interactive_gui",
+    }
+)
+
 
 def model_from_paths(sources: list[dict[str, Any]], paths: list[str]) -> Optional[str]:
     """Return the first provider-reported model found in configured JSON paths."""

@@ -5,10 +5,10 @@
   "adapter": "codex.py",
   "purpose": "Převod společného vstupu AO na neinteraktivní Codex CLI a převod JSONL odpovědi zpět do AO.",
   "capability_contract": {
-    "declared": ["list_files", "read_file", "search_text", "write_file", "replace_text", "git_status", "git_diff"],
-    "unsupported": ["powershell_runtime", "runtime_launch", "process_observation", "web_gui", "windows_desktop_gui", "interactive_gui"],
-    "verification": "Pevná deklarace aktuálního headless adaptéru; desktop/browser capability vyžaduje samostatný ověřený adapter.",
-    "provider_instruction": "Tento adaptér je headless repository CLI. Nehlašuj viditelné GUI ani runtime pozorování bez skutečného externího důkazu."
+    "declared": ["list_files", "read_file", "search_text", "write_file", "replace_text", "git_status", "git_diff", "powershell_runtime", "runtime_launch", "process_observation", "web_gui", "windows_desktop_gui", "interactive_gui"],
+    "unsupported": [],
+    "verification": "Ověřený Windows CLI auditní scénář umí přes PowerShell spustit bounded lokální runtime, otevřít browser nebo desktopové GUI a interakcí/klikáním ověřit skutečné chování; screenshot je pouze volitelný doplněk. Každý konkrétní audit přesto musí dodat skutečný live důkaz a při jeho selhání zůstává fail-closed.",
+    "provider_instruction": "Pro GUI/web audit spusť vlastní bounded runtime přes PowerShell nebo odpovídající Windows launcher, otevři aplikaci v browseru či desktopovém GUI a ověř ji skutečnou interakcí/klikáním a stavovým readbackem. Headless statická kontrola bez živého ovládání nestačí; screenshot není povinný. Nic v cílovém repozitáři neměň."
   },
   "v2_status_contract": {
     "owner": "codex_provider",

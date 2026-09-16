@@ -1220,6 +1220,12 @@ def _build_audit_prompt(
         "důkaz chybí nebo bod nelze ověřit, nastav accepted=false.",
         "Audit je pouze kontrola: neměň soubory, nevytvářej commit ani push. Pracuj pouze v "
         "přiděleném checkoutu.",
+        "U živé aplikace nebo GUI vždy nejdřív zjisti a použij kanonickou uživatelskou "
+        "runtime konfiguraci cílového checkoutu (např. jeho ignorovaný config.yaml). "
+        "Nekopíruj config.example, nevytvářej izolovaný mock config a nepřepínej live "
+        "režim na mock, pokud to zadání výslovně nepožaduje. Ověř také skutečnou externí "
+        "závislost potřebnou pro live scénář; pokud není dostupná, uveď runtime: "
+        "nedostupné a accepted=false, místo náhradního mock důkazu.",
     ]
     if _gui_required_for_audit(goal, dod_items):
         lines += [

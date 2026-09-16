@@ -96,6 +96,7 @@ from orchestrator.agents.base import (
     AgentRunRequest,
     AgentRunResult,
     REPOSITORY_CAPABILITIES,
+    RUNTIME_GUI_CAPABILITIES,
     model_from_paths,
     with_provider_status,
 )
@@ -492,9 +493,9 @@ def _iter_events(stdout: str):
 
 class CodexAgent(Agent):
     name = "codex"
-    # The current adapter exposes repository tools only. Desktop/browser
-    # support must be added and verified as a separate explicit capability.
-    supported_capabilities = REPOSITORY_CAPABILITIES
+    # Verified Windows CLI runtime/UI path (PowerShell, browser and clicks);
+    # actual live evidence is still mandatory in the independent audit.
+    supported_capabilities = REPOSITORY_CAPABILITIES | RUNTIME_GUI_CAPABILITIES
 
     def __init__(self, config: CodexAgentConfig):
         # Second, independent guard against the same thing config.py's

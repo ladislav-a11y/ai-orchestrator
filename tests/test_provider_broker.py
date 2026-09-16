@@ -454,6 +454,54 @@ def test_broker_fails_closed_for_gui_when_all_providers_are_headless(tmp_path):
     assert "interactive_gui" in offer["reason"]
 
 
+def test_gui_audit_failover_skips_groq_and_antigravity_then_uses_claude_or_codex(tmp_path):
+    catalog = {
+        name: [{"id": f"{name}-one"}]
+        for name in ("groq", "antigravity", "claude-code", "codex")
+    }
+    providers = [FakeProvider(name, catalog[name]) for name in catalog]
+    repository = {
+        "list_files", "read_file", "search_text", "write_file", "replace_text",
+        "git_status", "git_diff",
+    }
+    gui = {"runtime_launch", "process_observation", "interactive_gui"}
+    for provider in providers:
+        provider.supported_capabilities = repository | gui if provider.name in {"claude-code", "codex"} else repository
+    broker = ProviderBroker(
+        providers, info_dir=tmp_path / "info", lang_dir=_lang_dir(tmp_path)
+    )
+    broker.refresh_provider_notes()
+
+    for name, reason in (
+        ("groq", "Groq TPM preflight LIMITED"),
+        ("antigravity", "Antigravity quota LIMITED"),
+    ):
+        info, valid = broker._load_info(name)
+        assert valid
+        info.state = "LIMITED"
+        info.reason = reason
+        info.retry_at = "2099-01-01T00:00:00+00:00"
+        broker._save_info(info)
+
+    required = ["read_file", "runtime_launch", "interactive_gui"]
+    profile = {"complexity": "complex", "model_tier": "strong"}
+    offer = broker.select_provider(
+        task_profile=profile, required_capabilities=required
+    )
+    assert offer.provider == "claude-code"
+
+    info, valid = broker._load_info("claude-code")
+    assert valid
+    info.state = "LIMITED"
+    info.reason = "Claude weekly quota LIMITED"
+    info.retry_at = "2099-01-01T00:00:00+00:00"
+    broker._save_info(info)
+    fallback = broker.select_provider(
+        task_profile=profile, required_capabilities=required
+    )
+    assert fallback.provider == "codex"
+
+
 def test_broker_rejects_unknown_capability_contract(tmp_path):
     catalog = {
         name: [{"id": f"{name}-one"}]

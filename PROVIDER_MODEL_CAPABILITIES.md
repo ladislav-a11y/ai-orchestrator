@@ -115,7 +115,18 @@ Autoritativní výstup `agy models` pro tento snapshot:
 |---|---|---|
 | `economical` | `gemini-3.8-flash-low`, `gemini-3.7-flash-low`, `gemini-3.6-flash-low` | Nejnižší deklarovaná effort varianta pro jednoduché, dobře ohraničené úlohy |
 | `balanced` | `gemini-3.8-flash-medium`, `gemini-3.7-flash-medium`, `gemini-3.6-flash-medium`, `gpt-oss-120b-medium` | Výchozí kompromis rychlosti a reasoning effort; preferovat nejnovější stále nabízený Flash `medium` |
-| `quality` | `gemini-3.8-flash-high`, `gemini-3.7-flash-high`, `gemini-3.6-flash-high`, `gemini-3.1-pro-high`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking` | Složitá implementace nebo audit; konkrétní volbu musí stále potvrdit čerstvý `agy models` |
+| `quality` | `gemini-3.8-flash-high`, `gemini-3.7-flash-high`, `gemini-3.6-flash-high`, `gemini-3.1-pro-high`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking` | Složitá implementace nebo audit; konkrétní volbu musí stále potvrdit čerstvý providerový katalog |
+
+### Auditní runtime capability
+
+`claude-code` i `codex` jsou v AO deklarovány jako providery pro
+`powershell_runtime`, `runtime_launch`, `process_observation`, `web_gui`,
+`windows_desktop_gui` a `interactive_gui`: jejich ověřená Windows CLI cesta
+umí spustit bounded lokální runtime, otevřít browser nebo desktopové GUI a
+ověřit ho skutečnou interakcí/klikáním. Screenshot je pouze volitelný důkaz.
+Groq a Antigravity zůstávají pro tento typ auditu vyřazené,
+protože jejich aktuální headless adaptéry takovou cestu nemají. Deklarace pouze
+povoluje výběr providera; konkrétní audit musí stále dodat skutečný live důkaz.
 | bez automatického tieru | `gemini-3.1-pro-low` | Provider potvrzuje dostupnost, ale název kombinuje rodinu Pro s nízkým effort; bez samostatné politiky jej nelze poctivě zařadit |
 
 Přiřazení je lokální routingová politika podle providerem deklarované rodiny a effort
