@@ -104,7 +104,11 @@ pravidlo 11 a `NO_COMMIT_INSTRUCTION` v `claude_code.py` pro druhou,
 nezávislou vrstvu na úrovni promptu) - to celé je druhá, nezávislá vrstva
 vedle `permission_mode` a `FORBIDDEN_*` kontrol výše. Nikdy
 soubor nepřepíše, pokud už existuje (ruční úpravy zůstanou zachované), takže
-je to jen bezpečné výchozí nastavení pro projekty, které si sám založí.
+je to jen bezpečné výchozí nastavení pro projekty, které si sám založí. Nově
+vytvořený soubor se zapisuje jako UTF-8 bez BOM s LF konci řádků i na
+Windows; jinak by controllerová kontrola `git diff --cached --check`
+nesprávně vyhodnotila CRLF jako trailing whitespace a zablokovala
+finalizaci.
 `doctor` stejná pravidla dodatečně zapíše i do už existujících registrovaných
 projektů (`_check_claude_settings`), takže to platí i pro projekty založené
 před zavedením tohoto mechanismu.

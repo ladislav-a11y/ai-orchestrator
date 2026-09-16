@@ -466,6 +466,11 @@ class DoDItem:
     live_command: Optional[str] = None
     live_expected: Optional[str] = None
     live_evidence: Optional[dict] = None
+    # Structured receipt returned by the independent auditor.  This is kept
+    # separate from ``live_evidence`` because the latter is the controller's
+    # externally supplied command result, while this receipt records how the
+    # auditor verified an arbitrary DoD item (including a GUI interaction).
+    audit_evidence: Optional[dict] = None
 
 
 @dataclass
@@ -502,6 +507,10 @@ class IterationLog:
     # Whether the one allowed cheap audit repair reprompt was attempted this
     # iteration (mirrors AuditOutcome.audit_repair_attempted).
     audit_repair_attempted: bool = False
+    # Per-item structured evidence from the independent auditor.  Free-form
+    # notes remain useful for operators, but this field is the durable,
+    # machine-readable audit receipt consumed by PM/Trello/Slack.
+    audit_evidence: dict = field(default_factory=dict)
     agent_name: Optional[str] = None
     usage: list[dict] = field(default_factory=list)
 
@@ -600,6 +609,7 @@ def _dod_dict(item: DoDItem) -> dict:
             if item.live_command is not None else None
         ),
         "live_evidence": item.live_evidence,
+        "audit_evidence": item.audit_evidence,
     }
 
 
@@ -967,6 +977,12 @@ def _build_audit_repair_prompt(
                         "accepted": True,
                         "method": "jak jsi bod overil (runtime/artefakt/git/test)",
                         "evidence": "kratky dulez pro index i",
+                        "verification": {
+                            "kind": "runtime",
+                            "summary": "co bylo overeno",
+                            "observed": "co auditor skutecne pozoroval",
+                            "result": "vysledek",
+                        },
                     }
                     for i in range(len(dod_items))
                 ],
@@ -977,7 +993,9 @@ def _build_audit_repair_prompt(
         ),
         "",
         "Každý index musí mít právě jeden záznam s 'accepted' (bool), 'method' (jaké ověření "
-        "jsi použil) a 'evidence' (konkretni soubor/symbol/test/live vystup).",
+        "jsi použil), 'evidence' (konkrétní důkaz) a 'verification' (objekt s kind, summary, "
+        "observed a result). U GUI/runtime použij kind=gui a popiš skutečně otevřené a "
+        "viditelné rozhraní; screenshot není nutný.",
         f"Počet bodů k ověření: {len(dod_items)}.",
     ]
     if previous_test_output:
@@ -1030,8 +1048,27 @@ def _audit_response_schema(item_count: int) -> dict:
                         "accepted": {"type": "boolean"},
                         "method": {"type": "string"},
                         "evidence": {"type": "string"},
+                        "verification": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                        "runtime", "gui", "artifact", "integration",
+                                        "config", "git", "ci", "test",
+                                    ],
+                                },
+                                "summary": {"type": "string", "maxLength": 800},
+                                "observed": {"type": "string", "maxLength": 1600},
+                                "result": {"type": "string", "maxLength": 800},
+                                "entrypoint": {"type": "string", "maxLength": 500},
+                                "config": {"type": "string", "maxLength": 500},
+                            },
+                            "required": ["kind", "summary", "observed", "result"],
+                            "additionalProperties": False,
+                        },
                     },
-                    "required": ["index", "accepted", "method", "evidence"],
+                    "required": ["index", "accepted", "method", "evidence", "verification"],
                     "additionalProperties": False,
                 },
             },
@@ -1211,13 +1248,19 @@ def _build_audit_prompt(
         "Až skončíš, tvá úplně poslední odpověď musí být výhradně jeden JSON objekt (žádný "
         "markdown blok, žádný text před ani za ním) přesně v tomto tvaru:",
         '{"items":[{"index":0,"accepted":false,"method":"runtime|artefakt|integrace/config/git/ci|test",'
-        '"evidence":"soubor/test/live vystup"}],"notes":"strucne zduvodneni"}',
+        '"evidence":"soubor/test/live vystup","verification":{"kind":"gui",'
+        '"summary":"co bylo overeno","observed":"co auditor skutecne videl nebo nameril",'
+        '"result":"vysledek","entrypoint":"verejny entrypoint uzivatele",'
+        '"config":"kanonicka runtime konfigurace"}}],"notes":"strucne zduvodneni"}',
         "Pole items musí obsahovat právě jeden záznam pro KAŽDÝ index. 'method' stručně "
         "pojmenovává, jakým způsobem jsi bod ověřil (např. 'runtime: spuštěno X', 'artefakt: "
         "obsah souboru Y', 'git: stav HEAD/diff', 'test: pytest test_z'). Evidence musí být "
         "konkrétní a dohledatelná (soubor+symbol, test, nebo live výstup); samotné tvrzení "
         "implementačního agenta ani obecné 'testy prošly' není důkaz splnění daného bodu. Pokud "
-        "důkaz chybí nebo bod nelze ověřit, nastav accepted=false.",
+        "důkaz chybí nebo bod nelze ověřit, nastav accepted=false. Pole verification je "
+        "strukturovaný auditní receipt: kind, summary, observed a result jsou povinné. "
+        "U GUI/runtime bodu musí kind=gui a observed popsat skutečně otevřené a viditelné "
+        "rozhraní; screenshot není nutný, ale pouhá deklarace bez pozorování nestačí.",
         "Audit je pouze kontrola: neměň soubory, nevytvářej commit ani push. Pracuj pouze v "
         "přiděleném checkoutu.",
         "U živé aplikace nebo GUI vždy spusť přesně stejný veřejný entrypoint, který "
@@ -1284,13 +1327,17 @@ class AuditOutcome:
     # iteration (tracked so the log/outbox can show whether the audit recovered
     # via repair or failed cleanly - mirrors executor's repair_attempted).
     audit_repair_attempted: bool = False
+    # Normalized per-item receipts from the auditor.  The orchestrator keeps
+    # the original method/evidence together with the structured verification
+    # object so PM can show the exact audit trail without parsing prose.
+    audit_evidence: dict[int, dict] = field(default_factory=dict)
 
 
 def _validate_audit_response(
     parsed: dict,
     expected_indices: set[int],
     item_count: int,
-) -> tuple[bool, list[int], list[str]]:
+) -> tuple[bool, list[int], list[str], dict[int, dict]]:
     """Validate an already-parsed audit JSON against the strict contract.
 
     Accepts only the structured format
@@ -1303,7 +1350,7 @@ def _validate_audit_response(
     config, Git or CI item) rather than folding that into free-form prose
     that validation cannot enforce is present.
 
-    Returns (protocol_error, rejected_indices, evidence_lines). When
+    Returns (protocol_error, rejected_indices, evidence_lines, audit_evidence). When
     protocol_error is True the response is structurally broken and must not
     be trusted at all; rejected_indices is only meaningful when protocol_error
     is False.
@@ -1316,19 +1363,25 @@ def _validate_audit_response(
     if not isinstance(audit_items, list):
         legacy_rejected = parsed.get("rejected_indices")
         if isinstance(legacy_rejected, list) and all(isinstance(i, int) for i in legacy_rejected):
-            return True, [], ["legacy audit response lacks per-index evidence"]
-        return True, [], []
+            return True, [], ["legacy audit response lacks per-index evidence"], {}
+        return True, [], [], {}
 
     seen: set[int] = set()
     rejected: list[int] = []
     evidence_lines: list[str] = []
+    audit_evidence: dict[int, dict] = {}
     for item in audit_items:
         if not isinstance(item, dict):
-            return True, [], []
+            return True, [], [], {}
         idx = item.get("index")
         accepted = item.get("accepted")
         method = item.get("method")
         evidence = item.get("evidence")
+        verification = item.get("verification")
+        if isinstance(verification, dict):
+            verification = dict(verification)
+        else:
+            verification = None
         if (
             not isinstance(idx, int)
             or isinstance(idx, bool)
@@ -1339,23 +1392,56 @@ def _validate_audit_response(
             or not method.strip()
             or not isinstance(evidence, str)
             or not evidence.strip()
+            or not isinstance(verification, dict)
+            or verification.get("kind") not in {
+                "runtime", "gui", "artifact", "integration", "config", "git", "ci", "test"
+            }
+            or any(
+                not isinstance(verification.get(field), str)
+                or not verification[field].strip()
+                for field in ("summary", "observed", "result")
+            )
+            or any(
+                key not in {"kind", "summary", "observed", "result", "entrypoint", "config"}
+                for key in verification
+            )
+            or any(
+                key in verification
+                and (
+                    not isinstance(verification[key], str)
+                    or not verification[key].strip()
+                )
+                for key in ("entrypoint", "config")
+            )
         ):
-            return True, [], []
+            return True, [], [], {}
         seen.add(idx)
         if not accepted:
             rejected.append(idx)
+        audit_evidence[idx] = {
+            "accepted": accepted,
+            "method": method.strip(),
+            "evidence": evidence.strip(),
+            "verification": verification,
+        }
+        verification_summary = "; ".join(
+            f"{key}={verification[key]}"
+            for key in ("kind", "summary", "observed", "result", "entrypoint", "config")
+            if key in verification
+        )
         evidence_lines.append(
-            f"{idx}:{'OK' if accepted else 'REJECT'} [{method.strip()}] {evidence.strip()}"
+            f"{idx}:{'OK' if accepted else 'REJECT'} [{method.strip()}] {evidence.strip()} "
+            f"| verification: {verification_summary}"
         )
 
     if seen != expected_indices:
         missing = sorted(expected_indices - seen)
         if missing:
             evidence_lines.append(f"missing={missing}")
-        return True, [], evidence_lines
+        return True, [], evidence_lines, {}
 
     rejected.sort()
-    return False, rejected, evidence_lines
+    return False, rejected, evidence_lines, audit_evidence
 
 
 # A valid audit response can still be unusable when the provider explicitly
@@ -1470,7 +1556,10 @@ def _gui_required_for_audit(goal: str, dod_items: list[DoDItem]) -> bool:
 
 
 def _missing_gui_audit_indices(
-    goal: str, dod_items: list[DoDItem], evidence_lines: list[str]
+    goal: str,
+    dod_items: list[DoDItem],
+    evidence_lines: list[str],
+    audit_evidence: Optional[dict[int, dict]] = None,
 ) -> list[int]:
     """Return implementation indices when a GUI task lacks live GUI proof.
 
@@ -1482,6 +1571,32 @@ def _missing_gui_audit_indices(
     """
     if not _gui_required_for_audit(goal, dod_items):
         return []
+    substantive_indices = [
+        index for index in range(len(dod_items))
+        if index not in _controller_audit_gate_indices(dod_items)
+    ]
+    if audit_evidence is not None:
+        has_structured_gui = any(
+            index in audit_evidence
+            and audit_evidence[index].get("accepted") is True
+            and (audit_evidence[index].get("verification") or {}).get("kind") == "gui"
+            and not _GUI_NEGATIVE_EVIDENCE_RE.search(
+                " ".join(
+                    [
+                        str(audit_evidence[index].get("method") or ""),
+                        str(audit_evidence[index].get("evidence") or ""),
+                        *(
+                            str((audit_evidence[index].get("verification") or {}).get(key) or "")
+                            for key in ("summary", "observed", "result")
+                        ),
+                    ]
+                )
+            )
+            for index in substantive_indices
+        )
+        if has_structured_gui:
+            return []
+        return substantive_indices
     evidence = " ".join(evidence_lines)
     has_positive = bool(_GUI_POSITIVE_EVIDENCE_RE.search(evidence))
     has_negative = bool(_GUI_NEGATIVE_EVIDENCE_RE.search(evidence))
@@ -1490,10 +1605,7 @@ def _missing_gui_audit_indices(
     # The AO DoD representation intentionally does not carry PM's phase
     # metadata.  Return every substantive index; PM maps its own audit-phase
     # items separately and will reopen the implementation item(s) only.
-    return [
-        index for index in range(len(dod_items))
-        if index not in _controller_audit_gate_indices(dod_items)
-    ]
+    return substantive_indices
 
 
 def _audit_required_capabilities(
@@ -1642,8 +1754,8 @@ def _run_audit(
         )
 
     expected_indices = set(range(len(dod_items)))
-    protocol_error, rejected, evidence_lines = _validate_audit_response(
-    parsed, expected_indices, len(dod_items),
+    protocol_error, rejected, evidence_lines, audit_evidence = _validate_audit_response(
+        parsed, expected_indices, len(dod_items),
     )
     if protocol_error:
         # Try one repair before giving up on this audit.
@@ -1673,7 +1785,9 @@ def _run_audit(
         ).strip(" |")
         rejected = [index for index in rejected if index not in controller_gate_indices]
 
-    missing_gui = _missing_gui_audit_indices(goal, dod_items, evidence_lines)
+    missing_gui = _missing_gui_audit_indices(
+        goal, dod_items, evidence_lines, audit_evidence
+    )
     if missing_gui:
         rejected = sorted(set(rejected) | set(missing_gui))
         notes = (
@@ -1698,7 +1812,10 @@ def _run_audit(
             error="auditní odpověď bez konkrétního ověření",
             usage_events=audit_usage,
         )
-    return AuditOutcome(rejected, notes, False, new_session_id, saved, usage_events=audit_usage)
+    return AuditOutcome(
+        rejected, notes, False, new_session_id, saved,
+        usage_events=audit_usage, audit_evidence=audit_evidence,
+    )
 
 
 def _run_controller_audit(
@@ -1822,7 +1939,12 @@ def _audit_with_repair(
         )
 
     expected_indices = set(range(len(dod_items)))
-    repair_protocol_error, repaired_rejected, repaired_evidence_lines = _validate_audit_response(
+    (
+        repair_protocol_error,
+        repaired_rejected,
+        repaired_evidence_lines,
+        repaired_audit_evidence,
+    ) = _validate_audit_response(
         repaired_parsed, expected_indices, len(dod_items),
     )
     if repair_protocol_error:
@@ -1849,6 +1971,7 @@ def _audit_with_repair(
         repaired_rejected, repair_notes, False,
         repair_result.session_id or new_session_id, saved,
         audit_repair_attempted=True, usage_events=usage,
+        audit_evidence=repaired_audit_evidence,
     )
 
 
@@ -2329,6 +2452,7 @@ def run_autonomous_loop(
         audit_rejected: list[int] = []
         audit_protocol_error = False
         audit_repair_attempted = False
+        audit_evidence: dict[int, dict] = {}
         controller_gate_rejected = False
 
         # Controller-owned audit gates remain false until the independent
@@ -2401,6 +2525,10 @@ def run_autonomous_loop(
                     audit.notes = (
                         f"{audit.notes} | {runtime_evidence} | runtime důkaz neprošel"
                     ).strip(" |")
+            audit_evidence = dict(audit.audit_evidence)
+            for index, receipt in audit_evidence.items():
+                if 0 <= index < len(dod_items):
+                    dod_items[index].audit_evidence = receipt
             session_id = audit.session_id or session_id
             note_breaker_savings(audit.breaker_saved_attempts)
             usage_events.extend(audit.usage_events)
@@ -2431,6 +2559,7 @@ def run_autonomous_loop(
                         audit_performed=True, audit_rejected_indices=[],
                         audit_protocol_error=True,
                         audit_repair_attempted=audit.audit_repair_attempted,
+                        audit_evidence=audit_evidence,
                         agent_name=getattr(agent, "active_provider_name", getattr(agent, "name", None)),
                         usage=iteration_usage,
                     )
@@ -2460,6 +2589,7 @@ def run_autonomous_loop(
                         audit_protocol_error=False,
                         audit_capability_incompatible=True,
                         audit_repair_attempted=audit.audit_repair_attempted,
+                        audit_evidence=audit_evidence,
                         agent_name=getattr(agent, "active_provider_name", getattr(agent, "name", None)),
                         usage=iteration_usage,
                     )
@@ -2517,6 +2647,7 @@ def run_autonomous_loop(
                 audit_performed=audit_performed, audit_rejected_indices=audit_rejected,
                 audit_protocol_error=audit_protocol_error,
                 audit_repair_attempted=audit_repair_attempted,
+                audit_evidence=audit_evidence,
                 agent_name=getattr(agent, "active_provider_name", getattr(agent, "name", None)),
                 usage=iteration_usage,
             )

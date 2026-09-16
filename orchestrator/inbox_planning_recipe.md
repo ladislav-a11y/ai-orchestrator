@@ -59,6 +59,15 @@ Bez ohledu na druh aplikace nesmí:
 
 ## 2. Jedna karta znamená jednu atomickou změnu
 
+Výstupem intake nejsou tematické souhrny lidského textu, ale jednotlivé
+strojově zpracovatelné handoffy. Každý `task` musí mít právě jeden
+nezávisle měřitelný výsledek, který lze samostatně předat provideru,
+implementovat nebo read-only ověřit, finalizovat podle jeho vlastních změn a
+auditovat. Každý další samostatný uživatelský výsledek patří do dalšího tasku,
+i když všechny tasky míří do stejného projektu. Kontext, už provedená změna,
+podmínka zachování chování nebo omezení nejsou samy o sobě nový task a smějí
+se objevit pouze jako vstup či omezení příslušného tasku.
+
 Každá karta musí mít právě jeden konkrétní výsledek v jednom cílovém projektu
 nebo repozitáři. Tento výsledek musí jít samostatně implementovat, ověřit,
 controllerem finalizovat a nezávisle auditovat.
@@ -85,11 +94,17 @@ odděleného zdrojového bodu. Jeden zdrojový bod smí být přiřazen právě 
 kartě; pokud by rozdělení vedlo k opakování stejného `source_refs`, plán je
 neplatný a musí zůstat v Inboxu.
 
-Číslovaný bod je na hranici jednoho intake plánu atomický. Pokud zdroj obsahuje
-jen jeden číslovaný bod, vrať právě jednu kartu s jeho jediným `source_refs`
-odkazem; nerozděluj jej na rešerši a implementaci ani na přípravný a ověřovací
-krok. Více karet použij až pro samostatně identifikované zdrojové body nebo
-výslovně oddělené výsledky, které mají vlastní odkaz.
+Číslovaný bod, odrážka nebo jinak samostatně formulovaný uživatelský výsledek
+je pro AI důležitý signál atomické hranice a obvykle má mít vlastní task i
+vlastní `source_refs`. Více takových výsledků nesmí planner sloučit do jednoho
+providerového handoffu jen proto, že míří do stejného repozitáře nebo se týkají
+stejné obrazovky. O tom, zda jde skutečně o samostatný výsledek, rozhoduje AI
+podle významu zadání; PM nesmí dělat mechanický split podle vět, odstavců,
+souborů nebo názvů. Výjimkou je pouze bod, který výslovně popisuje
+ověření, přijetí nebo podmínku zachování jiného bodu; ten není další
+implementační task, ale musí být zapsán jako auditní podmínka svého vlastního
+tasku. Ani tehdy se jeden skutečný implementační výsledek nesmí mechanicky
+štěpit na rešerši, implementaci a ověření.
 
 Je-li ve zdroji uveden `Pracovní adresář` a jeho projekt odpovídá položce
 `configured_projects`, použij tuto přesnou hodnotu `project_key`. Nezaměňuj
@@ -164,15 +179,32 @@ zdrojový bod přiřaď právě jedné kartě a žádný bod nevynechávej. Neop
 zdrojový text v `source_refs`.
 
 Každý task musí obsahovat také `verification` se třemi poli: `required` je
-nejmenší důkaz, který má nezávislý auditor požadovat, `acceptable` jsou
-doplňující nebo náhradní důkazy a `reason` stručně vysvětluje volbu. Povolené
-typy jsou `static`, `unit`, `integration`, `regression`, `runtime`, `gui` a
-`config`. Auditor nesmí požadovat GUI u úlohy bez GUI. Je-li `gui` uvedeno v
-`required`, jde o tvrdou podmínku: skutečné otevření a pozorování GUI nelze
-nahradit typy z `acceptable` (například statickou kontrolou, headless/runtime
-harness nebo regresními testy). Pokud požadované GUI nelze provést, auditor
-musí uvést důvod a úkol odmítnout; náhradní důkaz sám o sobě nesmí vést k
-`accepted`.
+nejmenší důkaz, který má nezávislý auditor požadovat, `acceptable` jsou pouze
+doplňující důkazy a `reason` stručně vysvětluje volbu. `acceptable` nikdy
+nenahrazuje žádnou položku z `required`; zejména GUI nebo runtime nelze obejít
+integračním, statickým ani jiným náhradním důkazem. Povolené typy jsou
+`static`, `unit`, `integration`, `regression`, `runtime`, `gui` a `config`.
+Auditor nesmí požadovat GUI u úlohy bez GUI. Je-li `gui` nebo `runtime`
+uvedeno v `required`, jde o tvrdou podmínku: skutečné spuštění a pozorování
+požadovaného runtime/GUI nelze nahradit typy z `acceptable` (například
+statickou kontrolou, headless/runtime harness nebo regresními testy). Pokud
+požadované GUI nebo runtime nelze provést, auditor musí uvést důvod a úkol
+odmítnout; doplňující důkaz sám o sobě nesmí vést k `accepted`.
+
+Provozní předpoklady a reprodukční podmínky uvedené ve zdroji nejsou nové
+tasky, ale nesmějí se ztratit při zkrácení zadání. Pokud zdroj popisuje stav,
+ve kterém se má chování ověřit (například žádní pending provideři, zvolený
+konkrétní režim nebo všechny volby), zachovej jej stručně v `task`,
+`next_step` nebo `verification.reason` a také v auditním DoD. AI může zadání
+parafrázovat, ale nesmí vypustit podmínku nutnou k reprodukci nebo hodnocení
+výsledku.
+
+Před odesláním plánu porovnej každou kartu znovu s původním lidským vstupem a
+vrať povinný objekt `self_check`. V něm musí být všechny položky
+`source_compared`, `source_coverage`, `atomicity`, `dependencies`,
+`verification` a `constraints_preserved` nastavené na `true`; `notes` stručně
+popíše, co bylo porovnáno a proč je zvolený počet karet věcně správný. Pokud
+některá kontrola neprojde, plán neodesílej jako úspěšný.
 
 ## 3. Sestav skutečnou posloupnost
 

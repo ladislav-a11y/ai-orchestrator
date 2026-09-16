@@ -153,7 +153,29 @@ this file, stop and ask - do not silently override safety rules.
     Antigravity (no repo-local permission file this orchestrator controls),
     backstopped the same way by rule 1's sandbox/approval guarantee - a
     denied `git commit` from a sandboxed run comes back as an ordinary
-    `error` event, not a hang or a silent allow.
+     `error` event, not a hang or a silent allow.
+11g. **Antigravity Inbox planning is a direct structured handoff.** The
+     `plan-inbox` command must not force Antigravity's `--mode plan`: the real
+     CLI expands that mode into its own `/plan` workflow, which can consume the
+     request on tool-confirmation steps instead of returning the AO planner
+     JSON. The command uses the empty non-bypass mode for this disposable,
+     read-only planning workspace. `langantigravity.json` must declare that a
+     caller-provided `output_schema` is rendered in the prompt, because agy has
+     no separate AO schema parameter. `AntigravityAgent` must treat
+     `status=SUCCESS` with a missing or blank `response` as a protocol failure
+     so BrokerBackedAgent can fail over; it must never publish such a run as
+     completed.
+11h. **Inbox planner admission requires an explicit source-comparison self-check.**
+     The planner output must include `self_check` with `source_compared`,
+     `source_coverage`, `atomicity`, `dependencies`, `verification`, and
+     `constraints_preserved` all set to `true`, plus concise `notes` explaining
+     the comparison with the original human request and the chosen card count.
+     PM must reject the plan before Trello admission when the self-check is
+     missing or failed. The self-check does not dictate how many cards the AI
+     creates; it verifies that the AI made and reviewed that decision. Runtime
+     and GUI conditions from the source must remain explicit in the resulting
+     task/audit handoff, and `verification.required` is never replaceable by
+     `verification.acceptable`.
 11a. **Existing-state verification is not commit work.** A DoD item that
      checks the current HEAD, status, diff, remote, push evidence, or test
      sequence belongs to the independent audit phase and must explicitly say

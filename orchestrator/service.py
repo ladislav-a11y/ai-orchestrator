@@ -583,10 +583,16 @@ class OrchestratorService:
                         if i.live_command is not None else None
                     ),
                     "live_evidence": i.live_evidence,
+                    "audit_evidence": i.audit_evidence,
                 }
                 for i in result.dod_items
             ],
             "iterations": [it.to_dict() for it in result.iterations],
+            "audit_evidence": (
+                result.iterations[-1].audit_evidence
+                if result.iterations and result.iterations[-1].audit_evidence
+                else {}
+            ),
             "committed": result.committed,
             "commit_hash": result.commit_hash,
             "error": result.error,
@@ -614,6 +620,11 @@ class OrchestratorService:
             "checkpoint": {
                 "run_id": run_id,
                 "completed_dod_indices": completed_indices,
+                "audit_evidence": [
+                    {"index": index, "evidence": item.audit_evidence}
+                    for index, item in enumerate(result.dod_items)
+                    if item.audit_evidence is not None
+                ],
             },
             "last_output": last_output,
             "next_step": next_item,

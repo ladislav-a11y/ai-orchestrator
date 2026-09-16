@@ -213,6 +213,33 @@ def test_checkpoint_round_trips_live_evidence(tmp_path):
     assert restored_items[0].done is True
     assert restored_items[0].live_evidence["passed"] is True
 
+
+def test_checkpoint_round_trips_structured_audit_evidence(tmp_path):
+    project = tmp_path / "project"
+    spec = "- [ ] Station Agent GUI"
+    original = parse_definition_of_done(spec)
+    original[0].done = True
+    original[0].audit_evidence = {
+        "accepted": True,
+        "method": "gui: browser",
+        "evidence": "browser displayed Station Agent",
+        "verification": {
+            "kind": "gui",
+            "summary": "Station Agent GUI",
+            "observed": "browser opened the application and the control was visible",
+            "result": "accepted",
+            "entrypoint": "start_station_agent.bat",
+            "config": "config.yaml",
+        },
+    }
+    save_checkpoint(tmp_path, project, spec, "gui", original, "run-audit")
+
+    checkpoint = load_checkpoint(tmp_path, project, spec)
+    restored_items = parse_definition_of_done(spec)
+    assert checkpoint is not None
+    assert apply_checkpoint(restored_items, checkpoint) == 1
+    assert restored_items[0].audit_evidence["verification"]["kind"] == "gui"
+
 def test_checkpoint_survives_pm_checkpoint_run_id_churn(tmp_path):
     """Regression for a real bug found in the live queue: AI Project Manager
     appends a trailing "<!-- PM-CHECKPOINT {"run_id": ...} -->" comment to

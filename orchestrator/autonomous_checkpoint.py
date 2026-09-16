@@ -171,6 +171,11 @@ def apply_checkpoint(dod_items: list, checkpoint: DoDCheckpoint) -> int:
         if evidence is not None and not isinstance(evidence, dict):
             return 0
         item.live_evidence = evidence
+        audit_evidence = saved.get("audit_evidence")
+        if audit_evidence is not None and not isinstance(audit_evidence, dict):
+            return 0
+        if hasattr(item, "audit_evidence"):
+            item.audit_evidence = audit_evidence
         if saved["done"] and not item.done:
             # A live item is only restorable with a persisted positive
             # result; a bare done=true is never enough.
@@ -251,6 +256,7 @@ def save_checkpoint(
                     if getattr(item, "live_command", None) is not None else None
                 ),
                 "live_evidence": getattr(item, "live_evidence", None),
+                "audit_evidence": getattr(item, "audit_evidence", None),
             }
             for item in dod_items
         ],

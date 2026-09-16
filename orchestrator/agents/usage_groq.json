@@ -2,10 +2,10 @@
   "provider": "groq",
   "models": {
     "openai/gpt-oss-120b": {
-      "input_tokens": 2557,
-      "output_tokens": 79,
-      "thinking_tokens": 17,
-      "total_tokens": 2636,
+      "input_tokens": 1487,
+      "output_tokens": 39,
+      "thinking_tokens": 10,
+      "total_tokens": 1526,
       "cost_usd": 0
     }
   }

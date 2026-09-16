@@ -143,8 +143,9 @@ def ensure_project_claude_settings(project_dir: Path) -> Path:
     if settings_path.exists():
         return settings_path
     claude_dir.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(
-        json.dumps(build_settings(), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    # Keep generated repository files compliant with AGENTS.md on Windows as
+    # well: Path.write_text() otherwise translates ``\n`` to CRLF, which Git
+    # reports as trailing whitespace during controller finalization.
+    with settings_path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(build_settings(), ensure_ascii=False, indent=2) + "\n")
     return settings_path

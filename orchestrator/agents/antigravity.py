@@ -520,7 +520,8 @@ class AntigravityAgent(Agent):
             )
 
         status = str(raw.get("status") or "").upper()
-        response_text = raw.get("response") or ""
+        response_value = raw.get("response")
+        response_text = response_value if isinstance(response_value, str) else ""
         conversation_id = raw.get("conversation_id") or effective_request.session_id
 
         usage = raw.get("usage") or {}
@@ -557,6 +558,22 @@ class AntigravityAgent(Agent):
                 raw_response=raw,
                 session_id=conversation_id,
                 error=f"Antigravity CLI vrátilo neúspěšný stav '{status or 'UNKNOWN'}': {error_message}",
+                model=reported_model,
+                model_source=reported_model_source,
+                selection_reason=request.selection_reason,
+                **token_fields,
+            )
+
+        if not response_text.strip():
+            return AgentRunResult(
+                success=False,
+                output_text="",
+                raw_response=raw,
+                session_id=conversation_id,
+                error=(
+                    "Antigravity CLI vrátilo status SUCCESS, ale neposkytlo "
+                    "neprázdné pole response."
+                ),
                 model=reported_model,
                 model_source=reported_model_source,
                 selection_reason=request.selection_reason,

@@ -41,7 +41,18 @@ def test_refresh_provider_notes_is_an_explicit_ao_cli_command():
 def _audit_response(request):
     indices = [int(value) for value in re.findall(r"(?m)^(\d+)\. ", request.prompt)]
     return json.dumps({
-        "items": [{"index": value, "accepted": True, "method": "static: kontrola projektu", "evidence": f"{request.project_path.name}: audit evidence"} for value in indices],
+        "items": [{
+            "index": value,
+            "accepted": True,
+            "method": "static: kontrola projektu",
+            "evidence": f"{request.project_path.name}: audit evidence",
+            "verification": {
+                "kind": "artifact",
+                "summary": f"{request.project_path.name}: audit evidence",
+                "observed": "zdrojové soubory byly zkontrolovány",
+                "result": "ověření prošlo",
+            },
+        } for value in indices],
         "notes": "audit ok",
     })
 
@@ -122,6 +133,17 @@ def test_autonomous_cli_passes_run_id_and_writes_outbox(tmp_path, monkeypatch):
             "done": True,
             "live_verification": None,
             "live_evidence": None,
+            "audit_evidence": {
+                "accepted": True,
+                "method": "static: kontrola projektu",
+                "evidence": "station-agent: audit evidence",
+                "verification": {
+                    "kind": "artifact",
+                    "summary": "station-agent: audit evidence",
+                    "observed": "zdrojové soubory byly zkontrolovány",
+                    "result": "ověření prošlo",
+                },
+            },
         }]
     finally:
         service.shutdown()
@@ -168,7 +190,11 @@ def test_plan_inbox_schema_uses_codex_compatible_json_schema(monkeypatch, capsys
                 }),
             )
 
-    monkeypatch.setattr(cli, "build_agent", lambda name, config: PlanningAgent())
+    monkeypatch.setattr(
+        cli,
+        "build_agent",
+        lambda name, config: (seen.__setitem__("config", config) or PlanningAgent()),
+    )
     monkeypatch.setattr(cli, "load_config", lambda: Config())
     monkeypatch.setattr(
         cli.sys,
@@ -188,6 +214,7 @@ def test_plan_inbox_schema_uses_codex_compatible_json_schema(monkeypatch, capsys
     assert "AI Project Manager vlastní Trello workflow" in seen["prompt"]
     assert "jsou hranice čtyři" in seen["prompt"]
     assert "Groq Free" in seen["prompt"]
+    assert seen["config"].antigravity.mode == ""
     json.loads(capsys.readouterr().out)
 
 

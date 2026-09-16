@@ -111,6 +111,18 @@ def test_ensure_project_claude_settings_creates_file(tmp_path: Path):
     assert content == build_settings()
 
 
+def test_ensure_project_claude_settings_writes_utf8_lf_without_bom(tmp_path: Path):
+    project_dir = tmp_path / "lf-project"
+    project_dir.mkdir()
+
+    settings_path = ensure_project_claude_settings(project_dir)
+    raw = settings_path.read_bytes()
+
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert b"\r" not in raw
+    assert raw.endswith(b"\n")
+
+
 def test_ensure_project_claude_settings_does_not_overwrite_existing(tmp_path: Path):
     project_dir = tmp_path / "myproj"
     claude_dir = project_dir / ".claude"

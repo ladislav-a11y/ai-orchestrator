@@ -135,6 +135,15 @@ selhání a failover pokračuje dalším providerem, bez tvrzení, že Gemini ú
 provedl. Po migraci CLI/účtu na podporovaný přístup lze stejný provider znovu
 ověřit bez změny konfigurace modelu.
 
+### Antigravity jako Inbox planner
+
+Antigravity může být použita pro read-only rozklad Inbox zadání, ale tato
+cesta používá přímou strukturovanou odpověď. `plan-inbox` proto nepředává agy
+režim `plan`, protože ten spouští interní `/plan` workflow a může skončit na
+potvrzení nástroje bez planner JSON. AO schema se do promptu vkládá podle
+`langantigravity.json`; prázdná odpověď při `status=SUCCESS` je protokolová
+chyba a broker smí pokračovat failoverem na dalšího vhodného providera.
+
 ## 3. Kontrola prostředí (doctor)
 
 ```bash

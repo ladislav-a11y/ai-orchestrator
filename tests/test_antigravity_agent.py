@@ -289,6 +289,39 @@ def test_run_success(monkeypatch):
     assert captured_call["kwargs"]["cwd"] == str(project_dir)
 
 
+def test_run_success_without_response_is_protocol_failure(monkeypatch):
+    agent = AntigravityAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = json.dumps(
+        {
+            "conversation_id": "conv-empty",
+            "status": "SUCCESS",
+            "response": "",
+            "model": "agy-task-model",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 0,
+                "thinking_tokens": 2,
+                "total_tokens": 12,
+            },
+        }
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="naplánuj Inbox"))
+
+    assert result.success is False
+    assert result.output_text == ""
+    assert result.raw_response["status"] == "SUCCESS"
+    assert "neposkytlo" in result.error
+    assert result.total_tokens == 12
+
+
 def test_run_non_success_status_is_a_clear_error(monkeypatch):
     agent = AntigravityAgent(make_config())
     monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))

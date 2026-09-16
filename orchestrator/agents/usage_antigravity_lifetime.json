@@ -16,10 +16,10 @@
       "cost_usd": 0
     },
     "gemini-3.8-flash-medium": {
-      "input_tokens": 814434,
-      "output_tokens": 57716,
-      "thinking_tokens": 48189,
-      "total_tokens": 872150,
+      "input_tokens": 1089081,
+      "output_tokens": 88344,
+      "thinking_tokens": 74643,
+      "total_tokens": 1177425,
       "cost_usd": 0
     }
   }

@@ -417,7 +417,12 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
         # checkout. Provider-specific read-only modes add a second guard.
         safe_config = replace(
             config,
-            antigravity=replace(config.antigravity, mode="plan"),
+            # Antigravity's --mode plan expands the prompt into agy's own
+            # interactive /plan workflow. Inbox planning is already the AO
+            # planner operation and needs a direct structured answer instead.
+            # An empty mode is still deny-by-default on the real CLI (the
+            # adapter never passes a permission-bypass flag).
+            antigravity=replace(config.antigravity, mode=""),
             codex=replace(config.codex, sandbox_mode="read-only"),
         )
         if central_broker:
@@ -466,9 +471,11 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
             + "\n--- KONEČNÁ APLIKACE PRAVIDEL NA TENTO VSTUP ---\n"
             + "Zkontroluj znovu pouze tento zdrojový vstup: nevytvářej výsledek, "
             + "který zdroj výslovně nepožaduje. Sloveso navrhnout, doporučit nebo "
-            + "prověřit znamená návrh či rešerši, ne implementaci. Pokud zdroj "
-            + "obsahuje jediný číslovaný bod, vrať právě jednu kartu s jeho jediným "
-            + "source_refs odkazem. Pokud zdroj uvádí Pracovní adresář odpovídající "
+            + "prověřit znamená návrh či rešerši, ne implementaci. Číslované body "
+            + "použij jako signál možných hranic, ale o počtu karet rozhodni podle "
+            + "samostatných technických výsledků; nesluč oddělitelné výsledky a "
+            + "nerozděluj uměle auditní podmínku od její implementace. Pokud zdroj "
+            + "uvádí Pracovní adresář odpovídající "
             + "configured_projects, použij tento přesný project_key. Nyní vrať "
             + "pouze JSON podle schema."
         )
@@ -483,6 +490,28 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                     output_schema={
                         "type": "object",
                         "properties": {
+                            "self_check": {
+                                "type": "object",
+                                "properties": {
+                                    "source_compared": {"type": "boolean"},
+                                    "source_coverage": {"type": "boolean"},
+                                    "atomicity": {"type": "boolean"},
+                                    "dependencies": {"type": "boolean"},
+                                    "verification": {"type": "boolean"},
+                                    "constraints_preserved": {"type": "boolean"},
+                                    "notes": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 1200,
+                                    },
+                                },
+                                "required": [
+                                    "source_compared", "source_coverage", "atomicity",
+                                    "dependencies", "verification", "constraints_preserved",
+                                    "notes",
+                                ],
+                                "additionalProperties": False,
+                            },
                             "tasks": {
                                 "type": "array",
                                 "minItems": 1,
@@ -557,7 +586,7 @@ def cmd_plan_inbox(args: argparse.Namespace) -> int:
                                 },
                             }
                         },
-                        "required": ["tasks"],
+                        "required": ["self_check", "tasks"],
                         "additionalProperties": False,
                     },
                 )

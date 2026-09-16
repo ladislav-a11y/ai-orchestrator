@@ -51,9 +51,26 @@ def _audit_response(request, *, accepted=True, index=None, evidence="audit evide
         indices = [index]
     if evidence == "audit evidence":
         evidence = f"{request.project_path.name}: audit evidence"
+    prompt_lower = request.prompt.casefold()
+    kind = (
+        "gui" if "gui" in prompt_lower or "browser" in prompt_lower
+        else "runtime" if "runtime" in method.casefold()
+        else "artifact"
+    )
     return json.dumps({
         "items": [
-            {"index": value, "accepted": accepted, "method": method, "evidence": evidence}
+            {
+                "index": value,
+                "accepted": accepted,
+                "method": method,
+                "evidence": evidence,
+                "verification": {
+                    "kind": kind,
+                    "summary": f"{request.project_path.name}: ověření bodu {value}",
+                    "observed": "GUI bylo spuštěno a viditelně pozorováno" if kind == "gui" else evidence,
+                    "result": "ověření prošlo" if accepted else "ověření neprošlo",
+                },
+            }
             for value in indices
         ],
         "notes": "audit ok",
@@ -130,6 +147,55 @@ def test_orchestrator_owns_executor_and_audit_output_contracts(tmp_path):
     assert "uniqueItems" not in audit_items
     assert AUDIT_MARKER not in requests[0].prompt
     assert AUDIT_MARKER in requests[1].prompt
+
+
+def test_audit_persists_structured_per_item_receipt(tmp_path):
+    def run_fn(request):
+        if AUDIT_MARKER in request.prompt:
+            return AgentRunResult(success=True, output_text=_audit_response(request))
+        return AgentRunResult(
+            success=True,
+            output_text='{"items": [{"index": 0, "done": true}], "notes": "hotovo"}',
+        )
+
+    result = run_autonomous_loop(
+        run_id="structured-audit-receipt",
+        project_path=tmp_path,
+        goal="cil",
+        dod_items=parse_definition_of_done("- [ ] bod A"),
+        config=Config(),
+        agent=FakeAgent(run_fn),
+        logger=LOGGER,
+        test_command=None,
+        max_iterations=1,
+        auto_commit_requested=False,
+    )
+
+    assert result.status == AutonomousStatus.COMPLETED
+    receipt = result.dod_items[0].audit_evidence
+    assert receipt["accepted"] is True
+    assert receipt["verification"]["kind"] in {"artifact", "gui", "runtime"}
+    assert result.iterations[0].audit_evidence[0] == receipt
+
+
+def test_audit_receipt_without_structured_verification_fails_closed():
+    protocol_error, rejected, evidence_lines, receipts = _validate_audit_response(
+        {
+            "items": [{
+                "index": 0,
+                "accepted": True,
+                "method": "runtime",
+                "evidence": "application started",
+            }],
+            "notes": "missing structured receipt",
+        },
+        {0},
+        1,
+    )
+
+    assert protocol_error is True
+    assert rejected == []
+    assert receipts == {}
 
 
 def test_audit_goal_compacts_trello_history_and_keeps_current_state():
@@ -2043,7 +2109,7 @@ def test_strict_audit_requires_evidence_for_every_dod_index(tmp_path):
 
     assert result.status == AutonomousStatus.PROTOCOL_ERROR
     assert result.iterations[-1].audit_protocol_error is True
-    assert "missing=[1]" in result.iterations[-1].note
+    assert "platný JSON" in result.iterations[-1].note
     assert '"index":0' in result.iterations[-1].note
 
 
@@ -2051,7 +2117,7 @@ def test_audit_response_without_method_fails_closed():
     """The auditor must name *how* it verified each item, not just claim a
     verdict with prose evidence - an item without an explicit method is a
     protocol error, the same as one missing evidence entirely."""
-    protocol_error, rejected, evidence_lines = _validate_audit_response(
+    protocol_error, rejected, evidence_lines, audit_evidence = _validate_audit_response(
         {"items": [{"index": 0, "accepted": True, "evidence": "module.py:10"}], "notes": "n"},
         {0},
         1,
@@ -2064,11 +2130,17 @@ def test_audit_response_evidence_line_carries_method_and_verdict():
     """Per-DoD output must expose index + OK/REJECT + the concrete method
     used, not just a free-form evidence blob - this is what lets a caller
     (and Trello) see *how* each item was independently proven or refuted."""
-    protocol_error, rejected, evidence_lines = _validate_audit_response(
+    protocol_error, rejected, evidence_lines, audit_evidence = _validate_audit_response(
         {
             "items": [
-                {"index": 0, "accepted": True, "method": "runtime: spusteno `make run`", "evidence": "vypis OK"},
-                {"index": 1, "accepted": False, "method": "artefakt: soubor chybi", "evidence": "config.yaml neexistuje"},
+                {
+                    "index": 0, "accepted": True, "method": "runtime: spusteno `make run`", "evidence": "vypis OK",
+                    "verification": {"kind": "runtime", "summary": "sluzba", "observed": "vypis OK", "result": "prošlo"},
+                },
+                {
+                    "index": 1, "accepted": False, "method": "artefakt: soubor chybi", "evidence": "config.yaml neexistuje",
+                    "verification": {"kind": "artifact", "summary": "soubor", "observed": "config.yaml neexistuje", "result": "neprošlo"},
+                },
             ],
             "notes": "n",
         },
@@ -2078,8 +2150,8 @@ def test_audit_response_evidence_line_carries_method_and_verdict():
     assert protocol_error is False
     assert rejected == [1]
     assert evidence_lines == [
-        "0:OK [runtime: spusteno `make run`] vypis OK",
-        "1:REJECT [artefakt: soubor chybi] config.yaml neexistuje",
+        "0:OK [runtime: spusteno `make run`] vypis OK | verification: kind=runtime; summary=sluzba; observed=vypis OK; result=prošlo",
+        "1:REJECT [artefakt: soubor chybi] config.yaml neexistuje | verification: kind=artifact; summary=soubor; observed=config.yaml neexistuje; result=neprošlo",
     ]
 
 

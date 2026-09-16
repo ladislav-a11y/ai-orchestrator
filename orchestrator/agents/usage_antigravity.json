@@ -2,10 +2,10 @@
   "provider": "antigravity",
   "models": {
     "gemini-3.8-flash-medium": {
-      "input_tokens": 481195,
-      "output_tokens": 42407,
-      "thinking_tokens": 34957,
-      "total_tokens": 523602,
+      "input_tokens": 28075,
+      "output_tokens": 782,
+      "thinking_tokens": 651,
+      "total_tokens": 28857,
       "cost_usd": 0
     }
   }

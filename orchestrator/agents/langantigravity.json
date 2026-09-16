@@ -85,6 +85,7 @@
       "prompt": "Zadání práce.",
       "context": "Nepovinný kontext připojený k zadání.",
       "session_id": "Nepovinné ID předané jako --conversation.",
+      "output_schema": "JSON Schema pro závěrečnou odpověď; broker ho musí vložit do promptu, protože agy nemá samostatný parametr pro AO schema.",
       "requested_model": "Nepovinný model předaný jako --model."
     }
   },
