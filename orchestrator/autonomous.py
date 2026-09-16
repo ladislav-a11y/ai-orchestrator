@@ -1064,7 +1064,16 @@ def _audit_response_schema(item_count: int) -> dict:
                                 "entrypoint": {"type": "string", "maxLength": 500},
                                 "config": {"type": "string", "maxLength": 500},
                             },
-                            "required": ["kind", "summary", "observed", "result"],
+                            # Codex/OpenAI structured outputs use strict JSON
+                            # Schema validation: every property declared in an
+                            # object must also be listed in ``required``.
+                            # Keep the fields semantically optional by
+                            # allowing an empty string, rather than omitting
+                            # them from the schema contract.
+                            "required": [
+                                "kind", "summary", "observed", "result",
+                                "entrypoint", "config",
+                            ],
                             "additionalProperties": False,
                         },
                     },
@@ -1231,6 +1240,11 @@ def _build_audit_prompt(
         "end-to-end scénář) - samotné přečtení kódu nestačí. Toto ověření je odpovědnost "
         "auditora: sám zvol a proveď vlastní runtime scénář, případně použij dočasný "
         "testovací harness mimo cílový repozitář a po ověření ho odstraň.",
+        "Výslovný auditní kontrakt v předaném DoD je autoritativní: pokud uvádí "
+        "required=unit (a runtime/gui není required), ověř tento konkrétní rozsah "
+        "cíleným unit testem a nepřidávej GUI bránu jen proto, že jde o WPF, .NET, "
+        "desktopovou aplikaci nebo jinou platformu. Runtime/GUI vyžaduj pouze tehdy, "
+        "když je explicitně požadováno v cíli nebo v auditním kontraktu.",
         "- Je-li bod o artefaktu (soubor, dokument, konfigurační šablona), ověř jeho existenci "
         "a skutečný obsah, ne jen že commit/PR existuje.",
         "- Je-li bod o integraci, konfiguraci, Gitu nebo CI, ověř skutečný aktuální stav (git "

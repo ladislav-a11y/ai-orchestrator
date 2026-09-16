@@ -120,6 +120,16 @@ this file, stop and ask - do not silently override safety rules.
     recovery path, burning a session's budget for zero recorded progress. Do
     not remove the repair step, do not let it turn into a second full
     iteration, and do not make the audit pass optional or skippable.
+    Audit response schemas are sent to strict structured-output providers;
+    every property declared by an object in `_audit_response_schema` must also
+    appear in that object's `required` array. Semantically optional evidence
+    fields remain present with an empty string, rather than being omitted from
+    the schema.
+    The auditor must treat Trello's explicit per-card verification contract as
+    authoritative: `required=unit` does not become a GUI/runtime gate merely
+    because the checkout uses WPF, .NET, desktop, or another application
+    platform. GUI/runtime is mandatory only when explicitly required by the
+    task or its verification contract.
 11. **The implementation agent must never create its own Git commit.**
     Committing only ever happens through the orchestrator's own Git layer
     (`git_utils.py`, called from `runner.py`'s `_maybe_commit` and

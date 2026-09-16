@@ -22,6 +22,7 @@ from orchestrator.autonomous import (
     _audit_evidence_has_project_scope,
     _audit_needs_quality_fallback,
     _audit_required_capabilities,
+    _audit_response_schema,
     _gui_required_for_audit,
     _missing_gui_audit_indices,
     _run_audit,
@@ -43,6 +44,13 @@ from orchestrator.context_compaction import (
 )
 
 LOGGER = logging.getLogger("test")
+
+
+def test_audit_response_schema_is_valid_for_strict_structured_outputs():
+    """Every object property must be required for Codex/OpenAI schemas."""
+    schema = _audit_response_schema(1)
+    verification = schema["properties"]["items"]["items"]["properties"]["verification"]
+    assert set(verification["required"]) == set(verification["properties"])
 
 
 def _audit_response(request, *, accepted=True, index=None, evidence="audit evidence", method="static: kontrola projektu"):
@@ -2207,6 +2215,8 @@ def test_audit_prompt_instructs_category_specific_verification_method():
     assert "implementační agent nebo PM nepřipravil" in prompt
     assert "test si pro audit připrav/proveď sám" in prompt
     assert "runtime: nedostupné" in prompt
+    assert "required=unit" in prompt
+    assert "nepřidávej GUI bránu" in prompt
 
 
 def test_gui_audit_requires_actual_visible_gui_evidence():
