@@ -191,6 +191,18 @@ statickou kontrolou, headless/runtime harness nebo regresními testy). Pokud
 požadované GUI nebo runtime nelze provést, auditor musí uvést důvod a úkol
 odmítnout; doplňující důkaz sám o sobě nesmí vést k `accepted`.
 
+Volbu `verification.required` odvoď od konkrétního výsledku tasku a od
+výslovných akceptačních podmínek v lidském zadání, nikoli pouze od názvu
+platformy, jazyka nebo typu projektu. Základ, skelet, knihovna, API vrstva,
+konfigurace a jiné bootstrap/infrastrukturní práce nesmějí dostat povinné
+`gui` ani `runtime` jen proto, že cílová aplikace je Windows desktopová nebo
+má později zobrazovat okno. V takovém případě zvol nejmenší relevantní
+statický, testovací, integrační nebo konfigurační důkaz. `gui`/`runtime` je
+oprávněné přidat teprve tehdy, když task skutečně dodává nebo mění konkrétní
+viditelné chování či živý proces, anebo když je takové živé ověření výslovně
+požadováno ve zdrojovém zadání. Planner nesmí vyrábět samostatný GUI task ani
+měnit infrastrukturu na GUI práci pouze kvůli použité platformě.
+
 Provozní předpoklady a reprodukční podmínky uvedené ve zdroji nejsou nové
 tasky, ale nesmějí se ztratit při zkrácení zadání. Pokud zdroj popisuje stav,
 ve kterém se má chování ověřit (například žádní pending provideři, zvolený

@@ -173,9 +173,14 @@ this file, stop and ask - do not silently override safety rules.
      PM must reject the plan before Trello admission when the self-check is
      missing or failed. The self-check does not dictate how many cards the AI
      creates; it verifies that the AI made and reviewed that decision. Runtime
-     and GUI conditions from the source must remain explicit in the resulting
-     task/audit handoff, and `verification.required` is never replaceable by
-     `verification.acceptable`.
+     and GUI conditions explicitly required by the source must remain explicit
+     in the resulting task/audit handoff, and `verification.required` is never
+     replaceable by `verification.acceptable`. Do not infer a GUI/runtime gate
+     solely from a platform or framework name: a Windows/.NET bootstrap,
+     skeleton, library, API layer, or configuration task gets only the
+     smallest relevant evidence unless its concrete result or source request
+     requires visible/live behavior. The planner must not invent a separate
+     GUI task for such infrastructure work.
 11a. **Existing-state verification is not commit work.** A DoD item that
      checks the current HEAD, status, diff, remote, push evidence, or test
      sequence belongs to the independent audit phase and must explicitly say
