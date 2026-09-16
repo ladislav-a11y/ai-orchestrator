@@ -10,7 +10,8 @@ engine itself enforces the same boundaries the orchestrator already relies on
 `workspace_root` check (see AGENTS.md).
 
 Deliberately narrow: allow exactly what a normal edit-test task needs
-(read/create/edit project files, run local Python/pytest/unittest, and the
+(read/create/edit project files, run local Python/pytest/unittest, use the
+dedicated bounded Windows runtime launcher for live GUI audits, and the
 read-only/staging half of Git), and explicitly deny the Git operations that
 lose work (push, hard reset, clean, deleting .git, history rewrites - see
 AGENTS.md rule 2) *and* `git commit` itself - committing is the
@@ -20,8 +21,8 @@ inspect the tree (`git status`, `git diff`, `git add`) but must never create
 the commit itself (see AGENTS.md, and NO_COMMIT_INSTRUCTION in
 orchestrator/agents/claude_code.py for the matching prompt-level rule).
 Anything not listed simply is not auto-approved, which is the safe default
-when nobody can click "yes". No blanket "Bash" allow is granted here on
-purpose.
+when nobody can click "yes". No blanket command or shell allow is granted
+here on purpose.
 
 Also wires up one `PreToolUse` hook (`orchestrator/hooks/test_command_guard.py`)
 that stops the agent from repeatedly retrying test-invocation commands after
@@ -40,9 +41,16 @@ SETTINGS_FILENAME = "settings.local.json"
 # it with cwd = the *project's* directory, not this repo.
 _TEST_GUARD_HOOK_PATH = Path(__file__).resolve().parent / "hooks" / "test_command_guard.py"
 
-# Read/create/edit project files, run local Python, run the non-destructive
-# half of Git. acceptEdits already auto-approves file edits; listing them
-# here too keeps behavior unchanged if permission_mode is ever tightened.
+# Read/create/edit project files, run local Python, use the dedicated bounded
+# Windows runtime launcher for an independent live audit, and run the
+# non-destructive half of Git. acceptEdits already auto-approves file edits;
+# listing them here too keeps behavior unchanged if permission_mode is ever
+# tightened.
+_RUNTIME_GUI_PROBE_PATH = Path(__file__).resolve().parent / "runtime_gui_probe.ps1"
+RUNTIME_GUI_RULES: list[str] = [
+    f"Bash(powershell -NoProfile -File {_RUNTIME_GUI_PROBE_PATH}:*)",
+    f"Bash(pwsh -NoProfile -File {_RUNTIME_GUI_PROBE_PATH}:*)",
+]
 ALLOWED_RULES: list[str] = [
     "Read",
     "Edit",
@@ -58,6 +66,7 @@ ALLOWED_RULES: list[str] = [
     "Bash(.venv/Scripts/python.exe:*)",
     "Bash(.venv\\Scripts\\python.exe:*)",
     "Bash(pytest:*)",
+    *RUNTIME_GUI_RULES,
     # Non-destructive Git - deliberately excludes `git commit`: see
     # DENIED_RULES below and the module docstring.
     "Bash(git init:*)",
@@ -131,16 +140,45 @@ def build_settings() -> dict:
 
 
 def ensure_project_claude_settings(project_dir: Path) -> Path:
-    """Create `<project_dir>/.claude/settings.local.json` if it's missing.
+    """Create or minimally reconcile project Claude settings.
 
-    Never overwrites a file that's already there - a project someone has
-    hand-tuned locally is left alone. This only fills in the safe default
-    for projects the orchestrator sets up itself, so every project under
-    `workspace_root` ends up with the same rules without manual setup.
+    A hand-tuned project file is never replaced. For valid JSON, only missing
+    managed runtime-launch rules are appended so older generated projects do
+    not remain unable to perform a live audit; other custom keys and rules are
+    preserved.
     """
     claude_dir = project_dir / ".claude"
     settings_path = claude_dir / SETTINGS_FILENAME
     if settings_path.exists():
+        try:
+            with settings_path.open("r", encoding="utf-8") as handle:
+                current = json.load(handle)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return settings_path
+        if not isinstance(current, dict):
+            return settings_path
+        permissions = current.get("permissions")
+        if not isinstance(permissions, dict):
+            permissions = {}
+            current["permissions"] = permissions
+        allow = permissions.get("allow")
+        if not isinstance(allow, list):
+            allow = []
+            permissions["allow"] = allow
+        changed = False
+        for rule in RUNTIME_GUI_RULES:
+            if rule not in allow:
+                allow.append(rule)
+                changed = True
+        if changed:
+            try:
+                with settings_path.open("w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(json.dumps(current, ensure_ascii=False, indent=2) + "\n")
+            except OSError:
+                # ACL/read-only protection is an explicit operator boundary;
+                # do not make doctor or a normal submit fail because an old
+                # project settings file cannot be reconciled automatically.
+                return settings_path
         return settings_path
     claude_dir.mkdir(parents=True, exist_ok=True)
     # Keep generated repository files compliant with AGENTS.md on Windows as

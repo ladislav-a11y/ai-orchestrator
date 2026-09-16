@@ -8,7 +8,7 @@
     "declared": ["list_files", "read_file", "search_text", "write_file", "replace_text", "git_status", "git_diff", "powershell_runtime", "runtime_launch", "process_observation", "web_gui", "windows_desktop_gui", "interactive_gui"],
     "unsupported": [],
     "verification": "Ověřený Windows CLI auditní scénář umí přes PowerShell spustit bounded lokální runtime, otevřít browser nebo desktopové GUI a interakcí/klikáním ověřit skutečné chování; screenshot je pouze volitelný doplněk. Každý konkrétní audit přesto musí dodat skutečný live důkaz a při jeho selhání zůstává fail-closed.",
-    "provider_instruction": "Pro GUI/web audit spusť přesně stejný veřejný entrypoint a kanonickou runtime konfiguraci, které používá koncový uživatel, přes PowerShell nebo odpovídající Windows launcher; otevři aplikaci v browseru či desktopovém GUI a ověř ji skutečnou interakcí/klikáním a stavovým readbackem. Headless statická kontrola bez živého ovládání nestačí; screenshot není povinný. Nic v cílovém repozitáři neměň."
+    "provider_instruction": "Pro GUI/web audit spusť přesně stejný veřejný entrypoint a kanonickou runtime konfiguraci, které používá koncový uživatel, přes dedikovaný orchestrator/runtime_gui_probe.ps1 launcher; ten podporuje entrypoint .exe, .dll, .ps1, .bat nebo .cmd pouze uvnitř aktuálního projektu. Otevři aplikaci v browseru či desktopovém GUI a ověř ji skutečnou interakcí/klikáním a stavovým readbackem. Headless statická kontrola bez živého ovládání nestačí; screenshot není povinný. Nic v cílovém repozitáři neměň."
   },
   "v2_status_contract": {
     "owner": "claude-code_provider",

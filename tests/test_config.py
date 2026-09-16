@@ -1,10 +1,12 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from orchestrator.config import load_config
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "config" / "config.example.yaml"
+PRODUCTION = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
 
 
 def test_load_example_config():
@@ -12,6 +14,11 @@ def test_load_example_config():
     assert cfg.default_agent == "claude-code"
     assert cfg.claude_code.permission_mode == "acceptEdits"
     assert cfg.api.host == "127.0.0.1"
+
+
+def test_production_claude_config_exposes_bash_for_runtime_probe():
+    raw = yaml.safe_load(PRODUCTION.read_text(encoding="utf-8"))
+    assert "Bash" in raw["claude_code"]["allowed_tools"]
 
 
 def test_forbidden_permission_mode_rejected(tmp_path):

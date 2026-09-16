@@ -77,6 +77,12 @@ konfigurace a `ClaudeCodeAgent.__init__`/`_build_command`), aby stačilo
 selhání jednoho z nich a druhé to stejně odchytí.
 
 Důsledek: v neinteraktivním běhu nemá kdo odklikávat žádosti o oprávnění.
+V produkční konfiguraci je proto pro Claude dostupný nástroj `Bash`, ale
+projektový allowlist nepovoluje obecný PowerShell ani obecný cmd. Pro živý
+runtime/GUI audit je povolen pouze dedikovaný
+`orchestrator/runtime_gui_probe.ps1`, který spouští existující entrypoint
+uvnitř právě auditovaného projektu (`.exe`, `.dll`, `.ps1`, `.bat` nebo
+`.cmd`).
 Proto výchozí `permission_mode: acceptEdits` (automaticky schvaluje úpravy
 souborů, ale ne cokoliv riskantnějšího) a proto je důležité mít v cílovém
 projektu předem povolené nástroje, které agent bude opravdu potřebovat.
@@ -93,7 +99,8 @@ Protože nikdo neodklikává interaktivní dotazy, `service.py` (`submit()`) př
 založení/prvním sáhnutí na projekt zapíše do `<projekt>/.claude/settings.local.json`
 pevně daná allow/deny pravidla (`orchestrator.claude_settings.build_settings()`):
 allow pokrývá čtení/úpravu/vytváření souborů projektu, lokální
-Python/`.venv`/`pytest`/`python -m unittest` a jen čtecí/stage půlku Gitu
+Python/`.venv`/`pytest`/`python -m unittest`, dedikovaný runtime GUI probe a
+jen čtecí/stage půlku Gitu
 (`init`, `status`, `diff`, `add`, `log` - záměrně BEZ `commit`); deny
 natvrdo blokuje `git push`, `git reset --hard`, `git clean -fd`/`-fdx`,
 smazání `.git`, přepis historie (`rebase`, `filter-branch`,
@@ -109,9 +116,11 @@ vytvořený soubor se zapisuje jako UTF-8 bez BOM s LF konci řádků i na
 Windows; jinak by controllerová kontrola `git diff --cached --check`
 nesprávně vyhodnotila CRLF jako trailing whitespace a zablokovala
 finalizaci.
-`doctor` stejná pravidla dodatečně zapíše i do už existujících registrovaných
-projektů (`_check_claude_settings`), takže to platí i pro projekty založené
-před zavedením tohoto mechanismu.
+Při každém sáhnutí na projekt se do platného staršího
+`settings.local.json` pouze doplní chybějící runtime pravidlo; vlastní klíče a
+pravidla se nepřepisují. `doctor` stejnou cestu používá pro existující
+registrované projekty, takže oprava platí i pro projekty založené před
+zavedením runtime capability.
 
 ### Circuit breaker proti opakovaným pokusům o spuštění testů (`orchestrator/hooks/test_command_guard.py`)
 

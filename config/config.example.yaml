@@ -59,10 +59,11 @@ claude_code:
   # NIKDY nepoužívej "bypassPermissions" - orchestrátor to i tak odmítne
   # při startu, protože je to stejné jako --dangerously-skip-permissions.
   permission_mode: acceptEdits
-  # Volitelně omez, jaké nástroje smí Claude v této session použít (obecné
-  # jméno nástroje, např. "Bash" nebo "Edit" - ne jednotlivé příkazy).
-  # Prázdný seznam = řídí se to jen jemnějšími allow/deny pravidly níže.
-  allowed_tools: []
+  # Claude potřebuje nástroj Bash, aby placený auditor mohl zavolat
+  # dedicated runtime GUI probe. Konkrétní příkaz dál omezuje per-project
+  # <projekt>/.claude/settings.local.json.
+  allowed_tools:
+    - Bash
   disallowed_tools: []
   # Jemná allow/deny pravidla na úrovni konkrétních příkazů (např.
   # "Bash(git status:*)") orchestrátor nastavuje automaticky za tebe do

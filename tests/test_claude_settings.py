@@ -4,6 +4,7 @@ from pathlib import Path
 from orchestrator.claude_settings import (
     ALLOWED_RULES,
     DENIED_RULES,
+    RUNTIME_GUI_RULES,
     SETTINGS_FILENAME,
     build_settings,
     ensure_project_claude_settings,
@@ -20,6 +21,14 @@ def test_allows_local_python_and_test_runners():
     assert "Bash(python:*)" in ALLOWED_RULES
     assert "Bash(pytest:*)" in ALLOWED_RULES
     assert any(".venv" in rule for rule in ALLOWED_RULES)
+
+
+def test_allows_only_the_dedicated_runtime_gui_probe():
+    assert RUNTIME_GUI_RULES
+    assert set(RUNTIME_GUI_RULES).issubset(set(ALLOWED_RULES))
+    assert all("runtime_gui_probe.ps1" in rule for rule in RUNTIME_GUI_RULES)
+    assert "Bash(powershell:*)" not in ALLOWED_RULES
+    assert "Bash(cmd /c:*)" not in ALLOWED_RULES
 
 
 def test_allows_only_the_non_destructive_git_commands():
@@ -123,7 +132,7 @@ def test_ensure_project_claude_settings_writes_utf8_lf_without_bom(tmp_path: Pat
     assert raw.endswith(b"\n")
 
 
-def test_ensure_project_claude_settings_does_not_overwrite_existing(tmp_path: Path):
+def test_ensure_project_claude_settings_preserves_custom_rules_and_adds_runtime(tmp_path: Path):
     project_dir = tmp_path / "myproj"
     claude_dir = project_dir / ".claude"
     claude_dir.mkdir(parents=True)
@@ -133,7 +142,9 @@ def test_ensure_project_claude_settings_does_not_overwrite_existing(tmp_path: Pa
     ensure_project_claude_settings(project_dir)
 
     content = json.loads(custom.read_text(encoding="utf-8"))
-    assert content == {"permissions": {"allow": ["Bash(npm test:*)"]}}
+    assert "Bash(npm test:*)" in content["permissions"]["allow"]
+    assert set(RUNTIME_GUI_RULES).issubset(set(content["permissions"]["allow"]))
+    assert len(content["permissions"]["allow"]) == 1 + len(RUNTIME_GUI_RULES)
 
 
 def test_ensure_project_claude_settings_creates_missing_project_dir(tmp_path: Path):

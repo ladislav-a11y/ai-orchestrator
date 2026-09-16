@@ -115,7 +115,7 @@ def test_submit_writes_safe_claude_settings_for_new_project(tmp_path):
     assert "Bash(git status:*)" in content["permissions"]["allow"]
 
 
-def test_submit_does_not_overwrite_existing_claude_settings(tmp_path):
+def test_submit_preserves_custom_claude_settings_and_adds_runtime(tmp_path):
     cfg = make_cfg(tmp_path)
     project_dir = tmp_path / "workspace" / "station-agent"
     claude_dir = project_dir / ".claude"
@@ -127,7 +127,8 @@ def test_submit_does_not_overwrite_existing_claude_settings(tmp_path):
     service.submit(project_ref="station-agent", prompt="pokracuj")
 
     content = json.loads(custom_settings.read_text(encoding="utf-8"))
-    assert content == {"permissions": {"allow": ["Bash(npm test:*)"]}}
+    assert "Bash(npm test:*)" in content["permissions"]["allow"]
+    assert any("runtime_gui_probe.ps1" in rule for rule in content["permissions"]["allow"])
 
 
 def test_submit_rejects_direct_provider_selection_in_v2(tmp_path):

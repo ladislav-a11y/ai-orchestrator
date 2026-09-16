@@ -249,6 +249,17 @@ this file, stop and ask - do not silently override safety rules.
      must never turn this condition into a quota wait, fabricate an audit
      verdict, or retry indefinitely.
 
+     The paid Claude Code path must expose the Bash tool at CLI level, but
+     project permissions must grant only the dedicated
+     `orchestrator/runtime_gui_probe.ps1` launcher for live runtime startup.
+     That launcher accepts only an existing entrypoint inside the current
+     project (`.exe`, `.dll`, `.ps1`, `.bat` or `.cmd`); arbitrary PowerShell
+     and cmd commands are not a GUI capability. Existing valid project
+     settings are minimally reconciled with this rule and must not be
+     overwritten. Codex keeps its explicit `workspace-write` sandbox. A
+     capability declaration is not live evidence: the auditor must still
+     report actual process/UI interaction and fail closed when it cannot.
+
 12. **A repeated protocol error must never be allowed to run indefinitely,
     even though it is excluded from the no-progress signature.** Rule 9
     correctly excludes a protocol error from `NO_PROGRESS_LIMIT` (an agent
