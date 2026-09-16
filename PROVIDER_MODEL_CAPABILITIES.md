@@ -1,6 +1,6 @@
 # Autoritativní podklad providerů a modelů pro AI Project Manager
 
-Ověřeno: 2026-09-06
+Ověřeno: 2026-09-16 živým `agy models` a provider refresh probe
 
 Tento dokument je provozní podklad pro výběr přes již implementovaná pole
 `requested_model` a `selection_reason`. Nejde o trvalý seznam názvů modelů: nabídka
@@ -123,6 +123,14 @@ Přiřazení je lokální routingová politika podle providerem deklarované rod
 jedné úrovni není žebříček kvality. Pro `claude-code`, `codex` a `gemini` je prázdná
 ověřená množina záměrný výsledek rešerše, nikoli chybějící údaj: jejich současné CLI
 nedává bezpečný neinvazivní důkaz nabídky pro tento účet.
+
+Aktuální živě potvrzená provozní volba Antigravity je `gemini-3.8-flash-medium`.
+Broker ji má v poznámce `antigravityinfo.json` uloženou jako `selection_mode:
+FORCED`, `selection_source: user`; každý následný běh proto dostane tento přesný
+slug přes `--model`. To je naše deterministická free-tier routingová volba podle
+aktuální nabídky účtu, nikoli obecné tvrzení o ceně modelu. Pokud `agy models` tento
+slug přestane nabízet, broker musí volbu odmítnout nebo ji změnit pouze explicitním
+uživatelským příkazem.
 
 ## Fail-closed rozhodovací pravidla
 

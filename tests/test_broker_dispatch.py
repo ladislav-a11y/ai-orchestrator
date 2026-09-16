@@ -3,12 +3,15 @@ import json
 from pathlib import Path
 
 from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, with_provider_status
-from orchestrator.broker_dispatch import BrokerBackedAgent
+from orchestrator.broker_dispatch import BrokerBackedAgent, _unavailable_result
 from orchestrator.provider_broker import ProviderBroker
 
 
 LANG = {
     "provider": "claude-code",
+    "capability_contract": {
+        "provider_instruction": "Použij ověřený interaktivní GUI kanál."
+    },
     "task_execution_receipt": {
         "prompt_wrapper": "Return exactly one JSON object with answer and model.",
         "response_format": {"required_fields": ["answer", "model"]},
@@ -170,6 +173,30 @@ def test_broker_backed_agent_passes_prepared_json_task_to_provider():
     assert provider.last_request.prompt == prepared_task
     assert provider.last_request.output_schema == task_schema
     assert provider.last_request.receipt_prompt is None
+
+
+def test_broker_dispatch_forwards_required_capabilities_and_lang_instruction():
+    provider = FakeProvider()
+    broker = FakeBroker(provider)
+    agent = BrokerBackedAgent(broker)
+
+    result = agent.run(
+        AgentRunRequest(
+            project_path=Path("."),
+            prompt="Ověř GUI.",
+            required_capabilities=frozenset({"runtime_launch", "interactive_gui"}),
+        )
+    )
+
+    assert result.success is True
+    assert broker.ask_calls[0]["required_capabilities"] == [
+        "interactive_gui",
+        "runtime_launch",
+    ]
+    assert "Použij ověřený interaktivní GUI kanál." in provider.last_request.prompt
+    assert provider.last_request.required_capabilities == frozenset(
+        {"runtime_launch", "interactive_gui"}
+    )
 
 
 def test_broker_backed_agent_keeps_caller_schema_free_of_receipt_wrapper():
@@ -343,6 +370,20 @@ def test_protocol_failover_asks_broker_before_next_autonomous_call():
     assert len(second.run_calls) == 1
     assert broker.ask_calls[0]["exclude_providers"] == ["groq"]
     assert broker.ask_calls[1]["exclude_providers"] == ["groq"]
+
+
+def test_capability_incompatible_offer_is_not_classified_as_limited():
+    result = _unavailable_result(
+        {
+            "state": "NONE_AVAILABLE",
+            "reason": "Žádný provider nepodporuje požadovaný GUI runtime.",
+            "capability_incompatible": True,
+        }
+    )
+
+    assert result.limited is False
+    assert result.unavailable is True
+    assert result.capability_incompatible is True
 
 
 def test_broker_backed_agent_stops_after_five_failed_provider_attempts():

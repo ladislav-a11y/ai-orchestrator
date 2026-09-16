@@ -16,7 +16,12 @@ import logging
 from typing import Any, Optional
 
 from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult
-from orchestrator.model_routing import derive_task_profile, normalize_task_profile, profile_summary
+from orchestrator.model_routing import (
+    derive_task_profile,
+    normalize_capabilities,
+    normalize_task_profile,
+    profile_summary,
+)
 from orchestrator.provider_broker import ProviderBroker
 
 
@@ -67,6 +72,14 @@ def _lang_request(request: AgentRunRequest, offer: Mapping[str, Any]) -> AgentRu
         raise ValueError("lang kontrakt neobsahuje task_execution_receipt.prompt_wrapper.")
 
     prompt = request.prompt
+    capability_contract = lang.get("capability_contract")
+    if isinstance(capability_contract, Mapping) and request.required_capabilities:
+        provider_instruction = capability_contract.get("provider_instruction")
+        if isinstance(provider_instruction, str) and provider_instruction.strip():
+            prompt = (
+                f"{prompt}\n\n---\nProvider capability/runtime contract:\n"
+                f"{provider_instruction.strip()}"
+            )
     # A caller-owned structured output contract is authoritative for that
     # operation.  The generic answer/model receipt cannot be appended to it:
     # Inbox planning, for example, must return the top-level ``tasks`` object
@@ -117,12 +130,14 @@ def _lang_request(request: AgentRunRequest, offer: Mapping[str, Any]) -> AgentRu
 def _unavailable_result(offer: Mapping[str, Any]) -> AgentRunResult:
     state = str(offer.get("state") or "UNKNOWN").upper()
     reason = str(offer.get("reason") or f"Broker nenabídl dostupného providera: {state}.")
+    capability_incompatible = bool(offer.get("capability_incompatible"))
     return AgentRunResult(
         success=False,
         output_text="",
         error=reason,
-        limited=state in {"LIMITED", "NONE_AVAILABLE"},
-        unavailable=state == "UNAVAILABLE",
+        limited=state in {"LIMITED", "NONE_AVAILABLE"} and not capability_incompatible,
+        unavailable=state == "UNAVAILABLE" or capability_incompatible,
+        capability_incompatible=capability_incompatible,
         retry_after_seconds=offer.get("retry_after_seconds"),
     )
 
@@ -138,6 +153,7 @@ class BrokerBackedAgent(Agent):
         self.active_provider_name: Optional[str] = None
         self._provider_statuses: dict[str, dict[str, Any]] = {}
         self._next_dispatch_exclusions: set[str] = set()
+        self._active_required_capabilities: frozenset[str] = frozenset()
 
     def is_available(self) -> tuple[bool, str]:
         return True, "Brokerová dispatch vrstva je připravená."
@@ -151,6 +167,8 @@ class BrokerBackedAgent(Agent):
         task_profile = normalize_task_profile(request.task_profile)
         if not task_profile:
             task_profile = derive_task_profile(request.prompt)
+        required_capabilities = normalize_capabilities(request.required_capabilities)
+        self._active_required_capabilities = required_capabilities
         self.logger.info(
             "v2 broker-provider dispatch start caller=%s source=%s reason=%s task_profile=%s broker_action=select_provider",
             caller,
@@ -176,9 +194,14 @@ class BrokerBackedAgent(Agent):
                     "command": "select_provider",
                     "exclude_providers": list(attempted),
                     "task_profile": task_profile,
+                    "required_capabilities": sorted(required_capabilities),
                 }
             elif query == "select_provider":
-                query = {"command": "select_provider", "task_profile": task_profile}
+                query = {
+                    "command": "select_provider",
+                    "task_profile": task_profile,
+                    "required_capabilities": sorted(required_capabilities),
+                }
             response = self.broker.ask(query)
             offer = response.get("offer") if isinstance(response, Mapping) else None
             if not isinstance(offer, Mapping) or offer.get("state") != "AVAILABLE":
@@ -335,6 +358,7 @@ class BrokerBackedAgent(Agent):
             {
                 "command": "select_provider",
                 "exclude_providers": [current],
+                "required_capabilities": sorted(self._active_required_capabilities),
             }
         )
         offer = response.get("offer") if isinstance(response, Mapping) else None

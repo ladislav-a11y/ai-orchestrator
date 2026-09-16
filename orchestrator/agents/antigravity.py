@@ -62,6 +62,7 @@ from orchestrator.agents.base import (
     Agent,
     AgentRunRequest,
     AgentRunResult,
+    REPOSITORY_CAPABILITIES,
     model_from_paths,
     with_provider_status,
 )
@@ -230,6 +231,10 @@ def find_antigravity_cli(explicit_path: str = "") -> tuple[Optional[str], str]:
 
 class AntigravityAgent(Agent):
     name = "antigravity"
+    # agy --print is a headless repository CLI adapter. It has no proven
+    # PowerShell, process-observation, browser, or Windows-desktop channel.
+    # Keep this finite so the broker can fail closed for runtime/GUI work.
+    supported_capabilities = REPOSITORY_CAPABILITIES
 
     def __init__(self, config: AntigravityAgentConfig):
         # Second, independent guard against the same thing config.py's

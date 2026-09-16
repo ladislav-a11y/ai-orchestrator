@@ -21,6 +21,7 @@ from orchestrator.autonomous import (
     _build_iteration_prompt,
     _audit_evidence_has_project_scope,
     _audit_needs_quality_fallback,
+    _audit_required_capabilities,
     _gui_required_for_audit,
     _missing_gui_audit_indices,
     compact_audit_goal,
@@ -2112,6 +2113,20 @@ def test_gui_audit_requires_actual_visible_gui_evidence():
         "1:OK [runtime + statická kontrola GUI] Interaktivní Windows GUI nebylo v prostředí dostupné; nahrazeno runtime harness",
     ]
     assert _missing_gui_audit_indices("Station Agent Windows GUI", dod, evidence) == [0]
+
+
+def test_gui_audit_requires_generic_runtime_and_interactive_gui_capabilities():
+    dod = parse_definition_of_done(
+        "- [ ] Ověřit Windows desktop aplikaci v živém GUI\n"
+        "- [ ] Nezávislý audit vydá accepted / rejected verdikt"
+    )
+
+    required = _audit_required_capabilities("Windows desktop aplikace", dod)
+
+    assert "runtime_launch" in required
+    assert "interactive_gui" in required
+    assert "git_status" in required
+    assert "web_gui" not in required
 
 
 def test_gui_gate_does_not_trigger_on_a_negated_gui_mention():

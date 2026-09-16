@@ -4,6 +4,12 @@
   "provider": "groq",
   "adapter": "groq.py",
   "purpose": "Převod společného vstupu AO na Groq API a převod odpovědi zpět do AO.",
+  "capability_contract": {
+    "declared": ["list_files", "read_file", "search_text", "write_file", "replace_text", "git_status", "git_diff"],
+    "unsupported": ["powershell_runtime", "runtime_launch", "process_observation", "web_gui", "windows_desktop_gui", "interactive_gui"],
+    "verification": "Pevná deklarace aktuálního API adaptéru; GUI a složitý interaktivní audit nejsou podporované.",
+    "provider_instruction": "Tento adaptér je repository/API provider. Nehlašuj provedení runtime nebo GUI auditu bez skutečného externího důkazu."
+  },
   "v2_status_contract": {
     "owner": "groq_provider",
     "ao_action": "Provider po vlastním běhu publikuje AgentRunResult.provider_status přes brokerem připojený status sink; AO výsledek brokeru nepředává.",

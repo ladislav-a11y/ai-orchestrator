@@ -15,6 +15,22 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+# Capabilities shared by the repository-oriented CLI agents.  Runtime and
+# GUI capabilities are deliberately absent: they require an explicit
+# provider contract and a live capability verification before dispatch.
+REPOSITORY_CAPABILITIES = frozenset(
+    {
+        "list_files",
+        "read_file",
+        "search_text",
+        "write_file",
+        "replace_text",
+        "git_status",
+        "git_diff",
+    }
+)
+
+
 def model_from_paths(sources: list[dict[str, Any]], paths: list[str]) -> Optional[str]:
     """Return the first provider-reported model found in configured JSON paths."""
     for source in sources:
@@ -268,9 +284,10 @@ class Agent(ABC):
     """Base class for any implementation agent (Claude Code, Codex, ...)."""
 
     name: str = "base-agent"
-    # None means the adapter does not publish a capability contract and the
-    # central failover must not guess. Concrete adapters may publish a finite
-    # set to enable fail-closed preflight checks.
+    # None means the adapter does not publish a capability contract. The
+    # broker treats that as incompatible with any non-empty requirement and
+    # therefore never guesses that an unknown provider can operate a runtime
+    # or GUI.
     supported_capabilities: Optional[frozenset[str]] = None
 
     @abstractmethod

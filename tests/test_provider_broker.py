@@ -426,3 +426,52 @@ def test_named_groq_selection_is_not_overridden_by_automatic_suitability(tmp_pat
     )["offer"]
 
     assert offer["provider"] == "groq"
+
+
+def test_broker_fails_closed_for_gui_when_all_providers_are_headless(tmp_path):
+    catalog = {
+        name: [{"id": f"{name}-one"}]
+        for name in ("groq", "antigravity", "claude-code", "codex")
+    }
+    providers = [FakeProvider(name, catalog[name]) for name in catalog]
+    for provider in providers:
+        provider.supported_capabilities = frozenset({"read_file"})
+    broker = ProviderBroker(
+        providers, info_dir=tmp_path / "info", lang_dir=_lang_dir(tmp_path)
+    )
+    broker.refresh_provider_notes()
+
+    offer = broker.ask(
+        {
+            "command": "select_provider",
+            "required_capabilities": ["read_file", "runtime_launch", "interactive_gui"],
+        }
+    )["offer"]
+
+    assert offer["provider"] is None
+    assert offer["state"] == "NONE_AVAILABLE"
+    assert offer["capability_incompatible"] is True
+    assert "interactive_gui" in offer["reason"]
+
+
+def test_broker_rejects_unknown_capability_contract(tmp_path):
+    catalog = {
+        name: [{"id": f"{name}-one"}]
+        for name in ("groq", "antigravity", "claude-code", "codex")
+    }
+    providers = [FakeProvider(name, catalog[name]) for name in catalog]
+    broker = ProviderBroker(
+        providers, info_dir=tmp_path / "info", lang_dir=_lang_dir(tmp_path)
+    )
+    broker.refresh_provider_notes()
+
+    offer = broker.ask(
+        {
+            "command": "select_provider",
+            "required_capabilities": ["interactive_gui"],
+        }
+    )["offer"]
+
+    assert offer["provider"] is None
+    assert offer["capability_incompatible"] is True
+    assert "nemá deklarovaný capability kontrakt" in offer["reason"]

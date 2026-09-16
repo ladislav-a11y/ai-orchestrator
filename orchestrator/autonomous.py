@@ -1485,6 +1485,23 @@ def _missing_gui_audit_indices(
     ]
 
 
+def _audit_required_capabilities(
+    goal: str, dod_items: list[DoDItem]
+) -> frozenset[str]:
+    """Return the provider capabilities required by this independent audit.
+
+    Repository evidence remains the baseline. A task that requires GUI
+    evidence additionally needs a provider able to launch/observe an actual
+    interactive GUI; a headless CLI or static/runtime harness is not enough.
+    The capability names are intentionally application-agnostic so the same
+    gate covers web applications and Windows desktop executables.
+    """
+    required = set(AUTONOMOUS_AUDIT_CAPABILITIES)
+    if _gui_required_for_audit(goal, dod_items):
+        required.update({"runtime_launch", "interactive_gui"})
+    return frozenset(required)
+
+
 def _audit_evidence_has_project_scope(
     goal: str, project_path: Path, evidence_lines: list[str]
 ) -> bool:
@@ -1568,7 +1585,7 @@ def _run_audit(
             source="autonomous",
             session_id=session_id,
             output_schema=audit_schema,
-            required_capabilities=AUTONOMOUS_AUDIT_CAPABILITIES,
+            required_capabilities=_audit_required_capabilities(goal, dod_items),
         )
     )
     new_session_id = result.session_id or session_id
@@ -1745,7 +1762,7 @@ def _audit_with_repair(
             source="autonomous",
             session_id=new_session_id,
             output_schema=_audit_response_schema(len(dod_items)),
-            required_capabilities=AUTONOMOUS_AUDIT_CAPABILITIES,
+            required_capabilities=_audit_required_capabilities(goal, dod_items),
         )
     )
     repair_usage = _usage_from_result(repair_result, provider, "audit-repair", iteration)

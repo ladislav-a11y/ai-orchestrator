@@ -4,6 +4,12 @@
   "provider": "antigravity",
   "adapter": "antigravity.py",
   "purpose": "Převod společného vstupu AO na neinteraktivní CLI agy a převod odpovědi zpět do AO.",
+  "capability_contract": {
+    "declared": ["list_files", "read_file", "search_text", "write_file", "replace_text", "git_status", "git_diff"],
+    "unsupported": ["powershell_runtime", "runtime_launch", "process_observation", "web_gui", "windows_desktop_gui", "interactive_gui"],
+    "verification": "Pevná deklarace aktuálního headless adaptéru; runtime a GUI se nesmí předpokládat bez samostatného živého capability probe.",
+    "provider_instruction": "Tento adaptér je headless repository CLI. Nehlašuj spuštění procesu, PowerShellu, browseru ani Windows GUI, pokud nebyl předán a úspěšně ověřen odpovídající runtime/GUI capability contract."
+  },
   "v2_status_contract": {
     "owner": "antigravity_provider",
     "ao_action": "Provider po vlastním běhu publikuje AgentRunResult.provider_status přes brokerem připojený status sink; AO výsledek brokeru nepředává.",

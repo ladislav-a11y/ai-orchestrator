@@ -135,6 +135,21 @@ def normalize_task_profile(value: Any) -> dict[str, Any]:
     return result
 
 
+def normalize_capabilities(value: Any) -> frozenset[str]:
+    """Normalize a broker capability requirement without accepting guesses."""
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        values = list(value)
+    else:
+        return frozenset()
+    return frozenset(
+        item.strip()
+        for item in values
+        if isinstance(item, str) and item.strip()
+    )
+
+
 def profile_summary(profile: Mapping[str, Any]) -> str:
     """Stable one-line explanation suitable for logs and broker offers."""
     fields = (

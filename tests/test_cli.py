@@ -20,7 +20,7 @@ import pytest
 
 from orchestrator import cli
 from orchestrator import service as service_module
-from orchestrator.agents.base import Agent, AgentRunResult
+from orchestrator.agents.base import Agent, AgentRunResult, REPOSITORY_CAPABILITIES
 from orchestrator.autonomous import AUDIT_MARKER
 from orchestrator.config import ApiConfig, Config, GitConfig, PathsConfig, ProjectEntry, TestingConfig
 from orchestrator.context_compaction import ContextOverflowError, require_planner_input
@@ -65,6 +65,7 @@ def named_agent(agent_class, name):
     """Give broker test doubles the canonical provider name they represent."""
     agent = agent_class()
     agent.name = name
+    agent.supported_capabilities = REPOSITORY_CAPABILITIES
     return agent
 
 

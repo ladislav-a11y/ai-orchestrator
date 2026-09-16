@@ -197,6 +197,18 @@ this file, stop and ask - do not silently override safety rules.
      loop finishes because Groq Structured Outputs and tool use are separate
      API phases. Tests and commits remain exclusively orchestrator-owned.
 
+11f. **Provider capability contracts are fail-closed and task-specific.**
+     Every adapter that can be selected for a request with
+     `required_capabilities` must publish a finite `supported_capabilities`
+     set matching its `lang*.json` contract. An adapter with an unknown
+     contract must never be offered for such a request. GUI or desktop audit
+     requires both `runtime_launch` and `interactive_gui`; the same generic
+     gate covers web GUI, Windows desktop `.exe` and future runtime types.
+     The broker passes the selected provider's capability/runtime instruction
+     from `lang*.json` only after this gate succeeds. The current Antigravity
+     `agy --print` adapter is headless and therefore must not be offered for
+     GUI audit until a separate live capability probe proves otherwise.
+
 12. **A repeated protocol error must never be allowed to run indefinitely,
     even though it is excluded from the no-progress signature.** Rule 9
     correctly excludes a protocol error from `NO_PROGRESS_LIMIT` (an agent

@@ -33,7 +33,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from orchestrator.model_routing import normalize_task_profile, profile_summary
+from orchestrator.model_routing import (
+    normalize_capabilities,
+    normalize_task_profile,
+    profile_summary,
+)
 
 
 PROVIDER_ORDER = ("groq", "antigravity", "claude-code", "codex")
@@ -204,6 +208,8 @@ class ProviderOffer:
     lang: Optional[dict[str, Any]] = None
     model_selection_reason: Optional[str] = None
     task_profile: Optional[dict[str, Any]] = None
+    required_capabilities: list[str] = field(default_factory=list)
+    capability_incompatible: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -421,6 +427,10 @@ class ProviderBroker:
             self._save_info(info)
             self._log(f"{provider}: {info.state} — {info.reason}")
             return info
+        # A fresh non-limited probe is authoritative. Do not carry a quota
+        # deadline or its explanation from an older LIMITED note into a new
+        # AVAILABLE/UNAVAILABLE/UNKNOWN status.
+        info.retry_at = None
         if isinstance(available, bool) and isinstance(response, str):
             info.state = "AVAILABLE" if available else "UNAVAILABLE"
             info.available_at = info.checked_at if available else None
@@ -748,9 +758,13 @@ class ProviderBroker:
         return model_id, f"catalog task routing: tier={tier}; {profile_summary(task_profile)}"
 
     def _offer(
-        self, info: ProviderInfo, task_profile: Optional[Mapping[str, Any]] = None
+        self,
+        info: ProviderInfo,
+        task_profile: Optional[Mapping[str, Any]] = None,
+        required_capabilities: Any = None,
     ) -> ProviderOffer:
         profile = normalize_task_profile(task_profile)
+        required = normalize_capabilities(required_capabilities)
         if info.state == "AVAILABLE":
             forced = info.selection_mode == "FORCED" and info.selected_model
             task_model = None
@@ -774,6 +788,7 @@ class ProviderBroker:
                     if forced else task_reason
                 ),
                 task_profile=profile or None,
+                required_capabilities=sorted(required),
             )
         return ProviderOffer(
             provider=None,
@@ -784,11 +799,15 @@ class ProviderBroker:
             reason=info.reason or f"Provider není dostupný: {info.state}.",
             info_file=str(self._info_path(info.provider)),
             task_profile=profile or None,
+            required_capabilities=sorted(required),
         )
 
     @staticmethod
     def _provider_suitable_for_task(
-        provider: str, task_profile: Optional[Mapping[str, Any]]
+        provider: str,
+        task_profile: Optional[Mapping[str, Any]],
+        required_capabilities: Any = None,
+        providers: Optional[Mapping[str, Any]] = None,
     ) -> tuple[bool, Optional[str]]:
         """Return whether an AVAILABLE provider should receive this task.
 
@@ -796,6 +815,23 @@ class ProviderBroker:
         Groq Free remains AVAILABLE when AO skips a task that its bounded
         TPM/tool-loop budget is unlikely to handle reliably.
         """
+        required = normalize_capabilities(required_capabilities)
+        if required:
+            provider_object = providers.get(provider) if providers is not None else None
+            supported = getattr(provider_object, "supported_capabilities", None)
+            if supported is None:
+                return (
+                    False,
+                    f"{provider} nemá deklarovaný capability kontrakt; požadavek "
+                    f"{', '.join(sorted(required))} se proto odmítá fail-closed.",
+                )
+            missing = sorted(required - set(supported))
+            if missing:
+                return (
+                    False,
+                    f"{provider} nepodporuje požadované capability: {', '.join(missing)}.",
+                )
+
         profile = normalize_task_profile(task_profile)
         if provider != "groq" or not profile:
             return True, None
@@ -815,19 +851,21 @@ class ProviderBroker:
         infos: Mapping[str, ProviderInfo],
         excluded: set[str] | None = None,
         task_profile: Optional[Mapping[str, Any]] = None,
+        required_capabilities: Any = None,
     ) -> ProviderOffer:
         excluded = excluded or set()
         skipped_for_task: list[str] = []
+        required = normalize_capabilities(required_capabilities)
         for provider in PROVIDER_ORDER:
             if provider in excluded:
                 continue
             info = infos[provider]
             if info.state == "AVAILABLE":
                 suitable, reason = self._provider_suitable_for_task(
-                    provider, task_profile
+                    provider, task_profile, required, self.providers
                 )
                 if suitable:
-                    return self._offer(info, task_profile)
+                    return self._offer(info, task_profile, required)
                 skipped_for_task.append(reason or provider)
         return ProviderOffer(
             provider=None,
@@ -846,12 +884,15 @@ class ProviderBroker:
                     else "Žádný provider nemá stav AVAILABLE."
                 )
             ),
+            required_capabilities=sorted(required),
+            capability_incompatible=bool(required and skipped_for_task),
         )
 
     def select_provider(
         self,
         excluded: set[str] | None = None,
         task_profile: Optional[Mapping[str, Any]] = None,
+        required_capabilities: Any = None,
     ) -> ProviderOffer:
         excluded = excluded or set()
         infos: dict[str, ProviderInfo] = {}
@@ -874,15 +915,20 @@ class ProviderBroker:
             infos[provider] = info
             if provider not in excluded and info.state == "AVAILABLE":
                 suitable, reason = self._provider_suitable_for_task(
-                    provider, task_profile
+                    provider, task_profile, required_capabilities, self.providers
                 )
                 if suitable:
-                    return self._offer(info, task_profile)
+                    return self._offer(info, task_profile, required_capabilities)
                 self._log(reason or f"{provider}: task-level preflight skip")
-        return self._first_available(infos, excluded, task_profile)
+        return self._first_available(
+            infos, excluded, task_profile, required_capabilities
+        )
 
     def select_named_provider(
-        self, provider: str, task_profile: Optional[Mapping[str, Any]] = None
+        self,
+        provider: str,
+        task_profile: Optional[Mapping[str, Any]] = None,
+        required_capabilities: Any = None,
     ) -> ProviderOffer:
         """Return the offer for an explicitly requested provider."""
         if provider not in PROVIDER_ORDER:
@@ -894,7 +940,23 @@ class ProviderBroker:
             or (info.state == "LIMITED" and _retry_due(info.retry_at))
         ):
             info = self._probe(provider)
-        return self._offer(info, task_profile)
+        suitable, reason = self._provider_suitable_for_task(
+            provider, None, required_capabilities, self.providers
+        )
+        if not suitable:
+            required = normalize_capabilities(required_capabilities)
+            return ProviderOffer(
+                provider=None,
+                model=None,
+                model_source=None,
+                selection_mode=info.selection_mode,
+                state="NONE_AVAILABLE",
+                reason=reason or "Provider nesplňuje požadované capability.",
+                info_file=str(self._info_path(provider)),
+                required_capabilities=sorted(required),
+                capability_incompatible=bool(required),
+            )
+        return self._offer(info, task_profile, required_capabilities)
 
     def refresh_provider_notes(self) -> dict[str, Any]:
         infos = {
@@ -983,7 +1045,9 @@ class ProviderBroker:
             command = query.get("command")
             if command == SELECT_PROVIDER_QUERY and query.get("provider"):
                 offer = self.select_named_provider(
-                    str(query.get("provider")), query.get("task_profile")
+                    str(query.get("provider")),
+                    query.get("task_profile"),
+                    query.get("required_capabilities"),
                 )
                 return {
                     "command": SELECT_PROVIDER_QUERY,
@@ -1001,7 +1065,9 @@ class ProviderBroker:
                     "command": SELECT_PROVIDER_QUERY,
                     "order": list(PROVIDER_ORDER),
                     "offer": self.select_provider(
-                        excluded=excluded, task_profile=query.get("task_profile")
+                        excluded=excluded,
+                        task_profile=query.get("task_profile"),
+                        required_capabilities=query.get("required_capabilities"),
                     ).to_dict(),
                 }
             if command == SET_PROVIDER_MODEL_QUERY:
