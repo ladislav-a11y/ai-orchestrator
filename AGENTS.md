@@ -356,7 +356,10 @@ this file, stop and ask - do not silently override safety rules.
     changed by the current task must remain UTF-8 without BOM, LF, without
     trailing whitespace, and without an accidental extra blank line at EOF;
     `git --no-pager diff --check` must be clean for those files before a
-    commit. If the check reports a pre-existing violation in an unrelated
+    commit. The controller may first remove only known generated Debug/Release
+    build artifacts reported under `bin`/`obj`, including staged additions; it
+    must leave unknown or ambiguous paths untouched and fail closed. If the
+    check reports a pre-existing violation in an unrelated
     dirty file, record it as pre-existing and do not silently modify that
     file as part of the current task.
 17. **Tests must use the target repository's real Windows interpreter.** When

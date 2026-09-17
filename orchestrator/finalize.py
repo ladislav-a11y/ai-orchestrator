@@ -73,6 +73,21 @@ def _status_paths(status_output: str) -> list[str]:
     return paths
 
 
+def _status_records(status_output: str) -> list[tuple[str, str, str]]:
+    """Parse porcelain status into index status, worktree status and path."""
+    records = status_output.split("\0") if "\0" in status_output else status_output.splitlines()
+    parsed = []
+    for line in records:
+        if len(line) < 4:
+            continue
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1]
+        if path:
+            parsed.append((line[0], line[1], path.replace("\\", "/")))
+    return parsed
+
+
 def _git_add_paths(project_path: Path, paths: Sequence[str]) -> subprocess.CompletedProcess:
     """Stage explicit paths without putting the whole path list in argv.
 
@@ -92,7 +107,17 @@ def _git_add_paths(project_path: Path, paths: Sequence[str]) -> subprocess.Compl
 
 _TRANSIENT_PATH_COMPONENTS = frozenset({
     "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox",
+    "bin", "obj",
 })
+_BUILD_ARTIFACT_NAMES = frozenset({
+    "project.assets.json",
+    ".nuget.g.props",
+    ".nuget.g.targets",
+})
+_BUILD_ARTIFACT_SUFFIXES = (
+    ".g.cs", ".g.i.cs", ".filelistabsolute.txt", ".dll", ".exe", ".pdb",
+    ".deps.json", ".runtimeconfig.json", ".assets.cache",
+)
 _TRANSIENT_FILE_SUFFIXES = (".pyc", ".pyo", ".tmp", ".temp", ".bak", ".swp")
 _TRANSIENT_ROOT_PREFIXES = (
     "_iter_layout",
@@ -126,6 +151,56 @@ def _transient_paths(paths: Sequence[str]) -> list[str]:
         ):
             transient.append(normalized)
     return transient
+
+
+def _safe_build_artifact_path(relative: str) -> bool:
+    """Return whether a path is a conventional Debug/Release build artifact."""
+    normalized = str(relative).replace("\\", "/")
+    components = [part.casefold() for part in normalized.split("/")]
+    if not {"bin", "obj"}.intersection(components):
+        return False
+    if not {"debug", "release"}.intersection(components):
+        return False
+    name = components[-1]
+    return name in _BUILD_ARTIFACT_NAMES or name.endswith(_BUILD_ARTIFACT_SUFFIXES)
+
+
+def _cleanup_transient_paths(
+    project_path: Path,
+    status_output: str,
+) -> tuple[list[str], Optional[str]]:
+    """Remove only safe, generated build paths reported by Git.
+
+    Agents can accidentally stage build output before the controller sees it.
+    Known Debug/Release output is disposable controller state. Other
+    transient paths remain protected by the normal fail-closed check.
+    """
+    records = _status_records(status_output)
+    transient_records = [
+        (index_status, path)
+        for index_status, _worktree_status, path in records
+        if _safe_build_artifact_path(path)
+    ]
+    if not transient_records:
+        return [], None
+
+    cleaned: list[str] = []
+    for index_status, relative in transient_records:
+        candidate = (project_path / relative).resolve()
+        if candidate == project_path or project_path not in candidate.parents:
+            return cleaned, f"unsafe build cleanup path: {relative}"
+        if index_status not in {" ", "?"}:
+            unstaged = _git(project_path, ["restore", "--staged", "--", relative])
+            if unstaged.returncode != 0:
+                return cleaned, f"could not unstage build artifact {relative}: {unstaged.stderr}"
+        try:
+            if candidate.is_file() or candidate.is_symlink():
+                candidate.unlink()
+            cleaned.append(relative)
+        except OSError as exc:
+            return cleaned, f"could not remove build artifact {relative}: {exc}"
+
+    return cleaned, None
 
 
 def _path_in_scope(path: str, scopes: Sequence[str]) -> bool:
@@ -207,70 +282,99 @@ def finalize_repository(
     head = _git(project_path, ["rev-parse", "HEAD"]).stdout.strip()
     baseline_remaining: list[str] = []
     task_paths_for_proof: list[str] = []
+    cleaned_transient_paths: list[str] = []
     if dirty:
-        dirty_paths = _status_paths(before.stdout)
-        transient_paths = _transient_paths(dirty_paths)
-        if transient_paths:
+        cleaned_transient_paths, cleanup_error = _cleanup_transient_paths(
+            project_path, before.stdout
+        )
+        if cleanup_error:
             return _blocked(
-                "temporary/cache artifacts must be cleaned before controller finalization",
-                dirty_paths=dirty_paths, transient_paths=transient_paths, branch=branch,
+                "controller cleanup of generated build artifacts failed",
+                cleanup_error=cleanup_error, cleaned_transient_paths=cleaned_transient_paths,
+                branch=branch,
             )
-        baseline_paths = [
-            path for path in dirty_paths
-            if _path_in_scope(path, safe_preexisting_paths)
-        ]
-        staged_baseline = [
-            path for line, path in (
-                (line, line[3:].strip().replace("\\", "/"))
-                for line in before.stdout.splitlines()
-                if len(line) >= 4
+        if cleaned_transient_paths:
+            before = _git(
+                project_path,
+                ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
             )
-            if path in baseline_paths and line[0] not in {" ", "?"}
-        ]
-        if staged_baseline:
-            return _blocked(
-                "pre-existing user changes are already staged; refusing to alter their index state",
-                dirty_paths=dirty_paths, preexisting_paths=baseline_paths,
-                staged_preexisting_paths=staged_baseline, branch=branch,
-            )
-        task_dirty_paths = [path for path in dirty_paths if path not in baseline_paths]
-        if explicit_scope:
-            outside_scope = [
-                path for path in task_dirty_paths if not _path_in_scope(path, safe_paths)
-            ]
-            if outside_scope:
+            if before.returncode != 0:
                 return _blocked(
-                    "dirty worktree contains paths outside the explicit finalize scope",
-                    dirty_paths=dirty_paths, outside_scope=outside_scope, branch=branch,
+                    "could not read Git status after transient cleanup",
+                    cleaned_transient_paths=cleaned_transient_paths, branch=branch,
                 )
+            dirty = bool(before.stdout.strip())
+        if not dirty:
+            task_paths_for_proof = []
         else:
-            try:
-                safe_paths = _safe_paths(task_dirty_paths)
-            except ValueError as exc:
-                return _blocked(str(exc), branch=branch)
-        stage_paths = [path for path in task_dirty_paths if _path_in_scope(path, safe_paths)]
-        if not stage_paths:
-            return _blocked(
-                "no current-task changes are available for controller finalization",
-                dirty_paths=dirty_paths, preexisting_paths=baseline_paths, branch=branch,
-            )
-        task_paths_for_proof = list(stage_paths)
-        staged = _git_add_paths(project_path, stage_paths)
-        if staged.returncode != 0:
-            return _blocked(f"git add of explicit finalize paths failed: {staged.stderr}", branch=branch)
-        staged_check = _git(project_path, ["diff", "--cached", "--check"])
-        if staged_check.returncode != 0:
-            return _blocked(
-                "git diff --cached --check failed",
-                staged_diff_check=staged_check.stderr or staged_check.stdout, branch=branch,
-            )
-        summary = goal.strip().splitlines()[0][:72] if goal.strip() else "finalize repository"
-        message = f"{config.git.commit_message_prefix}{summary}\n\nController finalization {run_id}"
-        commit = _git(project_path, ["commit", "-m", message])
-        if commit.returncode != 0:
-            return _blocked(f"controller commit failed: {commit.stderr or commit.stdout}", branch=branch)
-        committed = True
-        head = _git(project_path, ["rev-parse", "HEAD"]).stdout.strip()
+            dirty_paths = _status_paths(before.stdout)
+            transient_paths = _transient_paths(dirty_paths)
+            if transient_paths:
+                return _blocked(
+                    "temporary/cache artifacts must be cleaned before controller finalization",
+                    dirty_paths=dirty_paths, transient_paths=transient_paths,
+                    cleaned_transient_paths=cleaned_transient_paths, branch=branch,
+                )
+            baseline_paths = [
+                path for path in dirty_paths
+                if _path_in_scope(path, safe_preexisting_paths)
+            ]
+            staged_baseline = [
+                path for index_status, _worktree_status, path in _status_records(before.stdout)
+                if path in baseline_paths and index_status not in {" ", "?"}
+            ]
+            if staged_baseline:
+                return _blocked(
+                    "pre-existing user changes are already staged; refusing to alter their index state",
+                    dirty_paths=dirty_paths, preexisting_paths=baseline_paths,
+                    staged_preexisting_paths=staged_baseline, branch=branch,
+                )
+            task_dirty_paths = [path for path in dirty_paths if path not in baseline_paths]
+            if explicit_scope:
+                outside_scope = [
+                    path for path in task_dirty_paths if not _path_in_scope(path, safe_paths)
+                ]
+                if outside_scope:
+                    return _blocked(
+                        "dirty worktree contains paths outside the explicit finalize scope",
+                        dirty_paths=dirty_paths, outside_scope=outside_scope, branch=branch,
+                    )
+            else:
+                try:
+                    safe_paths = _safe_paths(task_dirty_paths)
+                except ValueError as exc:
+                    return _blocked(str(exc), branch=branch)
+            stage_paths = [path for path in task_dirty_paths if _path_in_scope(path, safe_paths)]
+            if not stage_paths:
+                return _blocked(
+                    "no current-task changes are available for controller finalization",
+                    dirty_paths=dirty_paths, preexisting_paths=baseline_paths,
+                    cleaned_transient_paths=cleaned_transient_paths, branch=branch,
+                )
+            task_paths_for_proof = list(stage_paths)
+            staged = _git_add_paths(project_path, stage_paths)
+            if staged.returncode != 0:
+                return _blocked(
+                    f"git add of explicit finalize paths failed: {staged.stderr}",
+                    cleaned_transient_paths=cleaned_transient_paths, branch=branch,
+                )
+            staged_check = _git(project_path, ["diff", "--cached", "--check"])
+            if staged_check.returncode != 0:
+                return _blocked(
+                    "git diff --cached --check failed",
+                    staged_diff_check=staged_check.stderr or staged_check.stdout,
+                    cleaned_transient_paths=cleaned_transient_paths, branch=branch,
+                )
+            summary = goal.strip().splitlines()[0][:72] if goal.strip() else "finalize repository"
+            message = f"{config.git.commit_message_prefix}{summary}\n\nController finalization {run_id}"
+            commit = _git(project_path, ["commit", "-m", message])
+            if commit.returncode != 0:
+                return _blocked(
+                    f"controller commit failed: {commit.stderr or commit.stdout}",
+                    cleaned_transient_paths=cleaned_transient_paths, branch=branch,
+                )
+            committed = True
+            head = _git(project_path, ["rev-parse", "HEAD"]).stdout.strip()
 
     after = _git(
         project_path,
@@ -329,7 +433,7 @@ def finalize_repository(
         tests_passed=True, test_command=selected_test, branch=branch,
         remote=origin or None, pushed=push_requested, remote_commit=remote_head,
         preexisting_paths=baseline_remaining,
-        task_paths=task_paths_for_proof,
+        task_paths=task_paths_for_proof, cleaned_transient_paths=cleaned_transient_paths,
         scope_policy="preexisting paths preserved outside current-task commit",
         run_id=run_id,
     )
