@@ -16,11 +16,11 @@
       "cost_usd": 0
     },
     "claude-sonnet-5": {
-      "input_tokens": 1024,
-      "output_tokens": 246867,
-      "thinking_tokens": 129772,
-      "total_tokens": 247891,
-      "cost_usd": 13.255406800000005
+      "input_tokens": 1276,
+      "output_tokens": 349496,
+      "thinking_tokens": 185479,
+      "total_tokens": 350772,
+      "cost_usd": 17.180229600000004
     },
     "claude-haiku-4-5-20251001, claude-sonnet-5": {
       "input_tokens": 634,
@@ -30,18 +30,18 @@
       "cost_usd": 9.663422599999997
     },
     "claude-haiku-4-5-20251001": {
-      "input_tokens": 30,
-      "output_tokens": 2032,
-      "thinking_tokens": 1337,
-      "total_tokens": 2062,
-      "cost_usd": 0.0789694
+      "input_tokens": 725,
+      "output_tokens": 31180,
+      "thinking_tokens": 11855,
+      "total_tokens": 31905,
+      "cost_usd": 0.8229995
     },
     "claude-opus-5": {
-      "input_tokens": 630,
-      "output_tokens": 213566,
-      "thinking_tokens": 75018,
-      "total_tokens": 214196,
-      "cost_usd": 24.399255499999995
+      "input_tokens": 1704,
+      "output_tokens": 598555,
+      "thinking_tokens": 173690,
+      "total_tokens": 600259,
+      "cost_usd": 61.0713605
     },
     "claude-opus-4-8": {
       "input_tokens": 4,

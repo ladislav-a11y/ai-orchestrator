@@ -2,11 +2,11 @@
   "provider": "claude-code",
   "models": {
     "claude-opus-5": {
-      "input_tokens": 44,
-      "output_tokens": 14505,
-      "thinking_tokens": 7094,
-      "total_tokens": 14549,
-      "cost_usd": 1.2390484999999996
+      "input_tokens": 10,
+      "output_tokens": 4041,
+      "thinking_tokens": 663,
+      "total_tokens": 4051,
+      "cost_usd": 0.444907
     }
   }
 }
