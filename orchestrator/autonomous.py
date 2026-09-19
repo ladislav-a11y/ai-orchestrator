@@ -1572,7 +1572,9 @@ _GUI_NEGATIVE_EVIDENCE_RE = re.compile(
 )
 
 
-_GUI_NEGATION_PREFIX_RE = re.compile(r"\b(?:bez|without|no|not\s+a)\s*$", re.IGNORECASE)
+_GUI_NEGATION_PREFIX_RE = re.compile(
+    r"\b(?:bez|ani|without|no|not\s+a|ne\w*)\s*$", re.IGNORECASE
+)
 
 
 def _gui_required_for_audit(goal: str, dod_items: list[DoDItem]) -> bool:

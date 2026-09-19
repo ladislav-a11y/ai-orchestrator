@@ -2293,6 +2293,16 @@ def test_gui_gate_does_not_trigger_on_a_negated_gui_mention():
     assert _missing_gui_audit_indices("Implementuj DSP stupeň bez GUI", dod, evidence) == []
 
 
+def test_gui_gate_does_not_trigger_on_document_without_gui_scope():
+    dod = parse_definition_of_done(
+        "- [ ] Vytvořit rešeršní dokument; výstup není spustitelný kód ani GUI"
+    )
+
+    assert _gui_required_for_audit(
+        "Vytvořit rešeršní dokument; výstup není spustitelný kód ani GUI", dod
+    ) is False
+
+
 def test_gui_gate_still_triggers_when_an_unrelated_dod_item_negates_gui():
     """A negated mention only cancels itself - an affirmative GUI requirement
     elsewhere in the same goal/DoD text must still be enforced."""
