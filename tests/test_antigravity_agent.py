@@ -319,7 +319,40 @@ def test_run_success_without_response_is_protocol_failure(monkeypatch):
     assert result.output_text == ""
     assert result.raw_response["status"] == "SUCCESS"
     assert "neposkytlo" in result.error
+    assert "exit_code=0" in result.error
+    assert "json_keys=conversation_id,model,response,status,usage" in result.error
+    assert "response_type=str" in result.error
+    assert "response_chars=0" in result.error
+    assert "alternate_fields=none" in result.error
+    assert "usage_output_tokens=0" in result.error
     assert result.total_tokens == 12
+
+
+def test_run_success_without_response_reports_alternate_field_shape_without_content(monkeypatch):
+    agent = AntigravityAgent(make_config())
+    monkeypatch.setattr(agent, "is_available", lambda: (True, "ok"))
+
+    fake_stdout = json.dumps(
+        {
+            "status": "SUCCESS",
+            "result": "secret generated text",
+            "usage": {"output_tokens": 5},
+        }
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=fake_stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = agent.run(AgentRunRequest(project_path=Path("."), prompt="diagnostic request"))
+
+    assert result.success is False
+    assert "response_type=missing" in result.error
+    assert "json_keys=result,status,usage" in result.error
+    assert "alternate_fields=result:str(chars=21)" in result.error
+    assert "usage_output_tokens=5" in result.error
+    assert "secret generated text" not in result.error
 
 
 def test_run_non_success_status_is_a_clear_error(monkeypatch):

@@ -565,6 +565,23 @@ class AntigravityAgent(Agent):
             )
 
         if not response_text.strip():
+            alternate_fields = ("result", "content", "text", "output", "message", "answer")
+            alternate_field_details = []
+            for key in alternate_fields:
+                if key not in raw:
+                    continue
+                value = raw[key]
+                value_type = type(value).__name__
+                value_length = f"(chars={len(value)})" if isinstance(value, str) else ""
+                alternate_field_details.append(f"{key}:{value_type}{value_length}")
+
+            response_type = type(response_value).__name__ if "response" in raw else "missing"
+            response_length = len(response_value) if isinstance(response_value, str) else "n/a"
+            json_keys = ",".join(sorted(str(key) for key in raw))
+            alternate_summary = ",".join(alternate_field_details) or "none"
+            stderr_length = len((proc.stderr or "").strip())
+            output_token_count = usage.get("output_tokens")
+
             return AgentRunResult(
                 success=False,
                 output_text="",
@@ -572,7 +589,11 @@ class AntigravityAgent(Agent):
                 session_id=conversation_id,
                 error=(
                     "Antigravity CLI vrátilo status SUCCESS, ale neposkytlo "
-                    "neprázdné pole response."
+                    "neprázdné pole response "
+                    f"(exit_code={proc.returncode}; json_keys={json_keys}; "
+                    f"response_type={response_type}; response_chars={response_length}; "
+                    f"alternate_fields={alternate_summary}; stderr_chars={stderr_length}; "
+                    f"usage_output_tokens={output_token_count})."
                 ),
                 model=reported_model,
                 model_source=reported_model_source,
