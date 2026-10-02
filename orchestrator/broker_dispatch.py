@@ -118,6 +118,18 @@ def _lang_request(request: AgentRunRequest, offer: Mapping[str, Any]) -> AgentRu
     ):
         prompt = f"{prompt}\n\n---\n{_schema_prompt(output_schema)}"
 
+    # Implementation requests use prose prompts. Keep generated text files
+    # free of trailing whitespace so the controller's `git diff --check`
+    # gate does not reject otherwise complete work. Structured machine-output
+    # requests must remain byte-for-byte shaped by their caller's schema.
+    if request.output_schema is None:
+        prompt = (
+            f"{prompt}\n\n---\n"
+            "Text-file formatting rule: Do not leave trailing spaces or tabs "
+            "at the ends of lines. In Markdown, use paragraph breaks instead "
+            "of trailing spaces for line breaks."
+        )
+
     # The broker's selected model is the only model value forwarded to a
     # provider.  A caller's requested_model cannot override the broker offer.
     selected_model = offer.get("model")

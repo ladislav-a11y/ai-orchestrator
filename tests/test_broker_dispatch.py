@@ -125,6 +125,7 @@ def test_broker_backed_agent_uses_offer_and_logs_dispatch_provenance(caplog):
     assert "provider=claude-code" in messages
     assert "model=claude-opus-4-6" in messages
     assert "Return exactly one JSON object" in provider.last_request.prompt
+    assert "Do not leave trailing spaces or tabs" in provider.last_request.prompt
     assert provider.last_request.output_schema == {
         "type": "object",
         "properties": {"answer": {"type": "string"}, "model": {"type": "string"}},
