@@ -75,6 +75,10 @@ def _lang_request(request: AgentRunRequest, offer: Mapping[str, Any]) -> AgentRu
     capability_contract = lang.get("capability_contract")
     if isinstance(capability_contract, Mapping) and request.required_capabilities:
         provider_instruction = capability_contract.get("provider_instruction")
+        if "interactive_gui" in request.required_capabilities:
+            provider_instruction = capability_contract.get(
+                "gui_audit_instruction", provider_instruction
+            )
         if isinstance(provider_instruction, str) and provider_instruction.strip():
             prompt = (
                 f"{prompt}\n\n---\nProvider capability/runtime contract:\n"

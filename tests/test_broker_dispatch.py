@@ -2,8 +2,10 @@ import logging
 import json
 from pathlib import Path
 
+import pytest
+
 from orchestrator.agents.base import Agent, AgentRunRequest, AgentRunResult, with_provider_status
-from orchestrator.broker_dispatch import BrokerBackedAgent, _unavailable_result
+from orchestrator.broker_dispatch import BrokerBackedAgent, _lang_request, _unavailable_result
 from orchestrator.provider_broker import ProviderBroker
 
 
@@ -197,6 +199,33 @@ def test_broker_dispatch_forwards_required_capabilities_and_lang_instruction():
     assert provider.last_request.required_capabilities == frozenset(
         {"runtime_launch", "interactive_gui"}
     )
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude-code"])
+@pytest.mark.parametrize("kind", ["research", "implementation", "static_audit", "gui_audit"])
+def test_real_lang_gui_instruction_is_scoped_to_gui_capability(provider, kind):
+    lang_path = Path(__file__).resolve().parents[1] / "orchestrator" / "agents" / f"lang{provider}.json"
+    lang = json.loads(lang_path.read_text(encoding="utf-8"))
+    capabilities = {
+        "research": {"read_file", "write_file"},
+        "implementation": {"read_file", "write_file", "replace_text"},
+        "static_audit": {"read_file", "git_diff"},
+        "gui_audit": {"read_file", "runtime_launch", "interactive_gui"},
+    }[kind]
+    request = AgentRunRequest(
+        project_path=Path("."),
+        prompt="Create the research matrix." if kind == "research" else kind,
+        required_capabilities=frozenset(capabilities),
+    )
+
+    translated = _lang_request(request, {"lang": lang})
+
+    instruction = lang["capability_contract"]["gui_audit_instruction"]
+    assert (instruction in translated.prompt) is (kind == "gui_audit")
+    assert translated.required_capabilities == request.required_capabilities
+    if kind != "gui_audit":
+        assert "Nic v cílovém repozitáři neměň." not in translated.prompt
+        assert "Pro GUI/web audit" not in translated.prompt
 
 
 def test_broker_backed_agent_keeps_caller_schema_free_of_receipt_wrapper():

@@ -47,6 +47,57 @@ def _lang_dir(tmp_path: Path) -> Path:
     return directory
 
 
+def test_disabled_provider_is_never_probed_selected_or_refreshed_even_with_cached_forced_model(tmp_path):
+    calls = []
+
+    class DisabledProvider(FakeProvider):
+        def probe_identity(self):
+            calls.append("probe")
+            return super().probe_identity()
+
+        def list_models(self):
+            calls.append("catalog")
+            return super().list_models()
+
+    names = ("groq", "antigravity", "claude-code", "codex")
+    providers = [
+        (DisabledProvider if name == "claude-code" else FakeProvider)(
+            name, [{"id": f"{name}-one"}]
+        )
+        for name in names
+    ]
+    broker = ProviderBroker(
+        providers, info_dir=tmp_path / "info", lang_dir=_lang_dir(tmp_path),
+        disabled_providers=["claude-code"],
+    )
+    broker.info_dir.mkdir()
+    cached = broker.info_dir / "claude-codeinfo.json"
+    cached.write_text(json.dumps({
+        "provider": "claude-code", "state": "AVAILABLE",
+        "selection_mode": "FORCED", "selected_model": "paid-model",
+    }), encoding="utf-8")
+    before = cached.read_bytes()
+
+    assert broker.select_named_provider("claude-code").provider is None
+    assert broker.select_provider(excluded={"groq", "antigravity", "codex"}).provider is None
+    receipt = broker.refresh_provider_notes()
+    assert receipt["providers"]["claude-code"]["state"] == "UNAVAILABLE"
+    assert "disabled_providers" in receipt["providers"]["claude-code"]["reason"]
+    assert cached.read_bytes() == before
+    assert calls == []
+
+
+def test_build_broker_applies_disabled_providers_from_config(tmp_path):
+    from orchestrator.config import Config, PathsConfig
+
+    config = Config(disabled_providers=["claude-code"], paths=PathsConfig(data=str(tmp_path)))
+    broker = provider_broker_module.build_provider_broker(
+        config, agent_builder=lambda name, _config: FakeProvider(name, [{"id": name}])
+    )
+    assert broker.disabled_providers == frozenset({"claude-code"})
+    assert broker.select_named_provider("claude-code").provider is None
+
+
 def test_refresh_stores_and_compares_catalog_without_writing_models_to_lang(tmp_path):
     catalog = {name: [{"id": f"{name}-one"}] for name in ("groq", "antigravity", "claude-code", "codex")}
     providers = [FakeProvider(name, catalog[name]) for name in catalog]

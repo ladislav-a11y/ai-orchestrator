@@ -7,6 +7,9 @@
 # Který agent se použije, pokud úkol žádný nevybere výslovně.
 default_agent: claude-code
 
+# Explicitne vypnuti provideri se neprobuji ani nenabizeji brokerem.
+disabled_providers: []
+
 # Pořadí providerů pro automatický režim / failover (pokud není zadán explicitní --agent).
 # Orchestrátor zkusí providery v tomto pořadí a při vyčerpání kvóty (LIMITED) nebo
 # nedostupnosti CLI automaticky přepne na dalšího.

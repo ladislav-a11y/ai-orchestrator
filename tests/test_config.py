@@ -9,6 +9,20 @@ EXAMPLE = Path(__file__).resolve().parent.parent / "config" / "config.example.ya
 PRODUCTION = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
 
 
+@pytest.mark.parametrize("value", ["claude-code", ["typo"], [None], None])
+def test_invalid_disabled_providers_rejected(tmp_path, value):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"disabled_providers": value}), encoding="utf-8")
+    with pytest.raises(ValueError, match="disabled_providers"):
+        load_config(path, create_if_missing=False)
+
+
+def test_disabled_providers_loaded(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("disabled_providers: [claude-code]\n", encoding="utf-8")
+    assert load_config(path, create_if_missing=False).disabled_providers == ["claude-code"]
+
+
 def test_load_example_config():
     cfg = load_config(EXAMPLE, create_if_missing=False)
     assert cfg.default_agent == "claude-code"

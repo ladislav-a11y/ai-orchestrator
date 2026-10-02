@@ -193,6 +193,7 @@ class PathsConfig:
 class Config:
     default_agent: str = "claude-code"
     provider_order: list[str] = field(default_factory=lambda: list(DEFAULT_PROVIDER_ORDER))
+    disabled_providers: list[str] = field(default_factory=list)
     projects: dict[str, ProjectEntry] = field(default_factory=dict)
     claude_code: ClaudeCodeAgentConfig = field(default_factory=ClaudeCodeAgentConfig)
     antigravity: AntigravityAgentConfig = field(default_factory=AntigravityAgentConfig)
@@ -502,9 +503,17 @@ def load_config(path: Optional[Path] = None, create_if_missing: bool = True) -> 
                 f"Podporovaní provideři jsou: {', '.join(AVAILABLE_AGENTS)}."
             )
 
+    disabled_providers = raw.get("disabled_providers", [])
+    if (
+        not isinstance(disabled_providers, list)
+        or any(not isinstance(name, str) or name not in AVAILABLE_AGENTS for name in disabled_providers)
+    ):
+        raise ValueError("disabled_providers musí být seznam podporovaných názvů providerů.")
+
     config = Config(
         default_agent=raw.get("default_agent", "claude-code"),
         provider_order=provider_order,
+        disabled_providers=disabled_providers,
         projects=projects,
         claude_code=claude_code,
         antigravity=antigravity,

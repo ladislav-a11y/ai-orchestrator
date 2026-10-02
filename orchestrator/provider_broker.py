@@ -225,12 +225,16 @@ class ProviderBroker:
         info_dir: Path | str = Path("data") / "provider-info",
         logger: Optional[Any] = None,
         lang_dir: Path | str = Path("orchestrator") / "agents",
+        disabled_providers: tuple[str, ...] | list[str] = (),
     ) -> None:
         by_name = {provider.name: provider for provider in providers}
         missing = [name for name in PROVIDER_ORDER if name not in by_name]
         if missing:
             raise ValueError(f"Chybí provideři brokeru: {', '.join(missing)}")
         self.providers = by_name
+        self.disabled_providers = frozenset(disabled_providers)
+        if not self.disabled_providers.issubset(PROVIDER_ORDER):
+            raise ValueError("disabled_providers obsahuje nepodporovaného providera.")
         for provider_name, provider in by_name.items():
             def publish(result: Any, selected_provider: str = provider_name) -> None:
                 self.report_provider_result(selected_provider, result)
@@ -282,7 +286,16 @@ class ProviderBroker:
         )
         temporary.replace(path)
 
+    def _disabled_info(self, provider: str) -> ProviderInfo:
+        return ProviderInfo(
+            provider=provider,
+            state="UNAVAILABLE",
+            reason="Provider je vypnutý v konfiguraci AO (disabled_providers).",
+        )
+
     def _load_info(self, provider: str) -> tuple[ProviderInfo, bool]:
+        if provider in self.disabled_providers:
+            return self._disabled_info(provider), True
         path = self._info_path(provider)
         if not path.is_file():
             return ProviderInfo(provider=provider, model=self.models.get(provider)), False
@@ -366,6 +379,8 @@ class ProviderBroker:
         return info
 
     def _probe(self, provider: str) -> ProviderInfo:
+        if provider in self.disabled_providers:
+            return self._disabled_info(provider)
         try:
             identity_probe = getattr(self.providers[provider], "probe_identity", None)
             if callable(identity_probe):
@@ -629,6 +644,8 @@ class ProviderBroker:
         }, None
 
     def _refresh_model_catalog(self, provider: str, info: ProviderInfo) -> ProviderInfo:
+        if provider in self.disabled_providers:
+            return self._disabled_info(provider)
         previous = info.model_catalog
         checked_at = _now()
         result, api_error = self._list_models_from_broker_api(provider)
@@ -1129,4 +1146,5 @@ def build_provider_broker(
         info_dir=Path(config.data_dir) / "provider-info",
         logger=logger,
         lang_dir=Path(__file__).with_name("agents"),
+        disabled_providers=config.disabled_providers,
     )
