@@ -468,6 +468,28 @@ def test_audit_prompt_explains_controller_owned_final_gate():
     assert "accepted=true" in prompt
 
 
+def test_audit_prompt_directs_python_runtime_to_prepared_project_interpreter():
+    dod = parse_definition_of_done("- [x] Spustit webovou aplikaci")
+    python = r"C:\AIProjectManager\test-venvs\project-hash\Scripts\python.exe"
+
+    prompt = _build_audit_prompt(
+        "cil", dod, "(čisté)", "python -m pytest -q", True, "8 passed",
+        test_python=python,
+    )
+
+    assert python in prompt
+    assert "Nepoužívej obecné `python`" in prompt
+
+
+def test_audit_prompt_allows_disposable_runtime_data_outside_checkout():
+    dod = parse_definition_of_done("- [x] Ověřit živé vytvoření a zachování dat")
+    prompt = _build_audit_prompt("cil", dod, "(čisté)", None, None, None)
+
+    assert "dočasná data vytvořená auditorem mimo checkout" in prompt
+    assert "skutečnou databázi, bez mocku" in prompt
+    assert "a kanonická uživatelská data" in prompt
+
+
 def test_controller_owned_audit_gate_does_not_repeat_executor(tmp_path):
     requests = []
 

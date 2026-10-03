@@ -117,7 +117,7 @@ from orchestrator.git_utils import (
     remote_branch_head,
     status_porcelain,
 )
-from orchestrator.runner import run_test_command, tail_text
+from orchestrator.runner import project_test_python, run_test_command, tail_text
 from orchestrator.runtime_verification import RuntimeCheckResult, run_runtime_check
 
 DEFAULT_MAX_ITERATIONS = 10
@@ -1180,6 +1180,7 @@ def _build_audit_prompt(
     test_output: Optional[str],
     finalization: Optional[dict] = None,
     runtime_evidence: Optional[str] = None,
+    test_python: Optional[str] = None,
 ) -> str:
     """Independent verification prompt, only ever sent once the executor
     claims every DoD item is done and the orchestrator's own test run
@@ -1224,6 +1225,16 @@ def _build_audit_prompt(
         lines += ["", f"Výsledek testů ({test_command}) ověřený orchestrátorem (ne agentem): {result_label}"]
         if test_output:
             lines += ["Výstup testů:", tail_text(test_output, 1500)]
+
+    if test_python:
+        lines += [
+            "",
+            "Projektové Python prostředí připravené controllerem:",
+            f"Použij pro live/runtime ověření tento interpreter: `{test_python}`.",
+            "Při spuštění uživatelského entrypointu použij tento interpreter přímo "
+            "nebo jeho Scripts/bin složku dej před systémový Python do PATH. "
+            "Nepoužívej obecné `python`, protože by mohlo ukazovat na prostředí AO.",
+        ]
 
     if runtime_evidence:
         lines += [
@@ -1284,6 +1295,15 @@ def _build_audit_prompt(
         "režim na mock, pokud to zadání výslovně nepožaduje. Ověř také skutečnou externí "
         "závislost potřebnou pro live scénář; pokud není dostupná, uveď runtime: "
         "nedostupné a accepted=false, místo náhradního mock důkazu.",
+        "Read-only audit zakazuje upravovat checkout a kanonická uživatelská data, "
+        "ne však dočasná data vytvořená auditorem mimo checkout. Pokud live CRUD, upload "
+        "nebo restartový scénář zapisuje do výchozí databáze, použij dokumentovaný "
+        "konfigurační mechanismus aplikace k nastavení unikátního dočasného datového "
+        "adresáře mimo checkout; stále spusť stejný veřejný entrypoint, skutečnou aplikaci "
+        "a její skutečnou databázi, bez mocku. Ověř vytvoření, úpravu, archivaci, souborový "
+        "upload a zachování dat po restartu podle DoD. Aplikaci zastav a odstraň pouze "
+        "dočasný adresář, který audit sám vytvořil. Nikdy nepřesměrovávej data, pokud DoD "
+        "výslovně vyžaduje ověřit existující uživatelský stav.",
     ]
     if _gui_required_for_audit(goal, dod_items):
         lines += [
@@ -1733,9 +1753,11 @@ def _run_audit(
             original_goal_length,
             len(goal),
         )
+    audit_test_python = project_test_python(project_path)
     prompt = _build_audit_prompt(
         goal, dod_items, project_status, test_command, tests_passed, test_output,
         finalization, runtime_evidence,
+        str(audit_test_python) if audit_test_python else None,
     )
     logger.info(
         "Autonomní běh %s: iterace %s - všechny body tvrzeny jako splněné, spouštím nezávislý "

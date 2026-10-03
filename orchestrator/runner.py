@@ -6,6 +6,7 @@ it has no knowledge of the CLI, the API, or how the task was submitted.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import subprocess
@@ -19,11 +20,126 @@ from orchestrator.models import Task, TaskStatus
 from orchestrator.queue import TaskQueue
 
 TEST_TIMEOUT_SECONDS = 900
+TEST_ENV_SETUP_TIMEOUT_SECONDS = 900
 MAX_LOG_TAIL_CHARS = 6000
 
 
 def tail_text(text: str, limit: int = MAX_LOG_TAIL_CHARS) -> str:
     return text if len(text) <= limit else text[-limit:]
+
+
+def _project_venv_paths(project_path: Path) -> tuple[Path, Path]:
+    """Return the local venv if present, otherwise the managed external one.
+
+    Generated projects often include a requirements.txt but no pre-created
+    virtual environment. Keeping managed environments outside the checkout
+    prevents the controller finalizer from ever staging interpreter files.
+    """
+    local_venv = project_path / ".venv"
+    if local_venv.exists():
+        venv_path = local_venv
+    else:
+        configured_root = os.environ.get("AI_ORCHESTRATOR_TEST_VENV_ROOT", "").strip()
+        if configured_root:
+            root = Path(configured_root).expanduser()
+        elif os.environ.get("LOCALAPPDATA", "").strip():
+            root = (
+                Path(os.environ["LOCALAPPDATA"])
+                / "AIProjectManager"
+                / "test-venvs"
+            )
+        else:
+            cache_root = Path(
+                os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))
+            )
+            root = cache_root / "ai-orchestrator" / "test-venvs"
+        identity = str(project_path.resolve()).casefold().encode("utf-8")
+        venv_path = root / hashlib.sha256(identity).hexdigest()[:24]
+
+    if os.name == "nt":
+        python_path = venv_path / "Scripts" / "python.exe"
+    else:
+        python_path = venv_path / "bin" / "python"
+    return venv_path, python_path
+
+
+def project_test_python(project_path: Path) -> Path | None:
+    """Return the prepared interpreter for a project's declared dependencies."""
+    _venv_path, python_path = _project_venv_paths(project_path)
+    return python_path if python_path.is_file() else None
+
+
+def _prepare_project_test_environment(
+    project_path: Path, logger: logging.Logger
+) -> tuple[Path | None, str | None]:
+    """Provision requirements.txt into an isolated project test environment.
+
+    Projects without requirements.txt retain the legacy runner environment.
+    Python projects that declare dependencies never silently borrow the
+    orchestrator's packages: a managed venv is created when needed and the
+    declared requirements are synchronized before each test run.
+    """
+    requirements = project_path / "requirements.txt"
+    if not requirements.is_file():
+        return None, None
+
+    venv_path, python_path = _project_venv_paths(project_path)
+    if not python_path.is_file():
+        logger.info("Připravuji izolované testovací prostředí: %s", venv_path)
+        try:
+            created = subprocess.run(
+                [sys.executable, "-m", "venv", str(venv_path)],
+                cwd=str(project_path),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=TEST_ENV_SETUP_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, f"Virtuální prostředí projektu se nepodařilo vytvořit: {exc}"
+        if created.returncode != 0 or not python_path.is_file():
+            output = (created.stdout or "") + (
+                "\n" + created.stderr if created.stderr else ""
+            )
+            return None, (
+                "Virtuální prostředí projektu se nepodařilo vytvořit.\n"
+                + output.strip()
+            )
+
+    install_env = os.environ.copy()
+    scripts_path = str(python_path.parent)
+    install_env["PATH"] = os.pathsep.join(
+        [scripts_path, install_env.get("PATH", "")]
+    )
+    logger.info("Synchronizuji projektové závislosti z %s", requirements)
+    try:
+        installed = subprocess.run(
+            [
+                str(python_path),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "-r",
+                str(requirements),
+            ],
+            cwd=str(project_path),
+            env=install_env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=TEST_ENV_SETUP_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"Závislosti projektu se nepodařilo připravit: {exc}"
+    if installed.returncode != 0:
+        output = (installed.stdout or "") + (
+            "\n" + installed.stderr if installed.stderr else ""
+        )
+        return None, "Instalace requirements.txt selhala.\n" + output.strip()
+    return python_path.parent, None
 
 
 def run_test_command(project_path: Path, test_command: str, logger: logging.Logger) -> tuple[bool, str]:
@@ -36,7 +152,12 @@ def run_test_command(project_path: Path, test_command: str, logger: logging.Logg
     """
     logger.info("Spouštím testy: %s", test_command)
     env = os.environ.copy()
-    project_scripts = project_path / ".venv" / "Scripts"
+    project_venv_scripts, setup_error = _prepare_project_test_environment(
+        project_path, logger
+    )
+    if setup_error:
+        return False, setup_error
+    project_scripts = project_venv_scripts or (project_path / ".venv" / "Scripts")
     interpreter_scripts = Path(sys.executable).resolve().parent
     # Test commands are part of the target project's contract.  On Windows
     # the project interpreter must win over the system Python or WindowsApps

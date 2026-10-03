@@ -1,13 +1,49 @@
 import logging
+import os
 from pathlib import Path
+import subprocess
 
 from orchestrator.agents.base import Agent, AgentRunResult
 from orchestrator.config import Config, GitConfig
 from orchestrator.models import TaskStatus
 from orchestrator.queue import TaskQueue, make_task
+from orchestrator import runner
 from orchestrator.runner import run_task
 
 LOGGER = logging.getLogger("test")
+
+
+def test_run_test_command_prepares_isolated_requirements_environment(tmp_path, monkeypatch):
+    (tmp_path / "requirements.txt").write_text("python-multipart>=0.0.6\n", encoding="utf-8")
+    venv_root = tmp_path.parent / "managed-test-venvs"
+    monkeypatch.setenv("AI_ORCHESTRATOR_TEST_VENV_ROOT", str(venv_root))
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if isinstance(command, list) and command[1:3] == ["-m", "venv"]:
+            venv_path = Path(command[3])
+            scripts = venv_path / ("Scripts" if os.name == "nt" else "bin")
+            scripts.mkdir(parents=True)
+            python = scripts / ("python.exe" if os.name == "nt" else "python")
+            python.write_text("test interpreter", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    passed, output = runner.run_test_command(tmp_path, "python -m pytest -q", LOGGER)
+
+    assert passed is True
+    assert output == "ok"
+    assert len(calls) == 3
+    assert calls[0][0][1:3] == ["-m", "venv"]
+    assert calls[1][0][1:5] == [
+        "-m", "pip", "install", "--disable-pip-version-check"
+    ]
+    assert calls[2][0] == "python -m pytest -q"
+    venv_scripts = str(Path(calls[0][0][3]) / ("Scripts" if os.name == "nt" else "bin"))
+    assert calls[1][1]["env"]["PATH"].split(os.pathsep)[0] == venv_scripts
+    assert calls[2][1]["env"]["PATH"].split(os.pathsep)[0] == venv_scripts
 
 
 class FakeAgent(Agent):
